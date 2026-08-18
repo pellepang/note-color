@@ -7,7 +7,8 @@ mic or system-output loopback -> AudioCapture (callback thread)
 
 GUI controls: Esc/close window to quit, F to toggle fullscreen, D to toggle
 debug overlay, Up/Down to adjust pitch-detection sensitivity.
-Terminal mode: Ctrl+C to quit, Up/Down for sensitivity. No display server required.
+Terminal mode: Ctrl+C to quit, Up/Down for sensitivity, M to toggle the
+audio source (mic <-> loopback) live. No display server required.
 """
 
 import argparse
@@ -38,6 +39,17 @@ except ImportError:  # Windows has neither module
 SENSITIVITY_STEP = 1.25
 SENSITIVITY_MIN = 0.1
 SENSITIVITY_MAX = 10.0
+
+
+class SourceState:
+    """Shared between the render thread (owns the 'm' hotkey and the
+    AudioCapture) and the status line (reads .value, .error every frame).
+    Only the render thread ever writes it, so plain attribute access is
+    fine, same rationale as Sensitivity."""
+
+    def __init__(self, value):
+        self.value = value
+        self.error = None
 
 
 class Sensitivity:
@@ -101,6 +113,24 @@ def _handle_sensitivity_key(key, sensitivity):
         sensitivity.adjust(SENSITIVITY_STEP)
 
 
+def _handle_source_key(key, capture, source_state):
+    if key is None or key.lower() != "m":
+        return
+    new_source = "loopback" if source_state.value == "mic" else "mic"
+    try:
+        if new_source == "loopback":
+            device = resolve_loopback_device()
+        else:
+            os.environ.pop("PULSE_SOURCE", None)
+            device = None
+    except RuntimeError as exc:
+        source_state.error = str(exc)
+        return
+    capture.restart(device)
+    source_state.value = new_source
+    source_state.error = None
+
+
 def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
@@ -144,13 +174,18 @@ def _overwrite(q, item):
         pass
 
 
-def _status_text(label, freq, confidence, rms, sensitivity):
+def _status_text(label, freq, confidence, rms, sensitivity, source_state=None):
     freq_str = f"{freq:6.1f}Hz" if freq else "  --  "
-    return (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
+    text = (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
             f"sens={sensitivity.value:.2f} (up/down)")
+    if source_state is not None:
+        text += f"  src={source_state.value} (m)"
+        if source_state.error:
+            text += f"  [source switch failed: {source_state.error}]"
+    return text
 
 
-def run_terminal_fill(result_queue, sensitivity):
+def run_terminal_fill(result_queue, sensitivity, capture, source_state):
     from terminal_display import TerminalDisplay
 
     display = TerminalDisplay(fps=config.TERMINAL_FPS)
@@ -162,7 +197,9 @@ def run_terminal_fill(result_queue, sensitivity):
 
     try:
         while True:
-            _handle_sensitivity_key(keys.poll(), sensitivity)
+            key = keys.poll()
+            _handle_sensitivity_key(key, sensitivity)
+            _handle_source_key(key, capture, source_state)
             try:
                 (target_rgb, is_onset, label, freq, confidence, rms,
                  _fifths_idx, _pitch_class, _octave) = result_queue.get_nowait()
@@ -170,7 +207,7 @@ def run_terminal_fill(result_queue, sensitivity):
                 is_onset = False
 
             rgb = animator.update(dt, target_rgb, is_onset)
-            status = _status_text(label, freq, confidence, rms, sensitivity) + "  (Ctrl+C to quit)"
+            status = _status_text(label, freq, confidence, rms, sensitivity, source_state) + "  (Ctrl+C to quit)"
             display.render(rgb, status)
             time.sleep(dt)
     except KeyboardInterrupt:
@@ -180,7 +217,7 @@ def run_terminal_fill(result_queue, sensitivity):
         display.quit()
 
 
-def run_terminal_wheel(result_queue, sensitivity):
+def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
     from terminal_wheel_display import WheelDisplay
 
     display = WheelDisplay(fps=config.WHEEL_FPS)
@@ -194,7 +231,9 @@ def run_terminal_wheel(result_queue, sensitivity):
 
     try:
         while True:
-            _handle_sensitivity_key(keys.poll(), sensitivity)
+            key = keys.poll()
+            _handle_sensitivity_key(key, sensitivity)
+            _handle_source_key(key, capture, source_state)
             is_onset = False
             try:
                 (_target_rgb, is_onset, label, freq, confidence, rms,
@@ -203,7 +242,7 @@ def run_terminal_wheel(result_queue, sensitivity):
                 pass
 
             pulse = 1.0 if is_onset else pulse * math.exp(-dt / pulse_decay)
-            status = _status_text(label, freq, confidence, rms, sensitivity) + "  (Ctrl+C to quit)"
+            status = _status_text(label, freq, confidence, rms, sensitivity, source_state) + "  (Ctrl+C to quit)"
             display.render(active_index, pulse, status)
             time.sleep(dt)
     except KeyboardInterrupt:
@@ -239,7 +278,7 @@ def _tab_note_label(pitch_class, octave):
     return f"{NOTE_NAMES_FIFTHS[pitch_class]}{octave}"
 
 
-def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity):
+def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state):
     from terminal_tab_display import TabDisplay
 
     display = TabDisplay(fps=config.TAB_FPS)
@@ -258,7 +297,9 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity):
 
     try:
         while True:
-            _handle_sensitivity_key(keys.poll(), sensitivity)
+            key = keys.poll()
+            _handle_sensitivity_key(key, sensitivity)
+            _handle_source_key(key, capture, source_state)
             got_new = False
             is_onset = False
             try:
@@ -280,7 +321,8 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity):
                     time_since_tick -= fix_interval
                     display.push(pitch_class, octave, glyph_rgb, tab_label)
 
-            status = _status_text(tab_label, freq, confidence, rms, sensitivity) + f"  [{scroll_mode}] (Ctrl+C to quit)"
+            status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
+                      + f"  [{scroll_mode}] (Ctrl+C to quit)")
             display.render(status)
             time.sleep(dt)
     except KeyboardInterrupt:
@@ -380,6 +422,7 @@ def main():
     result_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
     sensitivity = Sensitivity(args.sensitivity)
+    source_state = SourceState(args.source)
     analysis_thread = threading.Thread(
         target=analysis_loop, args=(capture, result_queue, stop_event, args.color_scheme, sensitivity), daemon=True
     )
@@ -388,11 +431,11 @@ def main():
     try:
         if args.terminal:
             if args.view == "wheel":
-                run_terminal_wheel(result_queue, sensitivity)
+                run_terminal_wheel(result_queue, sensitivity, capture, source_state)
             elif args.view == "tab":
-                run_terminal_tab(result_queue, args.scroll, args.dump_file, sensitivity)
+                run_terminal_tab(result_queue, args.scroll, args.dump_file, sensitivity, capture, source_state)
             else:
-                run_terminal_fill(result_queue, sensitivity)
+                run_terminal_fill(result_queue, sensitivity, capture, source_state)
         else:
             run_gui(result_queue, args.fullscreen, args.debug, sensitivity)
     finally:

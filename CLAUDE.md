@@ -83,16 +83,22 @@ file next to `main.py` on quit (override with `--dump-file PATH`).
 
 GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay,
 `Up`/`Down` decrease/increase pitch sensitivity. Terminal modes: `Ctrl+C` to
-quit, `Up`/`Down` sensitivity (needs a real TTY; no-op otherwise, e.g. piped
-input). `--sensitivity FLOAT` sets the starting value (default 1.0); raises
-it to register quieter/softer playing more readily. Current value shown in
-the status line (`sens=`).
+quit, `Up`/`Down` sensitivity, `M` toggle audio source live (needs a real
+TTY; no-op otherwise, e.g. piped input). `--sensitivity FLOAT` sets the
+starting value (default 1.0); raises it to register quieter/softer playing
+more readily. Current value shown in the status line (`sens=`).
 
 `--source {mic,loopback}` (default `mic`) selects the input: `loopback`
 listens to the computer's own audio output instead of the microphone, via
 the PipeWire/PulseAudio monitor of the default sink (Linux only — errors
 out clearly on other platforms). Useful for testing without playing sound
 out loud; confirmed to keep working even while the output sink is muted.
+In any terminal mode, `M` toggles live between `mic` and `loopback` without
+restarting the process (`AudioCapture.restart()` tears down and reopens the
+PortAudio stream on the same queue, so the analysis thread is undisturbed
+apart from a ~100ms gap during the switch); current source shown in the
+status line (`src=`), with a failed switch (e.g. `pactl` unavailable)
+reported inline there instead of crashing.
 
 ## Key design decisions
 

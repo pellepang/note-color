@@ -82,5 +82,15 @@ class AudioCapture:
             self.stream.stop()
             self.stream.close()
 
+    def restart(self, device):
+        """Swap the input device (e.g. mic <-> loopback monitor) without
+        touching self.q, so a thread already calling get_block() on this
+        same AudioCapture instance is unaffected -- it just sees a gap of a
+        few blocks while the old stream tears down and the new one spins
+        up."""
+        self.stop()
+        self.device = device
+        self.start()
+
     def get_block(self, timeout=None):
         return self.q.get(timeout=timeout)
