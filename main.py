@@ -5,8 +5,9 @@ mic -> AudioCapture (callback thread)
     -> single-slot queue
     -> main thread: ColorAnimator -> Display (pygame window, or terminal)
 
-GUI controls: Esc/close window to quit, F to toggle fullscreen, D to toggle debug overlay.
-Terminal mode: Ctrl+C to quit. No display server required.
+GUI controls: Esc/close window to quit, F to toggle fullscreen, D to toggle
+debug overlay, Up/Down to adjust pitch-detection sensitivity.
+Terminal mode: Ctrl+C to quit, Up/Down for sensitivity. No display server required.
 """
 
 import argparse
@@ -65,12 +66,21 @@ class RawKeys:
             self._old_settings = termios.tcgetattr(sys.stdin)
             tty.setcbreak(sys.stdin.fileno())
 
+    _ARROW_BY_FINAL_BYTE = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}
+
     def poll(self):
-        if not self._active:
+        if not self._active or not select.select([sys.stdin], [], [], 0)[0]:
             return None
-        if select.select([sys.stdin], [], [], 0)[0]:
-            return sys.stdin.read(1)
-        return None
+        ch = sys.stdin.read(1)
+        if ch != "\x1b":
+            return ch
+        # Arrow keys send ESC [ <letter> as one burst; if nothing follows
+        # immediately it was a lone Escape keypress, not an arrow key.
+        if not select.select([sys.stdin], [], [], 0)[0]:
+            return None
+        if sys.stdin.read(1) != "[" or not select.select([sys.stdin], [], [], 0)[0]:
+            return None
+        return self._ARROW_BY_FINAL_BYTE.get(sys.stdin.read(1))
 
     def restore(self):
         if self._active:
@@ -85,9 +95,9 @@ def _positive_float(text):
 
 
 def _handle_sensitivity_key(key, sensitivity):
-    if key == "[":
+    if key == "DOWN":
         sensitivity.adjust(1.0 / SENSITIVITY_STEP)
-    elif key == "]":
+    elif key == "UP":
         sensitivity.adjust(SENSITIVITY_STEP)
 
 
@@ -137,7 +147,7 @@ def _overwrite(q, item):
 def _status_text(label, freq, confidence, rms, sensitivity):
     freq_str = f"{freq:6.1f}Hz" if freq else "  --  "
     return (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
-            f"sens={sensitivity.value:.2f} ([/])")
+            f"sens={sensitivity.value:.2f} (up/down)")
 
 
 def run_terminal_fill(result_queue, sensitivity):
@@ -307,9 +317,9 @@ def run_gui(result_queue, fullscreen, start_debug, sensitivity):
                         display.toggle_fullscreen()
                     elif event.key == pygame.K_d:
                         show_debug = not show_debug
-                    elif event.key == pygame.K_LEFTBRACKET:
+                    elif event.key == pygame.K_DOWN:
                         sensitivity.adjust(1.0 / SENSITIVITY_STEP)
-                    elif event.key == pygame.K_RIGHTBRACKET:
+                    elif event.key == pygame.K_UP:
                         sensitivity.adjust(SENSITIVITY_STEP)
             if not display.running:
                 break
@@ -350,7 +360,7 @@ def main():
                               "(default: note_history_<timestamp>.txt next to main.py)")
     parser.add_argument("--sensitivity", type=_positive_float, default=config.DEFAULT_SENSITIVITY,
                          help="pitch-detection sensitivity multiplier (default 1.0); higher registers "
-                              "quieter/softer playing more readily. Adjustable live with [ / ] in any mode.")
+                              "quieter/softer playing more readily. Adjustable live with Up/Down in any mode.")
     args = parser.parse_args()
 
     capture = AudioCapture(config.SAMPLE_RATE, config.BLOCK_SIZE, config.QUEUE_SIZE)

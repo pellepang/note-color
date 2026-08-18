@@ -81,8 +81,8 @@ The `tab` view writes an ANSI-colored note-history dump to a timestamped
 file next to `main.py` on quit (override with `--dump-file PATH`).
 
 GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay,
-`[`/`]` decrease/increase pitch sensitivity. Terminal modes: `Ctrl+C` to
-quit, `[`/`]` sensitivity (needs a real TTY; no-op otherwise, e.g. piped
+`Up`/`Down` decrease/increase pitch sensitivity. Terminal modes: `Ctrl+C` to
+quit, `Up`/`Down` sensitivity (needs a real TTY; no-op otherwise, e.g. piped
 input). `--sensitivity FLOAT` sets the starting value (default 1.0); raises
 it to register quieter/softer playing more readily. Current value shown in
 the status line (`sens=`).
