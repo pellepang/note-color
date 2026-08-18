@@ -9,7 +9,7 @@ A 12-element vector folding all spectral energy in an analysis window into the 1
 _Avoid_: Pitch-class profile (PCP) — same concept, but this project uses "chroma vector" consistently.
 
 **Pitch-class set**:
-The set of pitch classes actually detected as sounding at a given moment (a chroma vector thresholded into present/absent), before any chord-name is assigned to it. What the "no match" fallback reports when nothing in the chord dictionary matches well enough.
+The set of pitch classes actually detected as sounding at a given moment (a chroma vector thresholded into present/absent), before any chord name is assigned to it. What the "no match" fallback falls back to internally when nothing in the chord dictionary matches well enough — it is not itself rendered as a chord name (see **Chord name**).
 
 **Chord quality**:
 A root-relative pattern of semitone intervals (e.g. maj = 0,4,7) that defines a family of chords across all 12 roots. The chord dictionary stores one binary pitch-class mask per quality, not per individual chord.
@@ -23,3 +23,10 @@ The opt-in detection mode (toggled via `P` in terminal views) that runs chroma-v
 
 **Bass chroma**:
 A second, separate 12-bin pitch-class estimate folded only from the low-frequency portion of the spectrum (below ~250Hz). Its strongest bin is the detected bass note, used to resolve inversions/slash chords and to break ties between rotationally-symmetric chord templates (dim7, aug) — the main chroma vector alone can't do either, since it discards octave.
+
+**Chord name**:
+The text label shown for a matched chord: a root pitch class, spelled using this project's flat-biased convention (F♯ kept sharp rather than spelled G♭) uniformly across every view, followed by a quality symbol, with an optional slash-suffixed bass note (see **Slash chord**). Left present but empty on a "no match" — the pitch-class set is not rendered as a substitute name.
+_Avoid_: Chord label — "label" already denotes the per-note name drawn in `tab`; keep the two distinct.
+
+**Slash chord**:
+A chord whose sounding bass note (per **Bass chroma**) differs from its own root — an inversion, or a chord voiced over a foreign bass. Rendered in a chord name as "<name>/<bass>" (e.g. "C/E"); a chord in root position omits the slash.
