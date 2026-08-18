@@ -162,3 +162,17 @@ the system of record for the project's history, not just a backup.
 - Full original build plan and rationale (pitch detection algorithm choice,
   audio pipeline design, build order):
   `/home/pelle/.claude/plans/i-want-to-make-graceful-stallman.md`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues on `pellepang/note-color`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`), used as-is. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root (neither exists yet — created lazily by `/domain-modeling`). See `docs/agents/domain.md`.
