@@ -16,55 +16,21 @@ fast enough to feel live during actual music.
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
 20 tests), and detection has been confirmed with a real speaker→mic
-acoustic round-trip test (playing known tones through the speakers and
-checking the app reports the correct note/color back). Pitch-tracking
-accuracy on real audio varies run-to-run with room/mic conditions — see
-"Known limitations" below; this is inherent to monophonic pitch tracking,
-not a bug to chase further without a concrete symptom.
+acoustic round-trip test. Pitch-tracking accuracy on real audio varies
+run-to-run with room/mic conditions — inherent to monophonic pitch
+tracking, not a bug to chase without a concrete symptom.
 
 ## Backlog (open problems, not yet fixed)
 
-- **Visual bugs in the `tab` view.** User-reported (2026-08-18), symptoms
-  not yet captured in detail — get a concrete repro/description (what's
-  drawn wrong, and under what terminal size/conditions) before starting a
-  fix. Candidate causes to check first given the recent resize-clear and
-  glyph-color changes: interaction between the per-frame cursor-addressed
-  redraw in `terminal_tab_display.py`'s `render()` and the two grand-staff
-  blocks' row math (`staff_map.py`), and edge cases at small terminal
-  sizes (see the existing "clip the outermost ledger-line notes" note
-  under Known limitations).
-- **Pitch detection isn't sensitive enough.** User wants quieter/softer
-  playing to register more reliably, e.g. a runtime-adjustable
-  sensitivity control rather than a fixed value. Relevant knobs today are
-  all fixed constants in `config.py`: `RMS_SILENCE_THRESHOLD` (0.01, gates
-  whether a hop counts as silence) and `CONFIDENCE_THRESHOLD` (0.5, gates
-  whether a YIN pitch estimate is trusted) — both in `note_smoother.py`'s
-  gating logic. Worth exploring: a CLI flag / hotkey / on-screen slider to
-  adjust one or both of these live instead of editing `config.py` and
-  restarting.
-- **Reduce the tokens a fresh AI session burns just to get oriented in
-  this project.** `CLAUDE.md` is auto-loaded in full at session start, and
-  at ~230 lines / ~15KB (~3.5-4k tokens) it's grown large because full
-  design-decision rationale gets appended verbatim over time. Plan:
-  1. Split "what" from "why" — keep this file to orientation only (goal,
-     status, architecture, file table, running commands, backlog); move
-     the long-form rationale currently under "Key design decisions and
-     why" and the prose in "Known limitations" into a new
-     `docs/DECISIONS.md`, referenced here by one pointer line instead of
-     inlined.
-  2. Compress remaining multi-line bullets to one line + a pointer to
-     where the full reasoning lives (a code comment near the relevant
-     constant/function, or `docs/DECISIONS.md`) — several entries
-     currently run 4-6 lines each.
-  3. Stop treating this file as an append-only log: since git is now the
-     system of record (see Working practices below), delete resolved
-     backlog items instead of archiving them here — `git log` already
-     preserves that history.
-  4. Collapse settled narrative detail (e.g. multi-step "why we changed
-     it" stories) to one line once a decision is no longer in flux.
-  Target: cut what's loaded at session start by roughly 60%, and keep it
-  from creeping back up by routing new rationale into `docs/DECISIONS.md`
-  instead of here.
+- **Visual bugs in the `tab` view.** User-reported 2026-08-18, no concrete
+  repro yet. Candidate causes: interaction between the per-frame
+  cursor-addressed redraw in `terminal_tab_display.py`'s `render()` and the
+  grand-staff row math (`staff_map.py`); small-terminal edge cases (see
+  known limitations below).
+- **Pitch detection isn't sensitive enough.** User wants a runtime-adjustable
+  sensitivity control instead of fixed constants. Relevant knobs:
+  `RMS_SILENCE_THRESHOLD` and `CONFIDENCE_THRESHOLD` in `config.py`, gated
+  in `note_smoother.py`.
 
 ## Architecture
 
@@ -80,29 +46,26 @@ mic -> AudioCapture (PortAudio callback thread, never blocks)
 ```
 
 Three threads, connected by non-blocking queues at every boundary, so no
-stage can ever stall another: the real-time audio callback drops old audio
-rather than blocking; the analysis thread always works on the freshest
-window; the render loop always shows the freshest computed color.
-
-Target end-to-end latency: comfortably under 150ms.
+stage can ever stall another. Target end-to-end latency: comfortably under
+150ms.
 
 ## Files
 
 | File | Responsibility |
 |---|---|
-| `config.py` | Every tunable constant (sample rate, buffer/window sizes, thresholds, color-wheel params, animation timing, FPS). Check here first before touching logic. |
-| `audio_capture.py` | `AudioCapture` — wraps `sounddevice.InputStream` in callback mode, feeds a bounded drop-oldest queue. |
-| `pitch_detect.py` | `detect_pitch()` — hand-rolled YIN pitch detection in pure NumPy (FFT-based autocorrelation, cumulative mean normalization, parabolic interpolation). No `aubio`/`librosa` dependency, deliberately. |
-| `note_smoother.py` | `NoteSmoother` — turns noisy per-hop pitch estimates into a stable displayed note: silence/confidence gate, median filter in semitone space (kills octave-error outliers), debounce/hysteresis before switching the displayed note, onset detection. |
-| `color_map.py` | Pure functions: `note_to_hsl(pitch_class, octave, scheme="chromatic"|"fifths")` → HSL, `hsl_to_rgb255()` → RGB. `fifths_index(pitch_class)` maps a chromatic pitch class to its position on the circle of fifths — `(pitch_class * 7) % 12` (7 is its own modular inverse mod 12). Also holds the shared `NOTE_NAMES` sharps-only spelling table. |
-| `staff_map.py` | Pure functions: `staff_row(pitch_class, octave)` → a note's row on a grand staff (bass + treble, row 0 = G2, row 12 = E4), `ledger_rows(row)` → which ledger lines a given row needs. Used only by the `tab` view. |
-| `animation.py` | `ColorAnimator` — exponential crossfade toward the target color plus a decaying onset "pulse" brightness boost. Used by the GUI and terminal-fill views (not the wheel or tab views, which do their own simpler per-cell pulse/no crossfade). |
-| `display.py` | `Display` — pygame GUI window (fullscreen toggle, solid fill + debug text overlay). |
-| `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill, no GUI/display-server dependency. |
-| `terminal_wheel_display.py` | `WheelDisplay` — draws all 12 notes as a ring in circle-of-fifths order (C at top, clockwise), highlighting the currently-detected note. Always uses the fifths color mapping regardless of `--color-scheme`, since that's what the diagram is visualizing. |
-| `terminal_tab_display.py` | `TabDisplay` — scrolling note-history view: notes enter on the right and scroll left, each placed at its correct grand-staff row (`staff_map.py`) and colored. Owns the on-screen entry deque plus a capped full-session history used to write an ANSI text dump on quit (`dump_ansi()`). |
-| `main.py` | Wires it all together: starts capture + analysis thread, dispatches to GUI (`run_gui`) or one of the terminal views (`run_terminal_fill` / `run_terminal_wheel` / `run_terminal_tab`) based on CLI flags. `pygame` is only imported inside `run_gui`, so terminal modes have zero GUI dependency at runtime and work over SSH/headless. |
-| `tests/` | `test_pitch_detect.py` (YIN accuracy on synthetic tones), `test_note_smoother.py` (scripted sequences: stable note, octave blip, silence gap, genuine note change), `test_color_map.py` (both color schemes, including the confirmed circle-of-fifths hue table), `test_staff_map.py` (grand-staff row/ledger-line placement). |
+| `config.py` | All tunable constants (sample rate, buffer sizes, thresholds, color/animation params). Check here first. |
+| `audio_capture.py` | `AudioCapture` — `sounddevice.InputStream` callback → bounded drop-oldest queue. |
+| `pitch_detect.py` | `detect_pitch()` — hand-rolled YIN (pure NumPy, FFT autocorrelation + parabolic interpolation). |
+| `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection. |
+| `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `NOTE_NAMES`. |
+| `staff_map.py` | `staff_row()`, `ledger_rows()` — grand-staff placement, used only by `tab` view. |
+| `animation.py` | `ColorAnimator` — crossfade + onset pulse. Used by GUI and terminal-fill views. |
+| `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). |
+| `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill. |
+| `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`. |
+| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history; `dump_ansi()` on quit. |
+| `main.py` | Wires threads together, dispatches GUI/terminal views by CLI flag. `pygame` imported only inside `run_gui`. |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`. |
 
 ## Running it
 
@@ -119,116 +82,47 @@ cd ~/note-color
 
 Shorter launchers on PATH (`~/.local/bin/colorize`, added to `~/.zshrc`'s
 PATH): `colorize fill`, `colorize circle`, `colorize tab fix`, and
-`colorize tab onset` — thin wrappers around `main.py --terminal --view
-fill|wheel|tab` that forward any extra flags (e.g. `colorize tab onset
---color-scheme fifths`).
+`colorize tab onset` — thin wrappers forwarding extra flags (e.g.
+`colorize tab onset --color-scheme fifths`).
 
 The `tab` view writes an ANSI-colored note-history dump to a timestamped
-file next to `main.py` when it quits (override with `--dump-file PATH`) —
-one line per note (elapsed time, color swatch, note name), intended as a
-minimal first step toward possibly replaying/displaying the history later.
+file next to `main.py` on quit (override with `--dump-file PATH`).
 
 GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay.
 Terminal modes: `Ctrl+C` to quit.
 
-## Key design decisions and why
+## Key design decisions
 
-- **Python + NumPy**, not a compiled language — DSP at these buffer sizes
-  (1024–2048 samples, ~20-90ms windows) is cheap enough that Python's
-  overhead doesn't matter, while Python runs unmodified across
-  Linux/Mac/Windows/Raspberry Pi with no build toolchain.
-- **Hand-rolled YIN instead of `aubio` or `librosa`** — `aubio` has
-  unreliable PyPI wheels (especially ARM/Raspberry Pi, newer CPython) and
-  often needs compiling `libaubio` from source; `librosa` drags in a heavy
-  dependency tree (numba etc.) that's a poor fit for Pi-class installs.
-  Plain YIN is ~80 lines of NumPy with no exotic dependencies.
-- **Microphone input**, not system-audio loopback — portable across OSes
-  with no OS-specific plumbing (loopback setup differs completely between
-  WASAPI/PulseAudio/CoreAudio).
-- **Single dominant pitch only** (monophonic, tuner-style), not full
-  polyphonic/chord detection — far simpler, stays real-time, reads well on
-  melodies/vocals/lead instruments. True polyphonic transcription is a much
-  harder, slower problem.
-- **`pygame-ce`** for the GUI — a solid-fill + crossfade is one of the
-  simplest possible rendering workloads; pygame has reliable prebuilt
-  wheels across target platforms (including 64-bit Raspberry Pi OS) with
-  far less install risk than `glfw`+OpenGL or Kivy.
-- **Circle-of-fifths color scheme is additive, not a replacement** —
-  chromatic (semitone-order hue) stays the default; `fifths` is opt-in via
-  `--color-scheme`. The wheel and tab views always show fifths layout
-  regardless of this flag: `--color-scheme` only affects fill/GUI. Tab
-  originally followed `--color-scheme` like fill did, but that meant the
-  same note could render as a different color in `tab` than in `wheel`
-  (e.g. B was pink under chromatic, green under fifths) -- since `tab` and
-  `wheel` are both meant to show a note's fixed color identity, they now
-  always agree with each other, matching `wheel`'s existing fifths-only
-  behavior instead of the other way around.
-- **`tab` view uses a grand staff (bass + treble), not a single treble
-  staff.** The app's usable range is C2–B5 (4 octaves); a single treble
-  staff would need 8 ledger lines below it to reach C2. A grand staff
-  (how piano music is notated) caps that at 2 ledger lines below and 1
-  above, at the cost of rendering two 5-line staff blocks instead of one.
-- **`tab` view's on-quit dump is a plain per-line text log, not a rendered
-  staff image** — one line per note (elapsed time, ANSI color swatch, note
-  name). Chosen to stay minimal (nothing fancier was asked for yet) and to
-  stay structured/parseable for a possible future playback feature, rather
-  than being a wide unusable ANSI-art block.
-- **`tab` view's note color ignores octave, unlike `fill`/GUI, and uses its
-  own fixed lightness (`config.TAB_NOTE_LIGHTNESS = 0.5`), not
-  `BASE_LIGHTNESS_RANGE`.** `fill`/GUI intentionally scale lightness by
-  octave (darker = lower, per `note_to_hsl()`). In `tab`, octave already
-  has a job — it sets the note's row on the staff — so also using it for
-  lightness made a low C render too dark to read as red and a high C wash
-  out toward white. The first fix reused `BASE_LIGHTNESS_RANGE`'s top end
-  (0.82, matching the wheel view's peak pulse brightness), but that's
-  close enough to white to read as pastel when held continuously rather
-  than shown as a brief pulse — lightness 0.5 is where a given
-  hue/saturation looks most vivid in HSL, so that's what `_tab_note_rgb()`
-  in `main.py` uses instead. Each note letter is still one fixed,
-  recognizable color (C is always red); only its vertical position moves
-  with octave.
-- **All three terminal views clear the screen on a detected size change,
-  not just once at startup.** They normally repaint via cursor-addressing
-  (not a full clear) every frame to avoid flicker, which only overwrites
-  the region the current frame actually draws. Under a tiling WM the
-  terminal window resizes constantly as tiles rearrange; without a
-  resize-triggered clear, content from the previous (larger) size/layout
-  was never overwritten and lingered as ghost/duplicated elements. Each
-  display class tracks `self._last_size` and clears once when
-  `shutil.get_terminal_size()` differs from the last frame's.
+One-liners; full rationale in `docs/DECISIONS.md`.
+
+- Python + NumPy — cheap enough at these buffer sizes, no build toolchain.
+- Hand-rolled YIN, not `aubio`/`librosa` — wheel/dependency risk on Pi.
+- Microphone input, not loopback — OS-portable.
+- Monophonic only — simpler, real-time, fits the use case.
+- `pygame-ce` for the GUI — reliable wheels across target platforms.
+- `--color-scheme fifths` is additive; `wheel`/`tab` always use fifths so a
+  note's color stays consistent between views.
+- `tab` uses a grand staff, not single treble — manageable ledger lines
+  across the app's 4-octave range.
+- `tab`'s on-quit dump is plain text, not a rendered image.
+- `tab`'s note color ignores octave, fixed lightness
+  (`TAB_NOTE_LIGHTNESS = 0.5`) — octave already encodes as staff row.
+- Terminal views clear on detected resize — avoids ghosting under tiling WMs.
 
 ## Known limitations / things learned
 
-- **Octave-error blips during note decay.** YIN can briefly lock onto a
-  sub-harmonic as a note's amplitude fades out (harmonics get ambiguous),
-  causing a short (~100ms) false reading before self-correcting. Observed
-  live during acoustic testing. Not currently worth fixing without a
-  concrete complaint — `NoteSmoother`'s median filter/debounce already
-  suppresses most single-frame blips; only sustained sub-harmonic locks
-  during a fade slip through.
-- **Live pitch-tracking quality varies run-to-run** with room acoustics,
-  mic gain/AGC settling, and speaker/mic coupling — this is inherent to
-  acoustic pitch detection, not a code regression, when comparing two live
-  test runs that behave differently.
-- **32-bit Raspberry Pi OS (`armv7l`) is a wheel-availability risk** for
-  both `sounddevice` and `pygame-ce` — target **64-bit** Raspberry Pi OS
-  (Bookworm+) instead.
-- **macOS/Windows gate microphone access per-app.** A denied/unhandled
-  permission prompt on first run delivers silent zeros from the input
-  stream rather than an error — if a fresh install "detects nothing,"
-  check OS mic permissions before debugging the DSP.
-- `~/.local/bin` was not on PATH before this project; it was created and
-  added via a new line appended to `~/.zshrc` to support the `colorize`
-  launcher.
-- **`tab --scroll onset` freezes the display during sustained notes or
-  silence, by design** — a new column only appears on a genuine new
-  note-attack (`NoteSmoother`'s `is_onset` flag), so a held note or a quiet
-  passage simply doesn't advance the scroll. This is expected, not a bug.
-- **Very short terminals (fewer than ~22 rows) will clip the outermost
-  ledger-line notes** in the `tab` view — the two 5-line staff blocks
-  themselves are never shrunk below their minimum size, so on a small
-  terminal, notes far above/below the staff just don't draw rather than
-  corrupting the staff layout.
+One-liners; full detail in `docs/DECISIONS.md`.
+
+- Octave-error blips (~100ms) can occur during note decay; not worth fixing
+  without a concrete complaint.
+- Live pitch-tracking quality varies run-to-run with room/mic conditions —
+  not a regression.
+- Target 64-bit Raspberry Pi OS (Bookworm+) — 32-bit is a wheel risk.
+- macOS/Windows gate mic access per-app; a denied prompt gives silent zeros,
+  not an error.
+- `~/.local/bin` is on PATH via `~/.zshrc`, for `colorize`.
+- `tab --scroll onset` freezes on sustained notes/silence, by design.
+- Terminals <~22 rows clip outermost `tab`-view ledger-line notes.
 
 ## Working practices
 
@@ -237,18 +131,19 @@ the system of record for the project's history, not just a backup.
 
 - After each meaningful checkpoint (a fix, a feature, a config/behavior
   change), commit with a message that describes the change and its
-  rationale, then push to `origin/main`. That way `git log`/GitHub history
-  doubles as the changelog, and no work done in a session gets silently
-  lost or forgotten by the next one.
+  rationale, then push to `origin/main`.
 - Keep commits scoped to one logical change rather than batching unrelated
-  work together, so the history stays legible and each commit is easy to
-  reason about (or revert) on its own.
+  work together.
 - Generated run-time artifacts (e.g. `note_history_*.txt` dumps from the
-  `tab` view) are gitignored, not committed — they're per-session output,
-  not project state.
+  `tab` view) are gitignored, not committed.
+- When a backlog item is resolved, delete it from this file rather than
+  archiving it here — `git log` already preserves that history.
+- New design rationale goes into `docs/DECISIONS.md`, not inlined here —
+  keep this file to orientation only.
 
 ## Reference
 
-Full original build plan and rationale (pitch detection algorithm choice,
-audio pipeline design, build order) is at
-`/home/pelle/.claude/plans/i-want-to-make-graceful-stallman.md`.
+- Full design rationale: `docs/DECISIONS.md`.
+- Full original build plan and rationale (pitch detection algorithm choice,
+  audio pipeline design, build order):
+  `/home/pelle/.claude/plans/i-want-to-make-graceful-stallman.md`.
