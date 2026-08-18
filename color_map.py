@@ -6,6 +6,11 @@ import config
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
+# Spelling used by the fifths-order views (wheel, tab): flats on the flat
+# side of the circle of fifths instead of the equivalent sharp, e.g. Ab
+# rather than G#.
+NOTE_NAMES_FIFTHS = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+
 
 def fifths_index(pitch_class):
     """Position of `pitch_class` around the circle of fifths (0=C, clockwise)."""

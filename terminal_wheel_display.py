@@ -9,9 +9,10 @@ import shutil
 import sys
 
 import config
-from color_map import hsl_to_rgb255
+from color_map import hsl_to_rgb255, NOTE_NAMES_FIFTHS
 
-FIFTHS_LABELS = ["C", "G", "D", "A", "E", "B", "F#", "Db", "Ab", "Eb", "Bb", "F"]
+# Ring position i -> pitch class, in circle-of-fifths order (0=C, clockwise).
+FIFTHS_LABELS = [NOTE_NAMES_FIFTHS[(7 * i) % 12] for i in range(12)]
 
 DIM_LIGHTNESS = 0.16
 

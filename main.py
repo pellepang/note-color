@@ -24,7 +24,7 @@ import config
 from audio_capture import AudioCapture
 from pitch_detect import detect_pitch
 from note_smoother import NoteSmoother
-from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES
+from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES, NOTE_NAMES_FIFTHS
 from animation import ColorAnimator
 
 try:
@@ -220,6 +220,15 @@ def _tab_note_rgb(pitch_class):
     return hsl_to_rgb255(hue, sat, config.TAB_NOTE_LIGHTNESS)
 
 
+def _tab_note_label(pitch_class, octave):
+    """Same fifths spelling as the wheel view (e.g. Ab, not G#), for the
+    same reason as _tab_note_rgb: a note should read identically in `tab`
+    as it does in `wheel`, independent of --color-scheme."""
+    if pitch_class is None:
+        return "-"
+    return f"{NOTE_NAMES_FIFTHS[pitch_class]}{octave}"
+
+
 def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity):
     from terminal_tab_display import TabDisplay
 
@@ -250,17 +259,18 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity):
                 pass
 
             glyph_rgb = _tab_note_rgb(pitch_class)
+            tab_label = _tab_note_label(pitch_class, octave)
 
             if scroll_mode == "onset":
                 if got_new and is_onset:
-                    display.push(pitch_class, octave, glyph_rgb, label)
+                    display.push(pitch_class, octave, glyph_rgb, tab_label)
             else:  # "fix"
                 time_since_tick += dt
                 if time_since_tick >= fix_interval:
                     time_since_tick -= fix_interval
-                    display.push(pitch_class, octave, glyph_rgb, label)
+                    display.push(pitch_class, octave, glyph_rgb, tab_label)
 
-            status = _status_text(label, freq, confidence, rms, sensitivity) + f"  [{scroll_mode}] (Ctrl+C to quit)"
+            status = _status_text(tab_label, freq, confidence, rms, sensitivity) + f"  [{scroll_mode}] (Ctrl+C to quit)"
             display.render(status)
             time.sleep(dt)
     except KeyboardInterrupt:
