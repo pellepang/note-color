@@ -42,6 +42,29 @@ not a bug to chase further without a concrete symptom.
   gating logic. Worth exploring: a CLI flag / hotkey / on-screen slider to
   adjust one or both of these live instead of editing `config.py` and
   restarting.
+- **Reduce the tokens a fresh AI session burns just to get oriented in
+  this project.** `CLAUDE.md` is auto-loaded in full at session start, and
+  at ~230 lines / ~15KB (~3.5-4k tokens) it's grown large because full
+  design-decision rationale gets appended verbatim over time. Plan:
+  1. Split "what" from "why" — keep this file to orientation only (goal,
+     status, architecture, file table, running commands, backlog); move
+     the long-form rationale currently under "Key design decisions and
+     why" and the prose in "Known limitations" into a new
+     `docs/DECISIONS.md`, referenced here by one pointer line instead of
+     inlined.
+  2. Compress remaining multi-line bullets to one line + a pointer to
+     where the full reasoning lives (a code comment near the relevant
+     constant/function, or `docs/DECISIONS.md`) — several entries
+     currently run 4-6 lines each.
+  3. Stop treating this file as an append-only log: since git is now the
+     system of record (see Working practices below), delete resolved
+     backlog items instead of archiving them here — `git log` already
+     preserves that history.
+  4. Collapse settled narrative detail (e.g. multi-step "why we changed
+     it" stories) to one line once a decision is no longer in flux.
+  Target: cut what's loaded at session start by roughly 60%, and keep it
+  from creeping back up by routing new rationale into `docs/DECISIONS.md`
+  instead of here.
 
 ## Architecture
 
