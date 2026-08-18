@@ -115,6 +115,10 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   note's color stays consistent between views.
 - `tab` uses a grand staff, not single treble — manageable ledger lines
   across the app's 4-octave range.
+- `tab`'s left legend column shows a treble/bass clef glyph on each staff's
+  anchor line (G4/F3) and the natural-note name on every other staff line
+  — added so the grand staff is legible without already knowing note
+  positions by heart, especially in the bass register.
 - `tab`'s on-quit dump is plain text, not a rendered image.
 - `tab`'s note color ignores octave, fixed lightness
   (`TAB_NOTE_LIGHTNESS = 0.5`) — octave already encodes as staff row.

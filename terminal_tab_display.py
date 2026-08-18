@@ -13,11 +13,16 @@ import time
 from collections import deque, namedtuple
 
 import config
-from staff_map import staff_row, ledger_rows, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW
+from staff_map import (
+    staff_row, ledger_rows, line_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
+    BASS_CLEF_ROW, TREBLE_CLEF_ROW,
+)
 
 TabEntry = namedtuple("TabEntry", "pitch_class octave rgb label t")
 
 LEDGER_CHAR = "─"
+BASS_CLEF_GLYPH = "𝄢"
+TREBLE_CLEF_GLYPH = "𝄞"
 
 
 class TabDisplay:
@@ -60,7 +65,8 @@ class TabDisplay:
                 shrink -= 1
 
         width = config.TAB_COLUMN_WIDTH
-        visible_cols = max(cols // width, 1)
+        legend_width = config.TAB_LEGEND_WIDTH
+        visible_cols = max((cols - legend_width) // width, 1)
         visible_entries = list(self.entries)[-visible_cols:]
         pad = visible_cols - len(visible_entries)
 
@@ -87,7 +93,15 @@ class TabDisplay:
         for screen_row in range(top, bottom - 1, -1):
             if len(lines) >= usable_rows:
                 break
-            cells = []
+            if screen_row == BASS_CLEF_ROW:
+                legend = BASS_CLEF_GLYPH.center(legend_width)
+            elif screen_row == TREBLE_CLEF_ROW:
+                legend = TREBLE_CLEF_GLYPH.center(legend_width)
+            elif screen_row in STAFF_LINE_ROWS:
+                legend = line_note_name(screen_row).center(legend_width)
+            else:
+                legend = " " * legend_width
+            cells = [legend]
             for note_row, ledgers, rgb, label in columns:
                 if note_row == screen_row and rgb is not None:
                     cells.append(_note_cell(rgb, label, width))

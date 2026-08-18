@@ -1,4 +1,7 @@
-from staff_map import staff_row, ledger_rows, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW
+from staff_map import (
+    staff_row, ledger_rows, line_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
+    BASS_CLEF_ROW, TREBLE_CLEF_ROW,
+)
 
 
 def test_treble_bottom_line_is_e4():
@@ -41,3 +44,17 @@ def test_rows_inside_staff_blocks_need_no_ledger():
         assert ledger_rows(row) == []
     for row in range(12, 21):
         assert ledger_rows(row) == []
+
+
+def test_line_note_names_match_standard_staff_mnemonics():
+    bass = [line_note_name(r) for r in (0, 2, 4, 6, 8)]
+    assert bass == ["G2", "B2", "D3", "F3", "A3"]  # Good Boys Do Fine Always
+    treble = [line_note_name(r) for r in (12, 14, 16, 18, 20)]
+    assert treble == ["E4", "G4", "B4", "D5", "F5"]  # Every Good Boy Does Fine
+
+
+def test_clef_anchor_rows_are_staff_lines():
+    assert BASS_CLEF_ROW in STAFF_LINE_ROWS
+    assert TREBLE_CLEF_ROW in STAFF_LINE_ROWS
+    assert line_note_name(BASS_CLEF_ROW) == "F3"
+    assert line_note_name(TREBLE_CLEF_ROW) == "G4"

@@ -38,3 +38,21 @@ def test_note_outside_shrunk_range_is_dropped_not_misplaced(monkeypatch):
 def test_note_inside_range_still_renders(monkeypatch):
     out = _render(monkeypatch, rows=30, pushes=[(9, 4, "A4")])
     assert "A4" in out
+
+
+def test_legend_shows_clefs_and_staff_line_names(monkeypatch):
+    out = _render(monkeypatch, rows=30, cols=100)
+    assert "\U0001D11E" in out  # treble clef, on the G4 line
+    assert "\U0001D122" in out  # bass clef, on the F3 line
+    for name in ("G2", "B2", "D3", "A3", "E4", "B4", "D5", "F5"):
+        assert name in out  # F3/G4 are covered by the clef glyphs instead
+
+
+def test_legend_width_is_reserved_from_note_columns(monkeypatch):
+    # A terminal exactly one note-column wide beyond the legend should still
+    # fit that column onscreen, not have it silently swallowed by ignoring
+    # the legend's width in the visible_cols calculation.
+    import config
+    cols = config.TAB_LEGEND_WIDTH + config.TAB_COLUMN_WIDTH
+    out = _render(monkeypatch, rows=30, cols=cols, pushes=[(9, 4, "A4")])
+    assert "A4" in out

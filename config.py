@@ -52,5 +52,6 @@ TAB_NOTE_LIGHTNESS = 0.5        # fixed, octave-independent -- 0.5 is where a gi
 TAB_FPS = 20
 TAB_FIX_HOPS_PER_SEC = 4        # 'fix' mode: new column every 0.25s
 TAB_COLUMN_WIDTH = 3            # terminal characters per history column/glyph cell
+TAB_LEGEND_WIDTH = 5            # left-hand column: clef glyphs + staff-line note names
 TAB_VISIBLE_MAXLEN = 300        # on-screen deque cap
 TAB_SESSION_HISTORY_MAX = 5000  # cap on entries retained for the end-of-session dump

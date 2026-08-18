@@ -8,12 +8,17 @@ sharps-only note spelling used elsewhere), with the accidental shown as a
 """
 
 LETTER_INDEX = {0: 0, 2: 1, 4: 2, 5: 3, 7: 4, 9: 5, 11: 6}  # natural semitone -> C..B
+LETTER_NAMES = "CDEFGAB"  # index -> letter, inverse of LETTER_INDEX's values
 
 GRAND_STAFF_REF_STEP = 18  # diatonic step of G2 (bass clef bottom line) -> row 0
 
 STAFF_LINE_ROWS = frozenset({0, 2, 4, 6, 8, 12, 14, 16, 18, 20})  # bass 5 + treble 5
 
 TOP_ROW, BOTTOM_ROW = 23, -4  # B5 .. C2, the app's usable pitch range
+
+# Anchor lines a clef's spiral/dots wrap around: F3 for bass, G4 for treble.
+BASS_CLEF_ROW = 6
+TREBLE_CLEF_ROW = 14
 
 
 def diatonic_step(pitch_class, octave):
@@ -23,6 +28,13 @@ def diatonic_step(pitch_class, octave):
 
 def staff_row(pitch_class, octave):
     return diatonic_step(pitch_class, octave) - GRAND_STAFF_REF_STEP
+
+
+def line_note_name(row):
+    """Letter+octave for a staff line row (row must be in STAFF_LINE_ROWS --
+    lines are always natural notes, never sharps)."""
+    step = row + GRAND_STAFF_REF_STEP
+    return f"{LETTER_NAMES[step % 7]}{step // 7}"
 
 
 def ledger_rows(row):
