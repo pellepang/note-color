@@ -22,6 +22,27 @@ accuracy on real audio varies run-to-run with room/mic conditions — see
 "Known limitations" below; this is inherent to monophonic pitch tracking,
 not a bug to chase further without a concrete symptom.
 
+## Backlog (open problems, not yet fixed)
+
+- **Visual bugs in the `tab` view.** User-reported (2026-08-18), symptoms
+  not yet captured in detail — get a concrete repro/description (what's
+  drawn wrong, and under what terminal size/conditions) before starting a
+  fix. Candidate causes to check first given the recent resize-clear and
+  glyph-color changes: interaction between the per-frame cursor-addressed
+  redraw in `terminal_tab_display.py`'s `render()` and the two grand-staff
+  blocks' row math (`staff_map.py`), and edge cases at small terminal
+  sizes (see the existing "clip the outermost ledger-line notes" note
+  under Known limitations).
+- **Pitch detection isn't sensitive enough.** User wants quieter/softer
+  playing to register more reliably, e.g. a runtime-adjustable
+  sensitivity control rather than a fixed value. Relevant knobs today are
+  all fixed constants in `config.py`: `RMS_SILENCE_THRESHOLD` (0.01, gates
+  whether a hop counts as silence) and `CONFIDENCE_THRESHOLD` (0.5, gates
+  whether a YIN pitch estimate is trusted) — both in `note_smoother.py`'s
+  gating logic. Worth exploring: a CLI flag / hotkey / on-screen slider to
+  adjust one or both of these live instead of editing `config.py` and
+  restarting.
+
 ## Architecture
 
 ```
