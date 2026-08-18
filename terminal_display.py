@@ -8,13 +8,15 @@ import sys
 class TerminalDisplay:
     def __init__(self, fps=20):
         self.fps = fps
+        self._last_size = None
         sys.stdout.write("\033[?25l")  # hide cursor
         sys.stdout.write("\033[2J")    # clear screen once
         sys.stdout.flush()
 
     def render(self, rgb, status=""):
         r, g, b = rgb
-        cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        cols, rows = size
         rows = max(rows - 1, 1)  # reserve the last row for status text
 
         bg = f"\033[48;2;{r};{g};{b}m"
@@ -23,10 +25,16 @@ class TerminalDisplay:
 
         fg = f"\033[38;2;{r};{g};{b}m"
 
-        out = ["\033[H"]  # cursor home (avoids full-clear flicker)
+        # A tiling WM resizes the terminal window often; without a full
+        # clear on resize, stale content from the previous (larger) size
+        # is never overwritten and lingers as ghost/duplicated pixels.
+        clear = "\033[2J" if size != self._last_size else ""
+        self._last_size = size
+
+        out = ["\033[H"]  # cursor home (avoids full-clear flicker on unchanged size)
         out.extend([block_line] * rows)
         out.append(reset + "\033[K" + fg + status + reset)
-        sys.stdout.write("\n".join(out))
+        sys.stdout.write(clear + "\n".join(out))
         sys.stdout.flush()
 
     def quit(self):

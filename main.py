@@ -130,6 +130,23 @@ def run_terminal_wheel(result_queue):
         display.quit()
 
 
+def _tab_note_rgb(pitch_class):
+    """A note's tab-view glyph color. Always uses the fifths hue mapping,
+    same as the wheel view (independent of --color-scheme, for the same
+    reason the wheel is: this is a fixed note-identity color, not a
+    representation of the currently-selected scheme), so a note reads as
+    the same color in `tab` as it does in `wheel` -- e.g. B is green in
+    both, not pink in one and green in the other. Uses a fixed lightness
+    (config.TAB_NOTE_LIGHTNESS) instead of scaling by octave, unlike
+    fill/GUI: octave already drives the note's row on the staff, and
+    0.5 is where a given hue/saturation looks most vivid/saturated in
+    HSL, rather than washing out toward white like a high lightness does."""
+    if pitch_class is None:
+        return config.IDLE_RGB
+    hue, sat, _light = note_to_hsl(pitch_class, config.MAX_OCTAVE, scheme="fifths")
+    return hsl_to_rgb255(hue, sat, config.TAB_NOTE_LIGHTNESS)
+
+
 def run_terminal_tab(result_queue, scroll_mode, dump_file):
     from terminal_tab_display import TabDisplay
 
@@ -139,7 +156,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file):
     time_since_tick = 0.0
 
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
-    pitch_class, octave, target_rgb = None, None, config.IDLE_RGB
+    pitch_class, octave = None, None
 
     resolved_dump = dump_file or os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -151,20 +168,22 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file):
             got_new = False
             is_onset = False
             try:
-                (target_rgb, is_onset, label, freq, confidence, rms,
+                (_target_rgb, is_onset, label, freq, confidence, rms,
                  _fifths_idx, pitch_class, octave) = result_queue.get_nowait()
                 got_new = True
             except queue.Empty:
                 pass
 
+            glyph_rgb = _tab_note_rgb(pitch_class)
+
             if scroll_mode == "onset":
                 if got_new and is_onset:
-                    display.push(pitch_class, octave, target_rgb, label)
+                    display.push(pitch_class, octave, glyph_rgb, label)
             else:  # "fix"
                 time_since_tick += dt
                 if time_since_tick >= fix_interval:
                     time_since_tick -= fix_interval
-                    display.push(pitch_class, octave, target_rgb, label)
+                    display.push(pitch_class, octave, glyph_rgb, label)
 
             status = _status_text(label, freq, confidence, rms) + f"   [{scroll_mode}] (Ctrl+C to quit)"
             display.render(status)
@@ -231,7 +250,8 @@ def main():
                          help="terminal mode only: 'fill' (solid color), 'wheel' (circle-of-fifths diagram), "
                               "or 'tab' (scrolling grand-staff note history)")
     parser.add_argument("--color-scheme", choices=["chromatic", "fifths"], default=config.DEFAULT_COLOR_SCHEME,
-                         help="hue mapping for fill/tab views (wheel view always uses the fifths layout)")
+                         help="hue mapping for the fill/GUI views (wheel and tab views always use "
+                              "the fifths layout)")
     parser.add_argument("--scroll", choices=["fix", "onset"], default=config.DEFAULT_SCROLL_MODE,
                          help="'tab' view only: 'fix' pushes a new column every tick; "
                               "'onset' pushes one only on a new note-attack")

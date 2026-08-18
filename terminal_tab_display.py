@@ -26,6 +26,7 @@ class TabDisplay:
         self.entries = deque(maxlen=config.TAB_VISIBLE_MAXLEN)
         self.session_history = []
         self._t0 = time.monotonic()
+        self._last_size = None
         sys.stdout.write("\033[?25l\033[2J")
         sys.stdout.flush()
 
@@ -36,7 +37,16 @@ class TabDisplay:
             self.session_history.append(entry)
 
     def render(self, status):
-        cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        cols, rows = size
+
+        # Only the current frame's row/column count is redrawn each time;
+        # on a resize (frequent in a tiling WM) that region shrinks or the
+        # note columns re-align, so the previous frame's content outside
+        # it would otherwise never get overwritten and linger as ghosts.
+        clear = "\033[2J" if size != self._last_size else ""
+        self._last_size = size
+
         usable_rows = max(rows - 1, 1)  # reserve the last row for status text
 
         top, bottom = TOP_ROW, BOTTOM_ROW
@@ -80,7 +90,7 @@ class TabDisplay:
         for i, line in enumerate(lines, start=1):
             out.append(f"\033[{i};1H\033[K{line}")
         out.append(f"\033[{len(lines) + 1};1H\033[K{status}")
-        sys.stdout.write("".join(out))
+        sys.stdout.write(clear + "".join(out))
         sys.stdout.flush()
 
     def dump_ansi(self, path):

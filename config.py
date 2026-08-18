@@ -41,6 +41,9 @@ WHEEL_FPS = 12
 
 # --- Tab / staff view ---
 DEFAULT_SCROLL_MODE = "onset"  # or "fix"
+TAB_NOTE_LIGHTNESS = 0.5        # fixed, octave-independent -- 0.5 is where a given
+                                 # hue/saturation looks most vivid; BASE_LIGHTNESS_RANGE's
+                                 # top end (used by fill/GUI) is much closer to white
 TAB_FPS = 20
 TAB_FIX_HOPS_PER_SEC = 4        # 'fix' mode: new column every 0.25s
 TAB_COLUMN_WIDTH = 3            # terminal characters per history column/glyph cell

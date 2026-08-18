@@ -19,11 +19,21 @@ DIM_LIGHTNESS = 0.16
 class WheelDisplay:
     def __init__(self, fps=12):
         self.fps = fps
+        self._last_size = None
         sys.stdout.write("\033[?25l\033[2J")
         sys.stdout.flush()
 
     def render(self, active_index, pulse, status):
-        cols, rows = shutil.get_terminal_size(fallback=(80, 24))
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        cols, rows = size
+
+        # Only 12 fixed-size cells + a status line are drawn each frame; on
+        # a resize the ring recenters, so the previous frame's cells (at
+        # the old positions) would otherwise never get overwritten and
+        # linger as ghost/duplicated notes. A tiling WM resizes often.
+        clear = "\033[2J" if size != self._last_size else ""
+        self._last_size = size
+
         cx = cols // 2
         cy = max(rows // 2 - 1, 5)
         ry = max(min(rows // 2 - 4, 8), 3)
@@ -54,7 +64,7 @@ class WheelDisplay:
 
         status_row = cy + ry + 2
         out.append(f"\033[{status_row};1H\033[K{status}")
-        sys.stdout.write("".join(out))
+        sys.stdout.write(clear + "".join(out))
         sys.stdout.flush()
 
     def quit(self):

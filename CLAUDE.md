@@ -50,13 +50,15 @@ Target end-to-end latency: comfortably under 150ms.
 | `audio_capture.py` | `AudioCapture` — wraps `sounddevice.InputStream` in callback mode, feeds a bounded drop-oldest queue. |
 | `pitch_detect.py` | `detect_pitch()` — hand-rolled YIN pitch detection in pure NumPy (FFT-based autocorrelation, cumulative mean normalization, parabolic interpolation). No `aubio`/`librosa` dependency, deliberately. |
 | `note_smoother.py` | `NoteSmoother` — turns noisy per-hop pitch estimates into a stable displayed note: silence/confidence gate, median filter in semitone space (kills octave-error outliers), debounce/hysteresis before switching the displayed note, onset detection. |
-| `color_map.py` | Pure functions: `note_to_hsl(pitch_class, octave, scheme="chromatic"|"fifths")` → HSL, `hsl_to_rgb255()` → RGB. `fifths_index(pitch_class)` maps a chromatic pitch class to its position on the circle of fifths — `(pitch_class * 7) % 12` (7 is its own modular inverse mod 12). |
-| `animation.py` | `ColorAnimator` — exponential crossfade toward the target color plus a decaying onset "pulse" brightness boost. Used by the GUI and terminal-fill views (not the wheel view, which does its own simpler per-cell pulse). |
+| `color_map.py` | Pure functions: `note_to_hsl(pitch_class, octave, scheme="chromatic"|"fifths")` → HSL, `hsl_to_rgb255()` → RGB. `fifths_index(pitch_class)` maps a chromatic pitch class to its position on the circle of fifths — `(pitch_class * 7) % 12` (7 is its own modular inverse mod 12). Also holds the shared `NOTE_NAMES` sharps-only spelling table. |
+| `staff_map.py` | Pure functions: `staff_row(pitch_class, octave)` → a note's row on a grand staff (bass + treble, row 0 = G2, row 12 = E4), `ledger_rows(row)` → which ledger lines a given row needs. Used only by the `tab` view. |
+| `animation.py` | `ColorAnimator` — exponential crossfade toward the target color plus a decaying onset "pulse" brightness boost. Used by the GUI and terminal-fill views (not the wheel or tab views, which do their own simpler per-cell pulse/no crossfade). |
 | `display.py` | `Display` — pygame GUI window (fullscreen toggle, solid fill + debug text overlay). |
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill, no GUI/display-server dependency. |
 | `terminal_wheel_display.py` | `WheelDisplay` — draws all 12 notes as a ring in circle-of-fifths order (C at top, clockwise), highlighting the currently-detected note. Always uses the fifths color mapping regardless of `--color-scheme`, since that's what the diagram is visualizing. |
-| `main.py` | Wires it all together: starts capture + analysis thread, dispatches to GUI (`run_gui`) or one of the terminal views (`run_terminal_fill` / `run_terminal_wheel`) based on CLI flags. `pygame` is only imported inside `run_gui`, so terminal modes have zero GUI dependency at runtime and work over SSH/headless. |
-| `tests/` | `test_pitch_detect.py` (YIN accuracy on synthetic tones), `test_note_smoother.py` (scripted sequences: stable note, octave blip, silence gap, genuine note change), `test_color_map.py` (both color schemes, including the confirmed circle-of-fifths hue table). |
+| `terminal_tab_display.py` | `TabDisplay` — scrolling note-history view: notes enter on the right and scroll left, each placed at its correct grand-staff row (`staff_map.py`) and colored. Owns the on-screen entry deque plus a capped full-session history used to write an ANSI text dump on quit (`dump_ansi()`). |
+| `main.py` | Wires it all together: starts capture + analysis thread, dispatches to GUI (`run_gui`) or one of the terminal views (`run_terminal_fill` / `run_terminal_wheel` / `run_terminal_tab`) based on CLI flags. `pygame` is only imported inside `run_gui`, so terminal modes have zero GUI dependency at runtime and work over SSH/headless. |
+| `tests/` | `test_pitch_detect.py` (YIN accuracy on synthetic tones), `test_note_smoother.py` (scripted sequences: stable note, octave blip, silence gap, genuine note change), `test_color_map.py` (both color schemes, including the confirmed circle-of-fifths hue table), `test_staff_map.py` (grand-staff row/ledger-line placement). |
 
 ## Running it
 
@@ -65,13 +67,22 @@ cd ~/note-color
 .venv/bin/python main.py                              # GUI window (chromatic scheme)
 .venv/bin/python main.py --terminal --view fill        # terminal fill
 .venv/bin/python main.py --terminal --view wheel        # terminal circle-of-fifths ring
+.venv/bin/python main.py --terminal --view tab --scroll onset   # scrolling staff, new column per note-attack
+.venv/bin/python main.py --terminal --view tab --scroll fix     # scrolling staff, new column every tick
 .venv/bin/python main.py --color-scheme fifths           # any mode, fifths hue mapping instead of chromatic
 .venv/bin/python -m pytest tests/                          # run the test suite
 ```
 
 Shorter launchers on PATH (`~/.local/bin/colorize`, added to `~/.zshrc`'s
-PATH): `colorize fill` and `colorize circle` — thin wrappers around
-`main.py --terminal --view fill|wheel` that forward any extra flags.
+PATH): `colorize fill`, `colorize circle`, `colorize tab fix`, and
+`colorize tab onset` — thin wrappers around `main.py --terminal --view
+fill|wheel|tab` that forward any extra flags (e.g. `colorize tab onset
+--color-scheme fifths`).
+
+The `tab` view writes an ANSI-colored note-history dump to a timestamped
+file next to `main.py` when it quits (override with `--dump-file PATH`) —
+one line per note (elapsed time, color swatch, note name), intended as a
+minimal first step toward possibly replaying/displaying the history later.
 
 GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay.
 Terminal modes: `Ctrl+C` to quit.
@@ -100,8 +111,47 @@ Terminal modes: `Ctrl+C` to quit.
   far less install risk than `glfw`+OpenGL or Kivy.
 - **Circle-of-fifths color scheme is additive, not a replacement** —
   chromatic (semitone-order hue) stays the default; `fifths` is opt-in via
-  `--color-scheme`. The wheel diagram view always shows fifths layout
-  regardless of this flag, since that's inherent to what it's visualizing.
+  `--color-scheme`. The wheel and tab views always show fifths layout
+  regardless of this flag: `--color-scheme` only affects fill/GUI. Tab
+  originally followed `--color-scheme` like fill did, but that meant the
+  same note could render as a different color in `tab` than in `wheel`
+  (e.g. B was pink under chromatic, green under fifths) -- since `tab` and
+  `wheel` are both meant to show a note's fixed color identity, they now
+  always agree with each other, matching `wheel`'s existing fifths-only
+  behavior instead of the other way around.
+- **`tab` view uses a grand staff (bass + treble), not a single treble
+  staff.** The app's usable range is C2–B5 (4 octaves); a single treble
+  staff would need 8 ledger lines below it to reach C2. A grand staff
+  (how piano music is notated) caps that at 2 ledger lines below and 1
+  above, at the cost of rendering two 5-line staff blocks instead of one.
+- **`tab` view's on-quit dump is a plain per-line text log, not a rendered
+  staff image** — one line per note (elapsed time, ANSI color swatch, note
+  name). Chosen to stay minimal (nothing fancier was asked for yet) and to
+  stay structured/parseable for a possible future playback feature, rather
+  than being a wide unusable ANSI-art block.
+- **`tab` view's note color ignores octave, unlike `fill`/GUI, and uses its
+  own fixed lightness (`config.TAB_NOTE_LIGHTNESS = 0.5`), not
+  `BASE_LIGHTNESS_RANGE`.** `fill`/GUI intentionally scale lightness by
+  octave (darker = lower, per `note_to_hsl()`). In `tab`, octave already
+  has a job — it sets the note's row on the staff — so also using it for
+  lightness made a low C render too dark to read as red and a high C wash
+  out toward white. The first fix reused `BASE_LIGHTNESS_RANGE`'s top end
+  (0.82, matching the wheel view's peak pulse brightness), but that's
+  close enough to white to read as pastel when held continuously rather
+  than shown as a brief pulse — lightness 0.5 is where a given
+  hue/saturation looks most vivid in HSL, so that's what `_tab_note_rgb()`
+  in `main.py` uses instead. Each note letter is still one fixed,
+  recognizable color (C is always red); only its vertical position moves
+  with octave.
+- **All three terminal views clear the screen on a detected size change,
+  not just once at startup.** They normally repaint via cursor-addressing
+  (not a full clear) every frame to avoid flicker, which only overwrites
+  the region the current frame actually draws. Under a tiling WM the
+  terminal window resizes constantly as tiles rearrange; without a
+  resize-triggered clear, content from the previous (larger) size/layout
+  was never overwritten and lingered as ghost/duplicated elements. Each
+  display class tracks `self._last_size` and clears once when
+  `shutil.get_terminal_size()` differs from the last frame's.
 
 ## Known limitations / things learned
 
@@ -126,6 +176,32 @@ Terminal modes: `Ctrl+C` to quit.
 - `~/.local/bin` was not on PATH before this project; it was created and
   added via a new line appended to `~/.zshrc` to support the `colorize`
   launcher.
+- **`tab --scroll onset` freezes the display during sustained notes or
+  silence, by design** — a new column only appears on a genuine new
+  note-attack (`NoteSmoother`'s `is_onset` flag), so a held note or a quiet
+  passage simply doesn't advance the scroll. This is expected, not a bug.
+- **Very short terminals (fewer than ~22 rows) will clip the outermost
+  ledger-line notes** in the `tab` view — the two 5-line staff blocks
+  themselves are never shrunk below their minimum size, so on a small
+  terminal, notes far above/below the staff just don't draw rather than
+  corrupting the staff layout.
+
+## Working practices
+
+This repo is tracked on GitHub at `github.com/pellepang/note-color`; git is
+the system of record for the project's history, not just a backup.
+
+- After each meaningful checkpoint (a fix, a feature, a config/behavior
+  change), commit with a message that describes the change and its
+  rationale, then push to `origin/main`. That way `git log`/GitHub history
+  doubles as the changelog, and no work done in a session gets silently
+  lost or forgotten by the next one.
+- Keep commits scoped to one logical change rather than batching unrelated
+  work together, so the history stays legible and each commit is easy to
+  reason about (or revert) on its own.
+- Generated run-time artifacts (e.g. `note_history_*.txt` dumps from the
+  `tab` view) are gitignored, not committed — they're per-session output,
+  not project state.
 
 ## Reference
 
