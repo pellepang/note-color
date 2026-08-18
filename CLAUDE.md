@@ -46,7 +46,7 @@ stage can ever stall another. Target end-to-end latency: comfortably under
 | File | Responsibility |
 |---|---|
 | `config.py` | All tunable constants (sample rate, buffer sizes, thresholds, color/animation params). Check here first. |
-| `audio_capture.py` | `AudioCapture` — `sounddevice.InputStream` callback → bounded drop-oldest queue. |
+| `audio_capture.py` | `AudioCapture` — `sounddevice.InputStream` callback → bounded drop-oldest queue. `resolve_loopback_device()` finds the system-output monitor for `--source loopback`. |
 | `pitch_detect.py` | `detect_pitch()` — hand-rolled YIN (pure NumPy, FFT autocorrelation + parabolic interpolation). |
 | `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection. |
 | `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `NOTE_NAMES`. |
@@ -69,6 +69,7 @@ cd ~/note-color
 .venv/bin/python main.py --terminal --view tab --scroll onset   # scrolling staff, new column per note-attack
 .venv/bin/python main.py --terminal --view tab --scroll fix     # scrolling staff, new column every tick
 .venv/bin/python main.py --color-scheme fifths           # any mode, fifths hue mapping instead of chromatic
+.venv/bin/python main.py --terminal --view fill --source loopback  # listen to system audio output, not mic
 .venv/bin/python -m pytest tests/                          # run the test suite
 ```
 
@@ -87,13 +88,21 @@ input). `--sensitivity FLOAT` sets the starting value (default 1.0); raises
 it to register quieter/softer playing more readily. Current value shown in
 the status line (`sens=`).
 
+`--source {mic,loopback}` (default `mic`) selects the input: `loopback`
+listens to the computer's own audio output instead of the microphone, via
+the PipeWire/PulseAudio monitor of the default sink (Linux only — errors
+out clearly on other platforms). Useful for testing without playing sound
+out loud; confirmed to keep working even while the output sink is muted.
+
 ## Key design decisions
 
 One-liners; full rationale in `docs/DECISIONS.md`.
 
 - Python + NumPy — cheap enough at these buffer sizes, no build toolchain.
 - Hand-rolled YIN, not `aubio`/`librosa` — wheel/dependency risk on Pi.
-- Microphone input, not loopback — OS-portable.
+- Microphone is the default input; `--source loopback` is opt-in and
+  Linux-only (PipeWire/PulseAudio monitor), so portability of the default
+  path is unaffected.
 - Monophonic only — simpler, real-time, fits the use case.
 - `pygame-ce` for the GUI — reliable wheels across target platforms.
 - `--color-scheme fifths` is additive; `wheel`/`tab` always use fifths so a

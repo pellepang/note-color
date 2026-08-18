@@ -1,6 +1,6 @@
 """Real-time audio -> color display.
 
-mic -> AudioCapture (callback thread)
+mic or system-output loopback -> AudioCapture (callback thread)
     -> analysis thread: ring buffer -> YIN pitch detect -> NoteSmoother -> color_map
     -> single-slot queue
     -> main thread: ColorAnimator -> Display (pygame window, or terminal)
@@ -22,7 +22,7 @@ import time
 import numpy as np
 
 import config
-from audio_capture import AudioCapture
+from audio_capture import AudioCapture, resolve_loopback_device
 from pitch_detect import detect_pitch
 from note_smoother import NoteSmoother
 from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES, NOTE_NAMES_FIFTHS
@@ -361,9 +361,20 @@ def main():
     parser.add_argument("--sensitivity", type=_positive_float, default=config.DEFAULT_SENSITIVITY,
                          help="pitch-detection sensitivity multiplier (default 1.0); higher registers "
                               "quieter/softer playing more readily. Adjustable live with Up/Down in any mode.")
+    parser.add_argument("--source", choices=["mic", "loopback"], default="mic",
+                         help="'mic' (default) listens to the microphone; 'loopback' listens to the "
+                              "computer's own audio output instead (PipeWire/PulseAudio on Linux only), "
+                              "for testing without playing anything out loud")
     args = parser.parse_args()
 
-    capture = AudioCapture(config.SAMPLE_RATE, config.BLOCK_SIZE, config.QUEUE_SIZE)
+    device = None
+    if args.source == "loopback":
+        try:
+            device = resolve_loopback_device()
+        except RuntimeError as exc:
+            parser.error(str(exc))
+
+    capture = AudioCapture(config.SAMPLE_RATE, config.BLOCK_SIZE, config.QUEUE_SIZE, device=device)
     capture.start()
 
     result_queue = queue.Queue(maxsize=1)
