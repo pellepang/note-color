@@ -20,3 +20,6 @@ A chord quality rotated to a specific root — one of the ~360 entries (30 quali
 
 **Chord mode**:
 The opt-in detection mode (toggled via `P` in terminal views) that runs chroma-vector chord recognition instead of monophonic YIN pitch detection. Coexists with the existing default mode; does not replace it.
+
+**Bass chroma**:
+A second, separate 12-bin pitch-class estimate folded only from the low-frequency portion of the spectrum (below ~250Hz). Its strongest bin is the detected bass note, used to resolve inversions/slash chords and to break ties between rotationally-symmetric chord templates (dim7, aug) — the main chroma vector alone can't do either, since it discards octave.
