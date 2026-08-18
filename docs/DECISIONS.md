@@ -103,6 +103,16 @@ elements. Each display class tracks `self._last_size` and clears once when
   passage simply doesn't advance the scroll. This is expected, not a bug.
 - **Very short terminals (fewer than ~22 rows) will clip the outermost
   ledger-line notes** in the `tab` view — the two 5-line staff blocks
-  themselves are never shrunk below their minimum size, so on a small
-  terminal, notes far above/below the staff just don't draw rather than
-  corrupting the staff layout.
+  themselves are never shrunk below their 21-row minimum (top=20, bottom=0),
+  so on a small terminal, notes far above/below the staff just don't draw
+  rather than corrupting the staff layout. Below that 21-row floor (terminal
+  height under ~22 rows including the status line), `render()` additionally
+  caps how many staff rows it emits at `usable_rows`, cropping off the
+  bottom (bass) rows first, rather than writing ANSI cursor-addressing past
+  the terminal's actual height — the latter used to scroll/corrupt the
+  fixed-position rendering instead of just cropping. Fixed 2026-08-18: two
+  related bugs in `TabDisplay.render()` — out-of-range notes were clamped
+  onto the boundary staff row instead of dropped (silently misplacing them),
+  and the row-emission loop didn't cap at `usable_rows`, so terminals under
+  22 rows always wrote past their real height. See
+  `tests/test_terminal_tab_display.py`.

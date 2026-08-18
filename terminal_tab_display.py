@@ -66,16 +66,27 @@ class TabDisplay:
 
         columns = [(None, frozenset(), None, None)] * pad
         for e in visible_entries:
-            if e.pitch_class is None:
+            # Notes still outside [bottom, top] after the shrink above (only
+            # possible once the staff has hit its 21-row floor, on a terminal
+            # too short even for that) are dropped rather than clamped onto
+            # the boundary row -- clamping would silently draw the note at
+            # the wrong staff position instead of just not showing it.
+            if e.pitch_class is None or not (bottom <= staff_row(e.pitch_class, e.octave) <= top):
                 columns.append((None, frozenset(), None, None))
                 continue
             row = staff_row(e.pitch_class, e.octave)
             ledgers = frozenset(r for r in ledger_rows(row) if bottom <= r <= top)
-            row = max(bottom, min(top, row))
             columns.append((row, ledgers, e.rgb, e.label))
 
+        # The staff itself is never shrunk below 21 rows (top=20..bottom=0),
+        # even on a terminal shorter than that -- cap what we actually emit
+        # to usable_rows so cursor addressing never targets a row beyond the
+        # real terminal height, which would scroll/corrupt the fixed-position
+        # rendering instead of just cropping the staff.
         lines = []
         for screen_row in range(top, bottom - 1, -1):
+            if len(lines) >= usable_rows:
+                break
             cells = []
             for note_row, ledgers, rgb, label in columns:
                 if note_row == screen_row and rgb is not None:

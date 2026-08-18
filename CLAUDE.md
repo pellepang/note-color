@@ -22,11 +22,7 @@ tracking, not a bug to chase without a concrete symptom.
 
 ## Backlog (open problems, not yet fixed)
 
-- **Visual bugs in the `tab` view.** User-reported 2026-08-18, no concrete
-  repro yet. Candidate causes: interaction between the per-frame
-  cursor-addressed redraw in `terminal_tab_display.py`'s `render()` and the
-  grand-staff row math (`staff_map.py`); small-terminal edge cases (see
-  known limitations below).
+None currently open.
 
 ## Architecture
 
