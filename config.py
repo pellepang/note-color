@@ -12,8 +12,13 @@ FMAX = 1000.0             # ~B5
 YIN_THRESHOLD = 0.12
 
 # --- Note smoothing ---
+# RMS_SILENCE_THRESHOLD and CONFIDENCE_THRESHOLD are the base values at
+# sensitivity=1.0. Both scale down (more permissive) as sensitivity rises;
+# see NoteSmoother.set_sensitivity(). Adjustable at launch via --sensitivity
+# and live via the [ / ] hotkeys in every display mode.
 RMS_SILENCE_THRESHOLD = 0.01
 CONFIDENCE_THRESHOLD = 0.5
+DEFAULT_SENSITIVITY = 1.0
 MEDIAN_WINDOW = 5
 DEBOUNCE_HOPS = 3
 SILENCE_HOPS = 3

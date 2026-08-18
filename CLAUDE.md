@@ -27,10 +27,6 @@ tracking, not a bug to chase without a concrete symptom.
   cursor-addressed redraw in `terminal_tab_display.py`'s `render()` and the
   grand-staff row math (`staff_map.py`); small-terminal edge cases (see
   known limitations below).
-- **Pitch detection isn't sensitive enough.** User wants a runtime-adjustable
-  sensitivity control instead of fixed constants. Relevant knobs:
-  `RMS_SILENCE_THRESHOLD` and `CONFIDENCE_THRESHOLD` in `config.py`, gated
-  in `note_smoother.py`.
 
 ## Architecture
 
@@ -88,8 +84,12 @@ PATH): `colorize fill`, `colorize circle`, `colorize tab fix`, and
 The `tab` view writes an ANSI-colored note-history dump to a timestamped
 file next to `main.py` on quit (override with `--dump-file PATH`).
 
-GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay.
-Terminal modes: `Ctrl+C` to quit.
+GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay,
+`[`/`]` decrease/increase pitch sensitivity. Terminal modes: `Ctrl+C` to
+quit, `[`/`]` sensitivity (needs a real TTY; no-op otherwise, e.g. piped
+input). `--sensitivity FLOAT` sets the starting value (default 1.0); raises
+it to register quieter/softer playing more readily. Current value shown in
+the status line (`sens=`).
 
 ## Key design decisions
 

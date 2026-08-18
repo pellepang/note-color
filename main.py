@@ -13,6 +13,8 @@ import argparse
 import math
 import os
 import queue
+import select
+import sys
 import threading
 import time
 
@@ -25,10 +27,73 @@ from note_smoother import NoteSmoother
 from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES
 from animation import ColorAnimator
 
+try:
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ImportError:  # Windows has neither module
+    _HAS_TERMIOS = False
 
-def analysis_loop(capture, result_queue, stop_event, color_scheme):
+SENSITIVITY_STEP = 1.25
+SENSITIVITY_MIN = 0.1
+SENSITIVITY_MAX = 10.0
+
+
+class Sensitivity:
+    """Shared between the analysis thread (reads .value every hop) and
+    whichever thread owns the render loop (writes .value on a hotkey).
+    Plain attribute access is safe here under CPython's GIL -- the value is
+    read/written as a whole float, and staleness by one hop is harmless."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def adjust(self, factor):
+        self.value = min(max(self.value * factor, SENSITIVITY_MIN), SENSITIVITY_MAX)
+
+
+class RawKeys:
+    """Non-blocking single-key reads from stdin, for terminal hotkeys.
+    Inert (poll() always returns None) when stdin isn't a real TTY or
+    termios/tty aren't available (Windows) -- terminal modes keep working,
+    just without live hotkeys, in that case."""
+
+    def __init__(self):
+        self._active = _HAS_TERMIOS and sys.stdin.isatty()
+        self._old_settings = None
+        if self._active:
+            self._old_settings = termios.tcgetattr(sys.stdin)
+            tty.setcbreak(sys.stdin.fileno())
+
+    def poll(self):
+        if not self._active:
+            return None
+        if select.select([sys.stdin], [], [], 0)[0]:
+            return sys.stdin.read(1)
+        return None
+
+    def restore(self):
+        if self._active:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_settings)
+
+
+def _positive_float(text):
+    value = float(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return value
+
+
+def _handle_sensitivity_key(key, sensitivity):
+    if key == "[":
+        sensitivity.adjust(1.0 / SENSITIVITY_STEP)
+    elif key == "]":
+        sensitivity.adjust(SENSITIVITY_STEP)
+
+
+def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
-    smoother = NoteSmoother(config)
+    smoother = NoteSmoother(config, sensitivity.value)
 
     while not stop_event.is_set():
         try:
@@ -40,6 +105,7 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme):
         ring = np.concatenate([ring[len(block):], block])
         rms = float(np.sqrt(np.mean(block * block))) if len(block) else 0.0
 
+        smoother.set_sensitivity(sensitivity.value)
         freq, confidence = detect_pitch(ring, config.SAMPLE_RATE, config.FMIN, config.FMAX, config.YIN_THRESHOLD)
         pitch_class, octave, is_onset = smoother.update(freq, confidence, rms)
 
@@ -68,22 +134,25 @@ def _overwrite(q, item):
         pass
 
 
-def _status_text(label, freq, confidence, rms):
+def _status_text(label, freq, confidence, rms, sensitivity):
     freq_str = f"{freq:6.1f}Hz" if freq else "  --  "
-    return f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f}"
+    return (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
+            f"sens={sensitivity.value:.2f} ([/])")
 
 
-def run_terminal_fill(result_queue):
+def run_terminal_fill(result_queue, sensitivity):
     from terminal_display import TerminalDisplay
 
     display = TerminalDisplay(fps=config.TERMINAL_FPS)
     animator = ColorAnimator(config.CROSSFADE_TAU_MS, config.PULSE_DECAY_MS, config.ONSET_PULSE_BOOST)
+    keys = RawKeys()
 
     target_rgb, is_onset, label, freq, confidence, rms = config.IDLE_RGB, False, "-", 0.0, 0.0, 0.0
     dt = 1.0 / display.fps
 
     try:
         while True:
+            _handle_sensitivity_key(keys.poll(), sensitivity)
             try:
                 (target_rgb, is_onset, label, freq, confidence, rms,
                  _fifths_idx, _pitch_class, _octave) = result_queue.get_nowait()
@@ -91,21 +160,23 @@ def run_terminal_fill(result_queue):
                 is_onset = False
 
             rgb = animator.update(dt, target_rgb, is_onset)
-            status = _status_text(label, freq, confidence, rms) + "   (Ctrl+C to quit)"
+            status = _status_text(label, freq, confidence, rms, sensitivity) + "  (Ctrl+C to quit)"
             display.render(rgb, status)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
     finally:
+        keys.restore()
         display.quit()
 
 
-def run_terminal_wheel(result_queue):
+def run_terminal_wheel(result_queue, sensitivity):
     from terminal_wheel_display import WheelDisplay
 
     display = WheelDisplay(fps=config.WHEEL_FPS)
     pulse_decay = config.PULSE_DECAY_MS / 1000.0
     dt = 1.0 / display.fps
+    keys = RawKeys()
 
     active_index = None
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
@@ -113,6 +184,7 @@ def run_terminal_wheel(result_queue):
 
     try:
         while True:
+            _handle_sensitivity_key(keys.poll(), sensitivity)
             is_onset = False
             try:
                 (_target_rgb, is_onset, label, freq, confidence, rms,
@@ -121,12 +193,13 @@ def run_terminal_wheel(result_queue):
                 pass
 
             pulse = 1.0 if is_onset else pulse * math.exp(-dt / pulse_decay)
-            status = _status_text(label, freq, confidence, rms) + "   (Ctrl+C to quit)"
+            status = _status_text(label, freq, confidence, rms, sensitivity) + "  (Ctrl+C to quit)"
             display.render(active_index, pulse, status)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
     finally:
+        keys.restore()
         display.quit()
 
 
@@ -147,13 +220,14 @@ def _tab_note_rgb(pitch_class):
     return hsl_to_rgb255(hue, sat, config.TAB_NOTE_LIGHTNESS)
 
 
-def run_terminal_tab(result_queue, scroll_mode, dump_file):
+def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity):
     from terminal_tab_display import TabDisplay
 
     display = TabDisplay(fps=config.TAB_FPS)
     dt = 1.0 / display.fps
     fix_interval = 1.0 / config.TAB_FIX_HOPS_PER_SEC
     time_since_tick = 0.0
+    keys = RawKeys()
 
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
     pitch_class, octave = None, None
@@ -165,6 +239,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file):
 
     try:
         while True:
+            _handle_sensitivity_key(keys.poll(), sensitivity)
             got_new = False
             is_onset = False
             try:
@@ -185,19 +260,20 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file):
                     time_since_tick -= fix_interval
                     display.push(pitch_class, octave, glyph_rgb, label)
 
-            status = _status_text(label, freq, confidence, rms) + f"   [{scroll_mode}] (Ctrl+C to quit)"
+            status = _status_text(label, freq, confidence, rms, sensitivity) + f"  [{scroll_mode}] (Ctrl+C to quit)"
             display.render(status)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
     finally:
+        keys.restore()
         try:
             display.dump_ansi(resolved_dump)
         finally:
             display.quit()
 
 
-def run_gui(result_queue, fullscreen, start_debug):
+def run_gui(result_queue, fullscreen, start_debug, sensitivity):
     import pygame
     from display import Display
 
@@ -221,6 +297,10 @@ def run_gui(result_queue, fullscreen, start_debug):
                         display.toggle_fullscreen()
                     elif event.key == pygame.K_d:
                         show_debug = not show_debug
+                    elif event.key == pygame.K_LEFTBRACKET:
+                        sensitivity.adjust(1.0 / SENSITIVITY_STEP)
+                    elif event.key == pygame.K_RIGHTBRACKET:
+                        sensitivity.adjust(SENSITIVITY_STEP)
             if not display.running:
                 break
 
@@ -233,7 +313,7 @@ def run_gui(result_queue, fullscreen, start_debug):
             rgb = animator.update(dt, target_rgb, is_onset)
             display.screen.fill(rgb)
             if show_debug:
-                text = font.render(_status_text(label, freq, confidence, rms), True, (255, 255, 255))
+                text = font.render(_status_text(label, freq, confidence, rms, sensitivity), True, (255, 255, 255))
                 display.screen.blit(text, (10, 10))
             pygame.display.flip()
             dt = display.clock.tick(display.fps) / 1000.0
@@ -258,6 +338,9 @@ def main():
     parser.add_argument("--dump-file", default=None,
                          help="'tab' view only: path for the ANSI session note-history dump written on quit "
                               "(default: note_history_<timestamp>.txt next to main.py)")
+    parser.add_argument("--sensitivity", type=_positive_float, default=config.DEFAULT_SENSITIVITY,
+                         help="pitch-detection sensitivity multiplier (default 1.0); higher registers "
+                              "quieter/softer playing more readily. Adjustable live with [ / ] in any mode.")
     args = parser.parse_args()
 
     capture = AudioCapture(config.SAMPLE_RATE, config.BLOCK_SIZE, config.QUEUE_SIZE)
@@ -265,21 +348,22 @@ def main():
 
     result_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
+    sensitivity = Sensitivity(args.sensitivity)
     analysis_thread = threading.Thread(
-        target=analysis_loop, args=(capture, result_queue, stop_event, args.color_scheme), daemon=True
+        target=analysis_loop, args=(capture, result_queue, stop_event, args.color_scheme, sensitivity), daemon=True
     )
     analysis_thread.start()
 
     try:
         if args.terminal:
             if args.view == "wheel":
-                run_terminal_wheel(result_queue)
+                run_terminal_wheel(result_queue, sensitivity)
             elif args.view == "tab":
-                run_terminal_tab(result_queue, args.scroll, args.dump_file)
+                run_terminal_tab(result_queue, args.scroll, args.dump_file, sensitivity)
             else:
-                run_terminal_fill(result_queue)
+                run_terminal_fill(result_queue, sensitivity)
         else:
-            run_gui(result_queue, args.fullscreen, args.debug)
+            run_gui(result_queue, args.fullscreen, args.debug, sensitivity)
     finally:
         stop_event.set()
         capture.stop()

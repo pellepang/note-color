@@ -10,13 +10,14 @@ from collections import deque
 
 
 class NoteSmoother:
-    def __init__(self, cfg):
+    def __init__(self, cfg, sensitivity=1.0):
         self.median_window = cfg.MEDIAN_WINDOW
         self.debounce_hops = cfg.DEBOUNCE_HOPS
         self.silence_hops = cfg.SILENCE_HOPS
-        self.rms_silence_threshold = cfg.RMS_SILENCE_THRESHOLD
-        self.confidence_threshold = cfg.CONFIDENCE_THRESHOLD
+        self.base_rms_silence_threshold = cfg.RMS_SILENCE_THRESHOLD
+        self.base_confidence_threshold = cfg.CONFIDENCE_THRESHOLD
         self.onset_rms_ratio = 10 ** (cfg.ONSET_RMS_JUMP_DB / 20.0)
+        self.set_sensitivity(sensitivity)
 
         self.history = deque(maxlen=self.median_window)
         self.candidate_note = None
@@ -25,6 +26,13 @@ class NoteSmoother:
         self.silence_count = 0
         self.prev_rms = 0.0
         self.was_silent = True
+
+    def set_sensitivity(self, sensitivity):
+        """Higher sensitivity lowers both gates, so quieter/softer playing
+        is more likely to register. 1.0 reproduces the config.py defaults."""
+        self.sensitivity = max(sensitivity, 0.01)
+        self.rms_silence_threshold = self.base_rms_silence_threshold / self.sensitivity
+        self.confidence_threshold = self.base_confidence_threshold / self.sensitivity
 
     def update(self, freq_hz, confidence, rms):
         """Returns (pitch_class, octave, is_onset). pitch_class/octave are

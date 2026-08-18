@@ -49,6 +49,18 @@ def test_sustained_silence_goes_idle():
     assert pitch_class is None and octave is None
 
 
+def test_higher_sensitivity_registers_a_quieter_note():
+    quiet_rms = config.RMS_SILENCE_THRESHOLD * 1.5  # passes the default gate, but not a stricter one
+
+    default = NoteSmoother(config)
+    pitch_class, octave, _ = feed(default, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW, rms=quiet_rms)
+    assert (pitch_class, octave) == (9, 4)
+
+    less_sensitive = NoteSmoother(config, sensitivity=0.1)
+    pitch_class, octave, _ = feed(less_sensitive, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW, rms=quiet_rms)
+    assert (pitch_class, octave) == (None, None)
+
+
 def test_genuine_note_change_registers_with_onset():
     s = NoteSmoother(config)
     feed(s, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW)
