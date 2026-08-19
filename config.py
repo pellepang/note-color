@@ -43,6 +43,13 @@ MIN_OCTAVE = 2
 MAX_OCTAVE = 6
 BASE_LIGHTNESS_RANGE = (0.18, 0.82)
 BASE_SATURATION = 0.75
+# Shared "dim/inactive" lightness floor -- originally terminal_wheel_display.py's
+# own module constant (inactive pitch-class wedges), promoted here so
+# terminal_tab_display.py's per-column age-based fade (issue #22) can reuse
+# the exact same floor without a second copy the two views could drift
+# apart from (same rationale as the NOTE_NAMES_FIFTHS/diatonic_step() fix --
+# see docs/DECISIONS.md).
+DIM_LIGHTNESS = 0.16
 IDLE_RGB = (6, 6, 12)
 DEFAULT_COLOR_SCHEME = "chromatic"  # or "fifths"
 
@@ -59,6 +66,9 @@ WHEEL_FPS = 12
 
 # --- Tab / staff view ---
 DEFAULT_SCROLL_MODE = "onset"  # or "fix"
+TAB_DEFAULT_NOTEHEAD_STYLE = "symbol"  # or "name" -- live-togglable with N; symbol
+                                        # picked as more visually distinctive (issue #13/#21)
+TAB_DEFAULT_LEGEND_ON = True           # live-togglable with L
 TAB_NOTE_LIGHTNESS = 0.5        # fixed, octave-independent -- 0.5 is where a given
                                  # hue/saturation looks most vivid; BASE_LIGHTNESS_RANGE's
                                  # top end (used by fill/GUI) is much closer to white
@@ -66,6 +76,17 @@ TAB_FPS = 20
 TAB_FIX_HOPS_PER_SEC = 4        # 'fix' mode: new column every 0.25s
 TAB_COLUMN_WIDTH = 3            # terminal characters per history column/glyph cell
 TAB_COLUMN_WIDTH_CHORD = 9       # chord mode: wide enough for names like "C#13b9/F#"
-TAB_LEGEND_WIDTH = 5            # left-hand column: clef glyphs + staff-line note names
+TAB_CLEF_WIDTH = 3               # left-hand legend sub-column: clef glyph on its anchor
+                                 # row, blank elsewhere (issue #36: its own column, not
+                                 # merged with the letter column)
+TAB_LETTER_WIDTH = 2            # right-hand legend sub-column: staff-row note letter,
+                                 # one per row (every line AND space, issue #36)
+TAB_LEGEND_WIDTH = TAB_CLEF_WIDTH + TAB_LETTER_WIDTH  # total width the L toggle
+                                                        # reserves from/returns to note columns
 TAB_VISIBLE_MAXLEN = 300        # on-screen deque cap
 TAB_SESSION_HISTORY_MAX = 5000  # cap on entries retained for the end-of-session dump
+FADE_COLUMNS = 16               # issue #22: columns of age to fade a scrolled-past column
+                                 # linearly from TAB_NOTE_LIGHTNESS down to DIM_LIGHTNESS,
+                                 # held at that floor beyond this age. Reached via three
+                                 # rounds of live user reaction (4 -> 8 -> 16) -- not a
+                                 # value to second-guess without new live feedback.

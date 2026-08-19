@@ -5,6 +5,40 @@ color scheme. Two callers decide *when* a new column is pushed (see
 main.py's run_terminal_tab: 'fix' on a timer, 'onset' on a new note-attack)
 -- this module only owns layout/rendering and the session history used for
 the on-quit ANSI dump.
+
+Two live-togglable notehead render styles (issue #21's finalized decision,
+`N` keybind in main.py): *symbol* (an open notehead glyph, U+1D157, plus a
+real Unicode flat/sharp marker if needed -- no letter or octave text at
+all) and *name* (bare letter + ASCII accidental, e.g. "A", "Bb", "F#" --
+no octave digit, since the staff row already conveys octave). Both use
+`color_map.NOTE_NAMES_FIFTHS` for spelling, matching every other flat-
+biased label in this app. `TabEntry.notes` still stores each note's
+pitch_class/octave (for `_cell_text()` to render fresh against whichever
+style is currently selected -- so toggling `N` live restyles history
+that's still on screen, not just future pushes) alongside its precomputed
+letter+octave `label`, which exists purely for `dump_ansi()`'s on-quit
+text dump (unaffected by the `N`/`L` toggles, per the map's standing
+decision) and is never used by `render()`.
+
+Two further live-togglable behaviors (issues #22/#23, `main.py`'s render-
+thread-local state, no `TabDisplay`-side toggle methods -- same pattern as
+`notehead_style`/`legend_on`): per-column age-based dimming, and a `Space`
+freeze-frame. Dimming (#22): the newest visible column renders at
+`config.TAB_NOTE_LIGHTNESS` (tab's normal, always-used note lightness);
+every older column's lightness fades linearly down to `config.
+DIM_LIGHTNESS` (the same floor `terminal_wheel_display.py` uses for its
+own inactive wedges -- promoted to `config.py` so the two can't drift)
+over `config.FADE_COLUMNS` columns of age, held at that floor beyond it.
+Age is each column's distance from the newest *visible* column (0 =
+newest), recomputed fresh every `render()` call from `pitch_class` (see
+`_column_note_rgb()`) rather than baked in at push time -- a column's age
+changes every frame as newer columns scroll in, so its color can't be
+fixed when pushed. `TabEntry.notes`' precomputed `rgb` field is therefore
+only ever read by `dump_ansi()` now, same as `label`. Freeze-frame (#23,
+`render(..., frozen=True)`): forces every visible column's age to 0,
+overriding the fade entirely, while `main.py` stops pushing new columns --
+`render()` itself doesn't know or care that no new columns are arriving,
+it just keeps redrawing the same history with age pinned at 0.
 """
 
 import shutil
@@ -13,8 +47,9 @@ import time
 from collections import deque, namedtuple
 
 import config
+from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
 from staff_map import (
-    staff_row, ledger_rows, line_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
+    staff_row, ledger_rows, row_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
     BASS_CLEF_ROW, TREBLE_CLEF_ROW,
 )
 
@@ -25,6 +60,14 @@ TabEntry = namedtuple("TabEntry", "notes chord_name t")
 LEDGER_CHAR = "─"
 BASS_CLEF_GLYPH = "𝄢"
 TREBLE_CLEF_GLYPH = "𝄞"
+
+NOTEHEAD_GLYPH = "\U0001D157"  # MUSICAL SYMBOL VOID NOTEHEAD -- #15's winner
+# Real Unicode accidental signs for *symbol* style, keyed by the ASCII
+# suffix NOTE_NAMES_FIFTHS already uses -- #21's finalized decision (an
+# earlier ASCII "b"/"#" stand-in was replaced with these after live
+# reaction; the East_Asian_Width=Ambiguous risk #14 flagged for both is
+# expected/accepted, not a reason to avoid them).
+SYMBOL_ACCIDENTALS = {"b": "♭", "#": "♯"}
 
 
 class TabDisplay:
@@ -53,7 +96,7 @@ class TabDisplay:
         if len(self.session_history) < config.TAB_SESSION_HISTORY_MAX:
             self.session_history.append(entry)
 
-    def render(self, status, chord_mode=False):
+    def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False):
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
 
@@ -78,16 +121,24 @@ class TabDisplay:
                 shrink -= 1
 
         width = config.TAB_COLUMN_WIDTH_CHORD if chord_mode else config.TAB_COLUMN_WIDTH
-        legend_width = config.TAB_LEGEND_WIDTH
+        # `L` (legend_on) reclaims the legend column's width for note
+        # columns entirely when off, rather than just blanking its
+        # content -- issue #19's stated intent for the toggle.
+        legend_width = config.TAB_LEGEND_WIDTH if legend_on else 0
         visible_cols = max((cols - legend_width) // width, 1)
         visible_entries = list(self.entries)[-visible_cols:]
         pad = visible_cols - len(visible_entries)
 
         columns = [({}, frozenset(), None)] * pad
-        for e in visible_entries:
+        last_index = len(visible_entries) - 1
+        for index, e in enumerate(visible_entries):
+            # Age is distance from the newest *visible* column (0 = newest);
+            # #23's freeze-frame pins every column's age to 0, overriding
+            # #22's fade entirely, without this loop needing to know why.
+            age = 0 if frozen else last_index - index
             row_map = {}
             ledgers = set()
-            for pitch_class, octave, rgb, label in e.notes:
+            for pitch_class, octave, _rgb, _label in e.notes:
                 # Notes still outside [bottom, top] after the shrink above
                 # (only possible once the staff has hit its 21-row floor,
                 # on a terminal too short even for that) are dropped rather
@@ -99,7 +150,18 @@ class TabDisplay:
                 row = staff_row(pitch_class, octave)
                 if not (bottom <= row <= top):
                     continue
-                row_map[row] = (rgb, label)
+                # Store the raw pitch_class, not the precomputed `label`
+                # (that's dump_ansi()'s letter+octave text, untouched by
+                # notehead_style) -- _cell_text() below renders fresh
+                # against whichever style is current, so a live `N` toggle
+                # restyles already-on-screen columns too. Color is also
+                # recomputed fresh here (_column_note_rgb), not the
+                # precomputed `_rgb` this note tuple carries -- that
+                # precomputed value is always TAB_NOTE_LIGHTNESS and is
+                # only ever read by dump_ansi(); a column's age (and thus
+                # its dimming) changes every render as newer columns scroll
+                # in, so it can't be baked in at push time.
+                row_map[row] = (_column_note_rgb(pitch_class, age), pitch_class)
                 ledgers.update(r for r in ledger_rows(row) if bottom <= r <= top)
             columns.append((row_map, frozenset(ledgers), e.chord_name))
 
@@ -118,19 +180,30 @@ class TabDisplay:
         for screen_row in range(top, bottom - 1, -1):
             if len(lines) >= usable_rows + header_rows:
                 break
-            if screen_row == BASS_CLEF_ROW:
-                legend = BASS_CLEF_GLYPH.center(legend_width)
-            elif screen_row == TREBLE_CLEF_ROW:
-                legend = TREBLE_CLEF_GLYPH.center(legend_width)
-            elif screen_row in STAFF_LINE_ROWS:
-                legend = line_note_name(screen_row).center(legend_width)
+            if not legend_on:
+                legend = ""
             else:
-                legend = " " * legend_width
+                # Two side-by-side sub-columns (issue #36's "variant B" split,
+                # previously merged into one shared region): a clef-only
+                # column, blank except on its own anchor row, then a letter
+                # column labeling EVERY row -- line and space alike, not just
+                # STAFF_LINE_ROWS -- via row_note_name()'s general diatonic-
+                # step math (every staff row, line or space, is a natural
+                # note; accidentals share their natural's row, same as
+                # noteheads do).
+                if screen_row == BASS_CLEF_ROW:
+                    clef_cell = BASS_CLEF_GLYPH.center(config.TAB_CLEF_WIDTH)
+                elif screen_row == TREBLE_CLEF_ROW:
+                    clef_cell = TREBLE_CLEF_GLYPH.center(config.TAB_CLEF_WIDTH)
+                else:
+                    clef_cell = " " * config.TAB_CLEF_WIDTH
+                letter_cell = row_note_name(screen_row).center(config.TAB_LETTER_WIDTH)
+                legend = clef_cell + letter_cell
             cells = [legend]
             for row_map, ledgers, _chord_name in columns:
                 if screen_row in row_map:
-                    rgb, label = row_map[screen_row]
-                    cells.append(_note_cell(rgb, label, width))
+                    rgb, pitch_class = row_map[screen_row]
+                    cells.append(_note_cell(rgb, _cell_text(pitch_class, notehead_style), width))
                 elif screen_row in ledgers or screen_row in STAFF_LINE_ROWS:
                     cells.append(LEDGER_CHAR * width)
                 else:
@@ -172,3 +245,47 @@ def _note_cell(rgb, label, width):
     fg = (20, 20, 20) if lum > 140 else (230, 230, 230)
     text = (label or "")[:width].center(width)
     return f"\033[48;2;{r};{g};{b}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m{text}\033[0m"
+
+
+def _aged_lightness(age):
+    """Issue #22's dimming curve: linear fade from `config.TAB_NOTE_LIGHTNESS`
+    at `age` 0 (the newest visible column) down to `config.DIM_LIGHTNESS`
+    by `config.FADE_COLUMNS` columns of age, held at that floor beyond it.
+    Freeze-frame (#23) passes `age=0` for every visible column, which this
+    formula already resolves to full `TAB_NOTE_LIGHTNESS` -- no separate
+    freeze branch needed here, the caller just lies about age."""
+    if config.FADE_COLUMNS <= 1:
+        return config.DIM_LIGHTNESS
+    fraction = min(age / (config.FADE_COLUMNS - 1), 1.0)
+    return config.TAB_NOTE_LIGHTNESS - (config.TAB_NOTE_LIGHTNESS - config.DIM_LIGHTNESS) * fraction
+
+
+def _column_note_rgb(pitch_class, age):
+    """A note cell's on-screen color, recomputed fresh every render: the
+    same fixed fifths hue/saturation `main.py`'s `_tab_note_rgb()` computes
+    when a note is first pushed, but with lightness taken from
+    `_aged_lightness()` instead of the fixed `config.TAB_NOTE_LIGHTNESS`
+    that precomputed value always uses. `note_to_hsl(..., scheme="fifths")`
+    is used (not `--color-scheme`) for the same reason `_tab_note_rgb()`
+    hardcodes it: `tab` reads as the same color as `wheel`, independent of
+    the active color scheme."""
+    hue, sat, _light = note_to_hsl(pitch_class, config.MAX_OCTAVE, scheme="fifths")
+    return hsl_to_rgb255(hue, sat, _aged_lightness(age))
+
+
+def _accidental_suffix(pitch_class):
+    """'b'/'#' suffix from NOTE_NAMES_FIFTHS, or '' for a natural note."""
+    name = NOTE_NAMES_FIFTHS[pitch_class]
+    return name[1:] if len(name) > 1 else ""
+
+
+def _cell_text(pitch_class, style):
+    """The notehead's on-screen text for the given render style -- see the
+    module docstring for what each style shows. `style` is whatever the
+    caller's live `N` toggle currently selects; unrecognized values fall
+    back to *name* rather than raising, so a stale/typo'd style string
+    degrades gracefully instead of crashing the render loop."""
+    if style == "symbol":
+        marker = SYMBOL_ACCIDENTALS.get(_accidental_suffix(pitch_class), "")
+        return NOTEHEAD_GLYPH + marker
+    return NOTE_NAMES_FIFTHS[pitch_class]

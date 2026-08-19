@@ -209,3 +209,198 @@ unchanged.
   a synthesized pure sine with no harmonics at all is an edge case not
   representative of real playing, observed during implementation testing
   but not chased further absent a concrete complaint.
+
+## Notehead render styles (`N`) and merged legend column (issue #13/#20/#21)
+
+`terminal_tab_display.py`'s `TabDisplay.render()` now takes `notehead_style`
+("symbol" or "name") and `legend_on` (bool), both owned as render-thread-
+local state in `main.py`'s `run_terminal_tab` (same pattern as `chord_mode`
+for `P` — no shared state, no `TabDisplay`-side toggle method). `TabEntry`
+still carries each note's raw `pitch_class`/`octave` (not just a
+precomputed label), so `render()` recomputes on-screen text fresh every
+frame via `_cell_text()` — a live `N` press restyles columns already on
+screen, not just future ones. `dump_ansi()` is untouched: it reads the
+`label` field of `TabEntry.notes` directly (letter+octave), which
+`render()` no longer uses at all.
+
+**G-clef bottom-clipping investigation (issue #20, fix 1).** #19's
+prototype (`prototype/clef-and-legend-toggle`) theorized the clipping was
+a horizontal-overhang problem — an astral-plane glyph rendering wider than
+Python's `.center()` assumes — and tried isolating the clef in its own
+buffered, bold column. #20 reported that didn't fix it, and asked for
+real investigation into whether it's actually a font-coverage or
+cell-height problem instead. Checked with Pillow (`ImageFont.getbbox()`)
+against the fonts this machine's fontconfig resolves for these codepoints
+(`NotoSansSymbols2-Regular.ttf` has no real glyphs for any of them — its
+`getbbox()` returns the same box as an uncovered `.notdef`; the actual
+covering font is `NotoMusic-Regular.ttf`). Measured ink bounding boxes at
+a 1000-unit em, font's own ascent/descent alongside:
+
+| glyph | above baseline | below baseline | font's own descent |
+|---|---|---|---|
+| G-clef `\U0001D11E` | 1334 | **398** | 398 |
+| F-clef `\U0001D122` | 900 | 0 | 398 |
+| notehead `\U0001D157` | 269 | 1 | 398 |
+
+The G-clef's design uses its font's *entire* descent allocation (398 of
+398) — no other glyph checked comes close. That's real evidence for the
+cell-height theory #20 asked about, not the horizontal one #19 assumed:
+when a terminal falls back to a rarely-used symbol font for one glyph but
+sizes/positions it inside the *primary* (monospace) font's cell box, any
+glyph whose design needs more descent than that primary font's own
+metrics allocate gets its bottom cut off by the cell's fixed pixel
+height — independent of any horizontal buffering, and it explains, glyph
+by glyph, exactly which one clips (only the G-clef needs its font's full
+descent; the F-clef needs none at all, matching that only the G-clef was
+ever reported clipped). No ANSI escape sequence gives an application
+control over a fallback glyph's vertical placement/scale inside a
+terminal's cell grid, so this isn't fixable from the app layer the way
+#19's horizontal buffer was attempted — it's a terminal/font-stack
+property. Shipped mitigation: kept the real glyph (the user preferred it live over
+#19's variant C plain-text fallback), rendered plain rather than carrying
+over the bold styling #19's variant B prototype added — bold synthesis
+for a glyph the primary font doesn't cover is another plausible source of
+extra vertical overhang, so not adding it is a legitimate, low-risk
+choice, not a proven fix. Documenting
+this as a known, terminal-dependent limitation rather than a fully
+resolved bug — same treatment as the other environment-dependent
+limitations already listed in this section — since there's no further
+lever available inside the app to pull.
+
+**Legend merge (issue #20, fix 2) — superseded by issue #36.** The
+dedicated-clef-column prototype (variant B, two side-by-side regions: a
+clef-only sub-column plus a letter-only sub-column, mostly empty on any
+given row) was *not* carried into the shipped code at this point. The
+single shared `legend_width`-wide region already in
+`terminal_tab_display.py` before this change — clef glyph on its anchor
+row, letter name on every other staff-line row, blank otherwise —
+already was the "merge into one column" outcome #20 asked for; it needed
+no restructuring, just the octave-digit drop (`staff_map.
+line_note_name()`) and the `L` toggle wired through. **This call was
+reversed by #36** (below) after a live user reaction to the shipped
+branch said the merged layout wasn't actually what was wanted — variant
+B's two-column split is now what's shipped.
+
+## Two-column legend split and every-row labeling (issue #36)
+
+Live reaction to the shipped `feature/tab-sheet-notation` branch: two
+concrete, fully-specified fixes to the legend, on top of everything else
+on that branch (confirmed good otherwise).
+
+**Fix 1: label every staff row, not just line rows.** `staff_map.
+line_note_name()` — despite its name and docstring, which claimed the
+input "must be in `STAFF_LINE_ROWS`" — was already pure `(row +
+GRAND_STAFF_REF_STEP) % 7` diatonic-step math with no branch on line-vs-
+space; it was already correct for every row, line or space, and simply
+undocumented/underused as such. Renamed to `row_note_name()` and its
+docstring corrected to state it's general over every row (line, space, or
+ledger-line territory beyond the staff) — no logic change, since none was
+needed. `terminal_tab_display.py`'s legend-building loop now calls it
+unconditionally for every `screen_row` in the render loop's visible range
+(which is always exactly the rows actually drawn, so no extra bounds
+check is needed), instead of only inside a `screen_row in
+STAFF_LINE_ROWS` branch. `tests/test_staff_map.py` gained direct coverage
+of space rows (bass clef space mnemonic "All Cows Eat Grass", treble
+"FACE"), ledger-line-territory rows (middle C, the range extremes), and a
+cross-check against `staff_row()`/`diatonic_step()` for every natural
+pitch class/octave in range.
+
+**Fix 2: clef and letter in separate columns.** `config.py` splits the
+old single `TAB_LEGEND_WIDTH` into `TAB_CLEF_WIDTH` (3) and
+`TAB_LETTER_WIDTH` (2), with `TAB_LEGEND_WIDTH` now derived as their sum
+— so the total width the `L` toggle reserves from/returns to the note
+columns is unchanged, only how that width is split internally.
+`terminal_tab_display.py`'s per-row legend cell is now built as two
+concatenated sub-cells: a `TAB_CLEF_WIDTH`-wide clef cell (blank except
+on `BASS_CLEF_ROW`/`TREBLE_CLEF_ROW`) followed by a `TAB_LETTER_WIDTH`-
+wide letter cell (always populated, per fix 1). The `L` keybind still
+toggles the whole `legend_width` region as one unit (`legend_width =
+config.TAB_LEGEND_WIDTH if legend_on else 0`, unchanged) — not
+fragmented into two independently-toggleable halves, per the ticket's
+explicit instruction.
+
+**G-clef clipping, revisited.** #36 asked to retry the G-clef (𝄞)
+bottom-clipping investigation now that the clef has genuine dedicated
+column space rather than shared cells, in case that happened to help.
+It doesn't, and per #20's original investigation (above) there was never
+reason to expect it would: the clipping is a *vertical* cell-height
+problem (the glyph's covering font, `NotoMusic-Regular.ttf`, draws it
+using that font's entire descent allocation, and no ANSI-level control
+exists over a fallback glyph's vertical placement inside a terminal's
+cell grid) — giving the clef more *horizontal* room via its own column
+doesn't touch that axis at all. Not re-verified pixel-for-pixel against a
+real terminal/font stack as part of this fix (this environment's smoke
+test only inspects the raw ANSI text stream, which can't show font
+rendering) — left documented as a known, terminal-dependent limitation in
+`CLAUDE.md`, per #36's own instruction to note it again rather than block
+on it or re-run the full #20 investigation from scratch.
+
+## Per-column dimming (`Space`-independent fade) and freeze-frame (issue #13/#22/#23)
+
+Both landed directly against the shipped app (not left in a throwaway
+prototype) based on a finished reference implementation the user already
+iterated to convergence in `prototype_notehead_toggle.py` on
+`prototype/notehead-toggle-in-context` (throwaway, never merged) —
+porting that algorithm into `terminal_tab_display.py`/`main.py`'s real
+threaded architecture rather than re-deriving it.
+
+**Dimming curve (#22).** Two rounds of live reaction rejected the first
+cut's approach entirely: round 1 dimmed instantly (no fade) and pushed the
+*newest* column toward `config.BASE_LIGHTNESS_RANGE`'s high end — borrowed
+from `terminal_wheel_display.py`'s active-note *pulse* convention, which
+reads as a washed-out highlight rather than tab's normal, always-fully-
+saturated note color. Final shape: the newest visible column renders at
+plain `config.TAB_NOTE_LIGHTNESS` (tab's ordinary note lightness, nothing
+special); every older column fades *down* from there, linearly, to
+`config.DIM_LIGHTNESS` over `config.FADE_COLUMNS` columns of age, held at
+that floor beyond it. `FADE_COLUMNS` was doubled twice via live reaction
+(4 → 8 → 16) — 16 is the shipped value, not a placeholder to revisit
+without new feedback. Only lightness moves; hue and saturation are
+untouched, using the exact same `note_to_hsl(..., scheme="fifths")` +
+`hsl_to_rgb255()` pipeline the unfaded code already used, just with
+`config.TAB_NOTE_LIGHTNESS` replaced by an age-derived value
+(`terminal_tab_display._aged_lightness()`).
+
+**Shared `DIM_LIGHTNESS` (#22).** Rather than let `tab` define its own
+copy of `terminal_wheel_display.py`'s `DIM_LIGHTNESS = 0.16` (its inactive-
+wedge floor), the constant was promoted to `config.DIM_LIGHTNESS` and both
+modules import it from there — `terminal_wheel_display.py` keeps its own
+`DIM_LIGHTNESS` name as a same-value alias for any external callers/tests
+that reference it directly, but the literal `0.16` now exists exactly
+once. Same rationale as the existing `NOTE_NAMES_FIFTHS`/`diatonic_step()`
+shared-source fix: two independently-hand-copied constants for the same
+visual convention are one accidental edit away from silently drifting
+apart between the two views.
+
+**Age computation.** Baking a note's color in at push time (as `push()`/
+`push_notes()` did before this) can't work once color depends on age,
+because a column's age changes every single frame as newer columns scroll
+in from the right — the same column is age 0 the instant it's pushed and
+age 1 the moment a newer one supersedes it. `TabDisplay.render()` now
+recomputes every visible note's color fresh each call from its raw
+`pitch_class` (already stored, from issue #21's notehead-restyling work)
+and `age = last_index - index` within the *visible* window (0 = newest
+visible column, not "newest ever pushed" — an off-screen column scrolled
+out of the visible range doesn't matter). The `rgb` field `TabEntry.notes`
+still carries from push time is now read only by `dump_ansi()`, which
+keeps rendering at fixed brightness (untouched, per the map's standing
+decision).
+
+**Freeze-frame (#23).** `Space` is a third render-thread-local flag in
+`main.py`'s `run_terminal_tab`, same pattern as `notehead_style`/
+`legend_on` — no `TabDisplay`-side state. Two effects, both driven from
+one boolean: (1) while frozen, `run_terminal_tab` skips
+`result_queue.get_nowait()` entirely, so no new column is ever pushed and
+the status line's note/freq/confidence/rms fields hold their last value —
+the analysis thread keeps running and overwriting the single-slot
+`result_queue` in the background the whole time, per this app's existing
+drop-oldest/overwrite architecture, so there's no backlog to build up and
+nothing extra to tear down or restart (unlike `M`'s `AudioCapture.
+restart()`); (2) `TabDisplay.render(frozen=True)` forces every visible
+column's `age` to 0 regardless of its real position, which resolves
+through the exact same `_aged_lightness()` formula to full
+`TAB_NOTE_LIGHTNESS` — no separate freeze-specific lightness branch was
+needed, `render()` just "lies" about age. Un-freezing resumes live
+immediately (the very next queue read picks up whatever's current) with
+no catch-up/replay of anything that happened while frozen, matching how
+`M`'s source-switch and every other toggle in this app already behaves.

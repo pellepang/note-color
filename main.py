@@ -10,7 +10,14 @@ debug overlay, Up/Down to adjust pitch-detection sensitivity.
 Terminal mode: Ctrl+C to quit, Up/Down for sensitivity, M to toggle the
 audio source (mic <-> loopback) live, P to toggle chord mode (chroma-vector
 chord recognition, up to 6 simultaneous notes) live -- terminal views only,
-not the GUI. No display server required.
+not the GUI. 'fill'/'wheel' start monophonic and P opts *up* into chord
+mode; 'tab' starts polyphonic (chord mode on) by default and P opts *down*
+to monophonic instead -- same P key, same boolean flip, just a different
+starting value for 'tab'. 'tab' view only: N toggles the notehead render
+style (symbol glyph <-> bare letter name), L toggles the clef+note-letter
+legend column on/off, Space freezes/un-freezes the view (scrolling and
+per-column dimming pause; the pipeline keeps running in the background).
+No display server required.
 """
 
 import argparse
@@ -247,7 +254,40 @@ def _status_text(label, freq, confidence, rms, sensitivity, source_state=None, c
 
 
 def _handle_chord_mode_key(key, chord_mode):
+    """P toggles chord_mode -- a plain boolean flip, direction-agnostic.
+    fill/wheel start False (opt *up* into chord mode); tab starts True
+    (opt *down* to monophonic) -- the starting value lives in each view's
+    own run_terminal_* function, not here."""
     return not chord_mode if (key is not None and key.lower() == "p") else chord_mode
+
+
+def _handle_notehead_style_key(key, notehead_style):
+    """'tab' view only: N toggles the notehead render style (issue #21) --
+    *symbol* (open notehead glyph + Unicode accidental) <-> *name* (bare
+    letter + ASCII accidental, no octave digit)."""
+    if key is None or key.lower() != "n":
+        return notehead_style
+    return "name" if notehead_style == "symbol" else "symbol"
+
+
+def _handle_legend_key(key, legend_on):
+    """'tab' view only: L toggles the clef+note-letter legend column on/off
+    live (issue #19), reclaiming its width for note columns when off."""
+    return not legend_on if (key is not None and key.lower() == "l") else legend_on
+
+
+def _handle_freeze_key(key, frozen):
+    """'tab' view only: Space toggles freeze-frame (issue #23) -- while
+    frozen, run_terminal_tab stops pulling new items off result_queue (so
+    no new columns get pushed and no stale label/freq/etc. get overwritten)
+    and TabDisplay.render() is called with frozen=True (every visible
+    column pinned to age 0, overriding issue #22's fade). The underlying
+    analysis pipeline keeps running regardless -- result_queue is a
+    single-slot always-overwritten queue, so simply not draining it while
+    frozen causes no backlog, matching how every other view already
+    behaves under backpressure. Un-freezing resumes live immediately, no
+    catch-up of anything that happened while frozen."""
+    return not frozen if key == " " else frozen
 
 
 def _fade_toward(value, target, dt, tau_ms):
@@ -412,8 +452,15 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     fix_interval = 1.0 / config.TAB_FIX_HOPS_PER_SEC
     time_since_tick = 0.0
     keys = RawKeys()
-    chord_mode = False
+    # tab opens polyphonic by default (issue #13's standing decision) --
+    # flipped from fill/wheel, where chord_mode starts False and P opts
+    # *up*. Here P still just flips the boolean (_handle_chord_mode_key
+    # is direction-agnostic); only the starting value differs.
+    chord_mode = True
     prev_chord_name = None
+    notehead_style = config.TAB_DEFAULT_NOTEHEAD_STYLE
+    legend_on = config.TAB_DEFAULT_LEGEND_ON
+    frozen = False
 
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
     pitch_class, octave = None, None
@@ -430,16 +477,26 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             _handle_sensitivity_key(key, sensitivity)
             _handle_source_key(key, capture, source_state)
             chord_mode = _handle_chord_mode_key(key, chord_mode)
+            notehead_style = _handle_notehead_style_key(key, notehead_style)
+            legend_on = _handle_legend_key(key, legend_on)
+            frozen = _handle_freeze_key(key, frozen)
             got_new = False
             is_onset = False
-            try:
-                (_target_rgb, is_onset, label, freq, confidence, rms,
-                 _fifths_idx, pitch_class, octave, note_stack, chord_name) = result_queue.get_nowait()
-                got_new = True
-            except queue.Empty:
-                pass
+            # Frozen: don't drain result_queue at all, so the view keeps
+            # showing its last-known state and no new column can be
+            # pushed below -- the analysis thread keeps overwriting the
+            # single-slot queue in the background regardless (issue #23).
+            if not frozen:
+                try:
+                    (_target_rgb, is_onset, label, freq, confidence, rms,
+                     _fifths_idx, pitch_class, octave, note_stack, chord_name) = result_queue.get_nowait()
+                    got_new = True
+                except queue.Empty:
+                    pass
 
-            mode_hint = f"mode={'chord' if chord_mode else 'note'}(p)"
+            mode_hint = (f"mode={'chord' if chord_mode else 'note'}(p)  "
+                         f"notes={notehead_style}(n)  legend={'on' if legend_on else 'off'}(l)  "
+                         f"frozen={'on' if frozen else 'off'}(space)")
             if chord_mode:
                 notes = [
                     (e["pitch_class"], e["octave"], _tab_note_rgb(e["pitch_class"]),
@@ -453,35 +510,39 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 if got_new:
                     prev_chord_name = chord_name
 
-                if scroll_mode == "onset":
-                    if is_chord_onset:
-                        display.push_notes(notes, chord_name)
-                else:  # "fix"
-                    time_since_tick += dt
-                    if time_since_tick >= fix_interval:
-                        time_since_tick -= fix_interval
-                        display.push_notes(notes, chord_name)
+                if not frozen:
+                    if scroll_mode == "onset":
+                        if is_chord_onset:
+                            display.push_notes(notes, chord_name)
+                    else:  # "fix"
+                        time_since_tick += dt
+                        if time_since_tick >= fix_interval:
+                            time_since_tick -= fix_interval
+                            display.push_notes(notes, chord_name)
 
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
                           + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
-                display.render(status, chord_mode=True)
+                display.render(status, chord_mode=True, notehead_style=notehead_style, legend_on=legend_on,
+                                frozen=frozen)
             else:
                 glyph_rgb = _tab_note_rgb(pitch_class)
                 tab_label = _tab_note_label(pitch_class, octave)
 
-                if scroll_mode == "onset":
-                    if got_new and is_onset:
-                        display.push(pitch_class, octave, glyph_rgb, tab_label)
-                else:  # "fix"
-                    time_since_tick += dt
-                    if time_since_tick >= fix_interval:
-                        time_since_tick -= fix_interval
-                        display.push(pitch_class, octave, glyph_rgb, tab_label)
+                if not frozen:
+                    if scroll_mode == "onset":
+                        if got_new and is_onset:
+                            display.push(pitch_class, octave, glyph_rgb, tab_label)
+                    else:  # "fix"
+                        time_since_tick += dt
+                        if time_since_tick >= fix_interval:
+                            time_since_tick -= fix_interval
+                            display.push(pitch_class, octave, glyph_rgb, tab_label)
 
                 status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
                           + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
-                display.render(status, chord_mode=False)
+                display.render(status, chord_mode=False, notehead_style=notehead_style, legend_on=legend_on,
+                                frozen=frozen)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
