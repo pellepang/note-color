@@ -47,13 +47,18 @@ def staff_row(pitch_class, octave):
     return diatonic_step(pitch_class, octave) - GRAND_STAFF_REF_STEP
 
 
-def line_note_name(row):
-    """Bare letter for a staff line row (row must be in STAFF_LINE_ROWS --
-    lines are always natural notes, never sharps). No octave digit -- the
-    row position on the staff already conveys octave, same reasoning as
-    the notehead *name* render style's label (see terminal_tab_display.py)
-    and tab's octave-independent note color (CLAUDE.md: "tab's note color
-    ignores octave, fixed lightness")."""
+def row_note_name(row):
+    """Bare letter for ANY staff row -- a line row, a space row between
+    lines, or a ledger-line row/space beyond the staff. Every row (line or
+    space) sits on a distinct diatonic step, so this is just that step's
+    letter, reusing the same `LETTER_NAMES`/`GRAND_STAFF_REF_STEP` math
+    `diatonic_step()`/`staff_row()` already use to place noteheads --
+    lines are always natural notes, never sharps, and so is every space
+    (issue #36: the legend labels every row, not just `STAFF_LINE_ROWS`).
+    No octave digit -- the row position on the staff already conveys
+    octave, same reasoning as the notehead *name* render style's label
+    (see terminal_tab_display.py) and tab's octave-independent note color
+    (CLAUDE.md: "tab's note color ignores octave, fixed lightness")."""
     step = row + GRAND_STAFF_REF_STEP
     return LETTER_NAMES[step % 7]
 

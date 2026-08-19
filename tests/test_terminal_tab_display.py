@@ -80,6 +80,38 @@ def test_legend_off_hides_clef_glyphs(monkeypatch):
     assert "\U0001D122" not in out
 
 
+def test_legend_labels_space_rows_not_just_staff_lines(monkeypatch):
+    # Issue #36 fix 1: every staff row gets a letter, not just the 5 line
+    # rows per staff -- e.g. "C" only ever lands on a space row (rows 1,3,
+    # 10, 13...), never a STAFF_LINE_ROWS row, so its presence in the
+    # legend proves space rows are labeled too.
+    out = _render(monkeypatch, rows=30, cols=100)
+    assert "C" in out
+
+
+def test_legend_clef_and_letter_render_in_separate_columns(monkeypatch):
+    # Issue #36 fix 2: the clef glyph and the row letter must occupy their
+    # own sub-columns (clef column, then letter column), not share a cell
+    # the way the earlier merged single-region legend did -- so the
+    # treble clef's own anchor row (G4, row 14) still carries a separate
+    # "G" letter cell to its right, not the clef glyph standing in for it.
+    import config
+
+    out = _render(monkeypatch, rows=30, cols=100)
+    # Each rendered line starts right after a "\033[K" erase-to-end-of-line
+    # code; find the one carrying the treble clef glyph and check its
+    # legend-width prefix carries a separate "G" letter cell too, not just
+    # the clef glyph standing in for it.
+    for line in out.split("\033[K"):
+        if "\U0001D11E" in line:
+            prefix = line[: config.TAB_LEGEND_WIDTH + 20]
+            assert "\U0001D11E" in prefix
+            assert "G" in prefix.replace("\U0001D11E", "")
+            break
+    else:
+        raise AssertionError("treble clef glyph not found in any rendered line")
+
+
 def test_name_style_shows_bare_letter_without_octave(monkeypatch):
     out = _render(monkeypatch, rows=30, cols=100, pushes=[(1, 4, "Db4")], notehead_style="name")
     assert "Db" in out

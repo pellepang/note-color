@@ -76,7 +76,13 @@ TAB_FPS = 20
 TAB_FIX_HOPS_PER_SEC = 4        # 'fix' mode: new column every 0.25s
 TAB_COLUMN_WIDTH = 3            # terminal characters per history column/glyph cell
 TAB_COLUMN_WIDTH_CHORD = 9       # chord mode: wide enough for names like "C#13b9/F#"
-TAB_LEGEND_WIDTH = 5            # left-hand column: clef glyphs + staff-line note names
+TAB_CLEF_WIDTH = 3               # left-hand legend sub-column: clef glyph on its anchor
+                                 # row, blank elsewhere (issue #36: its own column, not
+                                 # merged with the letter column)
+TAB_LETTER_WIDTH = 2            # right-hand legend sub-column: staff-row note letter,
+                                 # one per row (every line AND space, issue #36)
+TAB_LEGEND_WIDTH = TAB_CLEF_WIDTH + TAB_LETTER_WIDTH  # total width the L toggle
+                                                        # reserves from/returns to note columns
 TAB_VISIBLE_MAXLEN = 300        # on-screen deque cap
 TAB_SESSION_HISTORY_MAX = 5000  # cap on entries retained for the end-of-session dump
 FADE_COLUMNS = 16               # issue #22: columns of age to fade a scrolled-past column

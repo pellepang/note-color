@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-76 tests), and detection has been confirmed with a real speaker→mic
+81 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -73,7 +73,7 @@ stage can ever stall another. Target end-to-end latency: comfortably under
 | `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence. |
 | `chord_smoother.py` | `ChordSmoother` — mirrors `NoteSmoother`'s shape for chord mode: chroma rolling-average + chord-name debounce, plus asymmetric attack/release hysteresis per note-stack slot. |
 | `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `NOTE_NAMES`, `NOTE_NAMES_FIFTHS`. |
-| `staff_map.py` | `staff_row()`, `ledger_rows()` — grand-staff placement, used only by `tab` view. |
+| `staff_map.py` | `staff_row()`, `ledger_rows()`, `row_note_name()` (general row→letter, every line/space row) — grand-staff placement, used only by `tab` view. |
 | `animation.py` | `ColorAnimator` — crossfade + onset pulse. Used by GUI, terminal-fill, and (per-note-keyed) chord-mode fill bands. |
 | `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). Chord mode is out of scope for the GUI (no live-hotkey mechanism). |
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
@@ -144,11 +144,13 @@ digit (e.g. `Bb`, `F#`; the note's staff row already conveys octave).
 Both use `NOTE_NAMES_FIFTHS` spelling and this app's existing per-note HSL
 coloring, unaffected by the toggle. Toggling `N` restyles columns already
 scrolled onto the screen, not just future ones. `L` toggles the left
-legend column (clef glyphs + natural-note letters, itself merged into one
-`TAB_LEGEND_WIDTH`-wide region, octave-digit-free) on/off live, reclaiming
-its width for note columns when off. Current state of both shown in the
-status line (`notes=`/`legend=`). The on-quit `dump_ansi()` text dump is
-unaffected by either toggle — always letter+octave, as before.
+legend area (two side-by-side sub-columns, `TAB_LEGEND_WIDTH` wide
+together — a narrower clef-glyph column, blank except on its anchor row,
+then a letter column labeling every staff row, line AND space alike,
+octave-digit-free) on/off live as one unit, reclaiming its full width for
+note columns when off. Current state of both shown in the status line
+(`notes=`/`legend=`). The on-quit `dump_ansi()` text dump is unaffected by
+either toggle — always letter+octave, as before.
 
 Past columns dim as they scroll by (issue #22): the newest visible column
 renders at the normal `TAB_NOTE_LIGHTNESS`; every older column's lightness
@@ -190,10 +192,14 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   note's color stays consistent between views.
 - `tab` uses a grand staff, not single treble — manageable ledger lines
   across the app's 4-octave range.
-- `tab`'s left legend column shows a treble/bass clef glyph on each staff's
-  anchor line (G4/F3) and the natural-note name on every other staff line
-  — added so the grand staff is legible without already knowing note
-  positions by heart, especially in the bass register.
+- `tab`'s left legend area is two side-by-side sub-columns, not one merged
+  region (issue #36, reversing #20's earlier "merge into one column"
+  call after live user reaction): a clef-glyph column (blank except on
+  each staff's anchor line, G4/F3) and, to its right, a letter column
+  labeling every staff row — lines *and* spaces alike, via
+  `staff_map.row_note_name()`'s general diatonic-step math, not just the
+  5 line rows per staff — so the grand staff is legible without already
+  knowing note positions by heart, especially in the bass register.
 - `tab`'s on-quit dump is plain text, not a rendered image.
 - `tab`'s note color ignores octave, fixed lightness
   (`TAB_NOTE_LIGHTNESS = 0.5`) — octave already encodes as staff row.

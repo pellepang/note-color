@@ -49,7 +49,7 @@ from collections import deque, namedtuple
 import config
 from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
 from staff_map import (
-    staff_row, ledger_rows, line_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
+    staff_row, ledger_rows, row_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
     BASS_CLEF_ROW, TREBLE_CLEF_ROW,
 )
 
@@ -182,14 +182,23 @@ class TabDisplay:
                 break
             if not legend_on:
                 legend = ""
-            elif screen_row == BASS_CLEF_ROW:
-                legend = BASS_CLEF_GLYPH.center(legend_width)
-            elif screen_row == TREBLE_CLEF_ROW:
-                legend = TREBLE_CLEF_GLYPH.center(legend_width)
-            elif screen_row in STAFF_LINE_ROWS:
-                legend = line_note_name(screen_row).center(legend_width)
             else:
-                legend = " " * legend_width
+                # Two side-by-side sub-columns (issue #36's "variant B" split,
+                # previously merged into one shared region): a clef-only
+                # column, blank except on its own anchor row, then a letter
+                # column labeling EVERY row -- line and space alike, not just
+                # STAFF_LINE_ROWS -- via row_note_name()'s general diatonic-
+                # step math (every staff row, line or space, is a natural
+                # note; accidentals share their natural's row, same as
+                # noteheads do).
+                if screen_row == BASS_CLEF_ROW:
+                    clef_cell = BASS_CLEF_GLYPH.center(config.TAB_CLEF_WIDTH)
+                elif screen_row == TREBLE_CLEF_ROW:
+                    clef_cell = TREBLE_CLEF_GLYPH.center(config.TAB_CLEF_WIDTH)
+                else:
+                    clef_cell = " " * config.TAB_CLEF_WIDTH
+                letter_cell = row_note_name(screen_row).center(config.TAB_LETTER_WIDTH)
+                legend = clef_cell + letter_cell
             cells = [legend]
             for row_map, ledgers, _chord_name in columns:
                 if screen_row in row_map:
