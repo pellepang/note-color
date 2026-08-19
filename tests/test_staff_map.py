@@ -34,9 +34,17 @@ def test_ledger_lines_above_staff():
     assert ledger_rows(21) == []          # space just above the staff, no ledger
 
 
-def test_sharp_shares_natural_letters_row():
-    assert staff_row(1, 4) == staff_row(0, 4)  # C#4 sits on C4's row
-    assert staff_row(6, 4) == staff_row(5, 4)  # F#4 sits on F4's row
+def test_accidentals_share_their_displayed_letters_row():
+    # Flat-spelled accidentals (NOTE_NAMES_FIFTHS: Db, Eb, Ab, Bb) sit on the
+    # row of the natural letter *above* them -- matching the letter the app
+    # actually displays (main.py's _tab_note_label() via NOTE_NAMES_FIFTHS).
+    assert staff_row(1, 4) == staff_row(2, 4)   # Db4 sits on D4's row
+    assert staff_row(3, 4) == staff_row(4, 4)   # Eb4 sits on E4's row
+    assert staff_row(8, 4) == staff_row(9, 4)   # Ab4 sits on A4's row
+    assert staff_row(10, 4) == staff_row(11, 4)  # Bb4 sits on B4's row
+    # F# is the one accidental spelled with a sharp, and keeps sitting on
+    # the row of the natural letter *below* it.
+    assert staff_row(6, 4) == staff_row(5, 4)   # F#4 sits on F4's row
 
 
 def test_rows_inside_staff_blocks_need_no_ledger():
