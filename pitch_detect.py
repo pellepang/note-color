@@ -4,14 +4,23 @@ implemented in pure NumPy using FFT-based autocorrelation."""
 import numpy as np
 
 
-def _difference_function(x, tau_max):
+def compute_spectrum(window, size=None):
+    """rFFT of `window`, zero-padded to `size` (defaults to the next power
+    of two >= 2*len(window), matching YIN's autocorrelation padding).
+    Shared across the pipeline: YIN, chroma folding, and multipitch
+    peak-picking all reuse the one FFT computed here per hop."""
+    w = len(window)
+    if size is None:
+        size = 1
+        while size < 2 * w:
+            size *= 2
+    return np.fft.rfft(window, size)
+
+
+def _difference_function(x, spectrum, tau_max):
     """d(tau) for tau in [0, tau_max) via FFT-based autocorrelation."""
     w = len(x)
-    size = 1
-    while size < 2 * w:
-        size *= 2
-    fft_x = np.fft.rfft(x, size)
-    acf = np.fft.irfft(fft_x * np.conjugate(fft_x))[:tau_max]
+    acf = np.fft.irfft(spectrum * np.conjugate(spectrum))[:tau_max]
 
     sq = x * x
     cumsum = np.concatenate(([0.0], np.cumsum(sq)))
@@ -31,9 +40,11 @@ def _cmndf(d):
     return cmnd
 
 
-def detect_pitch(window, sample_rate, fmin=65.0, fmax=1000.0, threshold=0.12):
+def detect_pitch(window, sample_rate, spectrum, fmin=65.0, fmax=1000.0, threshold=0.12):
     """Return (freq_hz, confidence) for the dominant pitch in `window`,
-    or (None, 0.0) if no pitch could be confidently detected."""
+    or (None, 0.0) if no pitch could be confidently detected.
+    `spectrum` is `compute_spectrum(window)` (or a caller-shared
+    equivalent), reused for FFT-based autocorrelation."""
     x = np.asarray(window, dtype=np.float64)
     w = len(x)
 
@@ -42,7 +53,7 @@ def detect_pitch(window, sample_rate, fmin=65.0, fmax=1000.0, threshold=0.12):
     if tau_max <= tau_min:
         return None, 0.0
 
-    d = _difference_function(x, tau_max + 1)
+    d = _difference_function(x, spectrum, tau_max + 1)
     cmnd = _cmndf(d)
 
     tau = None

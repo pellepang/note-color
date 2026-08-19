@@ -96,6 +96,75 @@ tiles rearrange; without a resize-triggered clear, content from the previous
 elements. Each display class tracks `self._last_size` and clears once when
 `shutil.get_terminal_size()` differs from the last frame's.
 
+## Chord mode always runs, `P` is a pure render-thread-local flag
+
+Resolved via live grilling during spec #12's implementation (see wayfinder
+map #1, issue #11's resolution comment). The latency budget research
+(#8/#10) measured the full chord-mode addition at ~3ms/hop worst case on
+a Pi Zero 2 W — a large margin against the 23ms hop budget — so running it
+unconditionally every hop, regardless of whether any view has `P` toggled
+on, was cheaper than building a mechanism to turn it on/off. Consequence:
+`P` needs no shared state at all, unlike `M`'s `SourceState`/
+`AudioCapture.restart()` (which changes what's captured); it's exactly the
+same shape as `show_debug` in `run_gui`.
+
+## `multipitch.py` computes its own Hann-windowed FFT, not the shared spectrum
+
+The original plan (per #10's resolution) was for `multipitch.detect()` to
+reuse `pitch_detect.compute_spectrum()`'s spectrum, same as chroma folding
+and YIN, for zero added FFT cost. Implementing spectral peak-picking
+against that spectrum directly, though, produced spurious extra "notes":
+a single pure tone (no other notes playing) registered 2-3 phantom peaks
+a semitone or more away from the real one. Root cause: this pipeline
+applies no window function anywhere (matches YIN's existing design), and
+an unwindowed (rectangular-window) FFT's spectral leakage decays so slowly
+that sidelobes a semitone away still carried 20-30% of the true peak's
+magnitude — well above any reasonable peak-picking threshold, and
+persisting even after adding both harmonic-consistency pruning and a
+minimum-peak-separation check.
+
+Verified empirically (synthesizing a single 440Hz tone and inspecting the
+actual magnitude spectrum) that a Hann window suppresses this ringing to a
+few bins within a couple of percent, letting simple local-maximum
+peak-picking work correctly. `multipitch.detect()` therefore takes the raw
+ring-buffer window (not a precomputed spectrum) and computes its own
+windowed FFT internally — one extra same-size FFT per hop, still trivially
+inside the latency budget's measured margin. `pitch_detect.compute_spectrum()`
+and YIN's calibrated (already-tested) behavior are untouched.
+
+## Chroma Gaussian sigma narrowed to 0.25 semitones; bass detection gated on a confidence ratio
+
+Two bugs found via a live speaker→mic round-trip test with a real C major
+triad (C-E-G), after all four new modules' own unit tests (built from
+hand-constructed pitch-class vectors, not real audio) already passed:
+
+1. **Wrong chord entirely.** `chroma.fold()`'s Gaussian log-frequency
+   weighting matrix originally used a 0.5-semitone sigma (per #2's
+   resolution). At that width, each candidate pitch class's Gaussian tail
+   picked up enough of its neighbors' energy that the resulting chroma
+   vector had a non-trivial "noise floor" across most of the 12 bins, not
+   just the 3 real notes. A large chord template (e.g. a 7-note `min13`)
+   accumulates more of that spread noise floor than a small, correct
+   3-note `maj` template loses by comparison, so cosine similarity
+   sometimes favored the wrong, larger template outright (`D-13/B` instead
+   of `C` for a plain C major triad). Narrowing to 0.25 semitones (still
+   wide enough to pass the low-frequency-discrimination test in
+   `test_chroma.py`) fixed this on both the synthetic and live-audio case.
+2. **Spurious slash chords.** Even after fix 1, a triad voiced entirely
+   above `fold_bass()`'s ~250Hz cutoff (nothing below it) still got
+   labeled with a wrong bass (e.g. `C/B` for a plain C-E-G triad) — because
+   `fold_bass()`'s output in that case is pure spectral-leakage noise, and
+   `chord_templates.match()` unconditionally trusted `argmax(bass_chroma)`
+   whenever it was nonzero. Measured that noise floor's peak sits around
+   0.15x the main chroma's peak, while a genuine sounding bass note sits
+   at 0.35x+; added `DEFAULT_BASS_CONFIDENCE_RATIO = 0.25` in
+   `chord_templates.py` as the gate between the two.
+
+Both fixes are implementation-level corrections to #2/#4's originally
+resolved constants, not new architectural decisions — the mechanism
+(Gaussian-weighted harmonic summing, bass-chroma-driven slash naming) is
+unchanged.
+
 ## Known-limitation detail
 
 - **Octave-error blips during note decay.** YIN can briefly lock onto a
@@ -128,3 +197,15 @@ elements. Each display class tracks `self._last_size` and clears once when
   and the row-emission loop didn't cap at `usable_rows`, so terminals under
   22 rows always wrote past their real height. See
   `tests/test_terminal_tab_display.py`.
+- **A minor-7th chord and its relative-major 6th chord are pitch-class-set
+  identical** (Am7 = A-C-E-G, C6 = C-E-G-A, always a minor third apart) —
+  inherent to the chords themselves, not a matching bug. Without a
+  confident bass note, `chord_templates.match()`'s tie-break deterministically
+  picks the lower-root-index template; this is the correct behavior for
+  "no distinguishing information available," not a wrong answer.
+- **A pure (harmonic-free) low bass tone can be misdetected a semitone off**
+  by `chroma.fold_bass()` — real bass instruments' overtones resolve this
+  correctly (that's the whole point of the harmonic-summing chroma design);
+  a synthesized pure sine with no harmonics at all is an edge case not
+  representative of real playing, observed during implementation testing
+  but not chased further absent a concrete complaint.

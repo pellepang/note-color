@@ -8,7 +8,9 @@ mic or system-output loopback -> AudioCapture (callback thread)
 GUI controls: Esc/close window to quit, F to toggle fullscreen, D to toggle
 debug overlay, Up/Down to adjust pitch-detection sensitivity.
 Terminal mode: Ctrl+C to quit, Up/Down for sensitivity, M to toggle the
-audio source (mic <-> loopback) live. No display server required.
+audio source (mic <-> loopback) live, P to toggle chord mode (chroma-vector
+chord recognition, up to 6 simultaneous notes) live -- terminal views only,
+not the GUI. No display server required.
 """
 
 import argparse
@@ -19,13 +21,17 @@ import select
 import sys
 import threading
 import time
+from typing import NamedTuple, Optional
 
 import numpy as np
 
+import chroma
 import config
+import multipitch
 from audio_capture import AudioCapture, resolve_loopback_device
-from pitch_detect import detect_pitch
+from pitch_detect import compute_spectrum, detect_pitch
 from note_smoother import NoteSmoother
+from chord_smoother import ChordSmoother
 from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES, NOTE_NAMES_FIFTHS
 from animation import ColorAnimator
 
@@ -131,9 +137,30 @@ def _handle_source_key(key, capture, source_state):
     source_state.error = None
 
 
+class RenderItem(NamedTuple):
+    """Per-hop analysis result, single-slot queue item. The first 9 fields
+    are the original monophonic-pipeline shape/order; `note_stack` and
+    `chord_name` are chord-mode additions. Existing call sites keep
+    unpacking the first 9 positionally, adding a trailing capture for the
+    two new fields."""
+
+    target_rgb: tuple
+    is_onset: bool
+    label: str
+    freq: Optional[float]
+    confidence: float
+    rms: float
+    fifths_idx: Optional[int]
+    pitch_class: Optional[int]
+    octave: Optional[int]
+    note_stack: list
+    chord_name: Optional[str]
+
+
 def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
+    chord_smoother = ChordSmoother(config)
 
     while not stop_event.is_set():
         try:
@@ -146,7 +173,8 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
         rms = float(np.sqrt(np.mean(block * block))) if len(block) else 0.0
 
         smoother.set_sensitivity(sensitivity.value)
-        freq, confidence = detect_pitch(ring, config.SAMPLE_RATE, config.FMIN, config.FMAX, config.YIN_THRESHOLD)
+        spectrum = compute_spectrum(ring)
+        freq, confidence = detect_pitch(ring, config.SAMPLE_RATE, spectrum, config.FMIN, config.FMAX, config.YIN_THRESHOLD)
         pitch_class, octave, is_onset = smoother.update(freq, confidence, rms)
 
         if pitch_class is None:
@@ -159,7 +187,37 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
             label = f"{NOTE_NAMES[pitch_class]}{octave}"
             fifths_idx = fifths_index(pitch_class)
 
-        item = (target_rgb, is_onset, label, freq, confidence, rms, fifths_idx, pitch_class, octave)
+        # Chord-mode pipeline always runs, regardless of whether any
+        # terminal view currently has 'P' toggled on -- validated cheap by
+        # the latency budget, and it lets 'P' be a pure render-thread-local
+        # flag with no shared state to coordinate.
+        main_chroma = chroma.fold(spectrum, config.SAMPLE_RATE)
+        bass_chroma = chroma.fold_bass(spectrum, config.SAMPLE_RATE)
+        raw_notes = multipitch.detect(
+            ring,
+            config.SAMPLE_RATE,
+            max_notes=config.CHORD_MAX_NOTES,
+            min_mag_ratio=config.CHORD_PEAK_MIN_MAG_RATIO,
+            harmonic_tolerance_cents=config.CHORD_HARMONIC_TOLERANCE_CENTS,
+            max_peak_candidates=config.CHORD_MAX_PEAK_CANDIDATES,
+        )
+        chord_name, raw_stack = chord_smoother.update(main_chroma, bass_chroma, raw_notes)
+
+        note_stack = []
+        for entry in raw_stack:
+            stack_hue, stack_sat, stack_light = note_to_hsl(entry["pitch_class"], entry["octave"], scheme=color_scheme)
+            note_stack.append(
+                {
+                    "pitch_class": entry["pitch_class"],
+                    "octave": entry["octave"],
+                    "confidence": entry["confidence"],
+                    "rgb": hsl_to_rgb255(stack_hue, stack_sat, stack_light),
+                    "is_bass": entry["is_bass"],
+                }
+            )
+
+        item = RenderItem(target_rgb, is_onset, label, freq, confidence, rms, fifths_idx, pitch_class, octave,
+                           note_stack, chord_name)
         _overwrite(result_queue, item)
 
 
@@ -174,10 +232,13 @@ def _overwrite(q, item):
         pass
 
 
-def _status_text(label, freq, confidence, rms, sensitivity, source_state=None):
-    freq_str = f"{freq:6.1f}Hz" if freq else "  --  "
-    text = (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
-            f"sens={sensitivity.value:.2f} (up/down)")
+def _status_text(label, freq, confidence, rms, sensitivity, source_state=None, chord_name=None, chord_mode=False):
+    if chord_mode:
+        text = f"chord={(chord_name or ''):<14s} sens={sensitivity.value:.2f} (up/down)"
+    else:
+        freq_str = f"{freq:6.1f}Hz" if freq else "  --  "
+        text = (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
+                f"sens={sensitivity.value:.2f} (up/down)")
     if source_state is not None:
         text += f"  src={source_state.value} (m)"
         if source_state.error:
@@ -185,14 +246,52 @@ def _status_text(label, freq, confidence, rms, sensitivity, source_state=None):
     return text
 
 
+def _handle_chord_mode_key(key, chord_mode):
+    return not chord_mode if (key is not None and key.lower() == "p") else chord_mode
+
+
+def _fade_toward(value, target, dt, tau_ms):
+    tau = max(tau_ms, 1) / 1000.0
+    alpha = 1.0 - math.exp(-dt / tau)
+    return value + (target - value) * alpha
+
+
+def _animate_note_stack(animators, note_stack, dt):
+    """note_stack is already sorted lowest-note-first by ChordSmoother --
+    that's also bottom-to-top order for fill's proportional bands.
+    Returns a list of animated RGB tuples in that same order, one per
+    active note (or a single idle color if the stack is empty)."""
+    if not note_stack:
+        animators.clear()
+        return [config.IDLE_RGB]
+
+    active_keys = set()
+    bands = []
+    for entry in note_stack:
+        key = (entry["pitch_class"], entry["octave"])
+        active_keys.add(key)
+        is_new = key not in animators
+        anim = animators.setdefault(
+            key, ColorAnimator(config.CROSSFADE_TAU_MS, config.PULSE_DECAY_MS, config.ONSET_PULSE_BOOST)
+        )
+        bands.append(anim.update(dt, entry["rgb"], is_new))
+
+    for stale_key in [k for k in animators if k not in active_keys]:
+        del animators[stale_key]
+    return bands
+
+
 def run_terminal_fill(result_queue, sensitivity, capture, source_state):
     from terminal_display import TerminalDisplay
 
     display = TerminalDisplay(fps=config.TERMINAL_FPS)
     animator = ColorAnimator(config.CROSSFADE_TAU_MS, config.PULSE_DECAY_MS, config.ONSET_PULSE_BOOST)
+    band_animators = {}
     keys = RawKeys()
+    chord_mode = False
 
     target_rgb, is_onset, label, freq, confidence, rms = config.IDLE_RGB, False, "-", 0.0, 0.0, 0.0
+    note_stack, chord_name = [], None
     dt = 1.0 / display.fps
 
     try:
@@ -200,15 +299,25 @@ def run_terminal_fill(result_queue, sensitivity, capture, source_state):
             key = keys.poll()
             _handle_sensitivity_key(key, sensitivity)
             _handle_source_key(key, capture, source_state)
+            chord_mode = _handle_chord_mode_key(key, chord_mode)
             try:
                 (target_rgb, is_onset, label, freq, confidence, rms,
-                 _fifths_idx, _pitch_class, _octave) = result_queue.get_nowait()
+                 _fifths_idx, _pitch_class, _octave, note_stack, chord_name) = result_queue.get_nowait()
             except queue.Empty:
                 is_onset = False
 
-            rgb = animator.update(dt, target_rgb, is_onset)
-            status = _status_text(label, freq, confidence, rms, sensitivity, source_state) + "  (Ctrl+C to quit)"
-            display.render(rgb, status)
+            mode_hint = f"mode={'chord' if chord_mode else 'note'}(p)"
+            if chord_mode:
+                bands = _animate_note_stack(band_animators, note_stack, dt)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
+                                        chord_name=chord_name, chord_mode=True)
+                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                display.render_bands(bands, status)
+            else:
+                rgb = animator.update(dt, target_rgb, is_onset)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
+                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                display.render(rgb, status)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
@@ -224,26 +333,43 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
     pulse_decay = config.PULSE_DECAY_MS / 1000.0
     dt = 1.0 / display.fps
     keys = RawKeys()
+    chord_mode = False
+    wedge_fades = [0.0] * 12
 
     active_index = None
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
     pulse = 0.0
+    note_stack, chord_name = [], None
 
     try:
         while True:
             key = keys.poll()
             _handle_sensitivity_key(key, sensitivity)
             _handle_source_key(key, capture, source_state)
+            chord_mode = _handle_chord_mode_key(key, chord_mode)
             is_onset = False
             try:
                 (_target_rgb, is_onset, label, freq, confidence, rms,
-                 active_index, _pitch_class, _octave) = result_queue.get_nowait()
+                 active_index, _pitch_class, _octave, note_stack, chord_name) = result_queue.get_nowait()
             except queue.Empty:
                 pass
 
-            pulse = 1.0 if is_onset else pulse * math.exp(-dt / pulse_decay)
-            status = _status_text(label, freq, confidence, rms, sensitivity, source_state) + "  (Ctrl+C to quit)"
-            display.render(active_index, pulse, status)
+            mode_hint = f"mode={'chord' if chord_mode else 'note'}(p)"
+            if chord_mode:
+                active_pcs = {e["pitch_class"] for e in note_stack}
+                bass_pc = next((e["pitch_class"] for e in note_stack if e["is_bass"]), None)
+                for pc in range(12):
+                    target = 1.0 if pc in active_pcs else 0.0
+                    wedge_fades[pc] = _fade_toward(wedge_fades[pc], target, dt, config.CROSSFADE_TAU_MS)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
+                                        chord_name=chord_name, chord_mode=True)
+                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                display.render_chord(wedge_fades, bass_pc, status)
+            else:
+                pulse = 1.0 if is_onset else pulse * math.exp(-dt / pulse_decay)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
+                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                display.render(active_index, pulse, status)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
@@ -286,9 +412,12 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     fix_interval = 1.0 / config.TAB_FIX_HOPS_PER_SEC
     time_since_tick = 0.0
     keys = RawKeys()
+    chord_mode = False
+    prev_chord_name = None
 
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
     pitch_class, octave = None, None
+    note_stack, chord_name = [], None
 
     resolved_dump = dump_file or os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -300,30 +429,59 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             key = keys.poll()
             _handle_sensitivity_key(key, sensitivity)
             _handle_source_key(key, capture, source_state)
+            chord_mode = _handle_chord_mode_key(key, chord_mode)
             got_new = False
             is_onset = False
             try:
                 (_target_rgb, is_onset, label, freq, confidence, rms,
-                 _fifths_idx, pitch_class, octave) = result_queue.get_nowait()
+                 _fifths_idx, pitch_class, octave, note_stack, chord_name) = result_queue.get_nowait()
                 got_new = True
             except queue.Empty:
                 pass
 
-            glyph_rgb = _tab_note_rgb(pitch_class)
-            tab_label = _tab_note_label(pitch_class, octave)
+            mode_hint = f"mode={'chord' if chord_mode else 'note'}(p)"
+            if chord_mode:
+                notes = [
+                    (e["pitch_class"], e["octave"], _tab_note_rgb(e["pitch_class"]),
+                     _tab_note_label(e["pitch_class"], e["octave"]))
+                    for e in note_stack
+                ]
+                # Chord-level onset (the recognized chord identity changing),
+                # not per-note re-attack -- a strummed/arpeggiated chord
+                # shouldn't spam a new column per note.
+                is_chord_onset = got_new and chord_name != prev_chord_name
+                if got_new:
+                    prev_chord_name = chord_name
 
-            if scroll_mode == "onset":
-                if got_new and is_onset:
-                    display.push(pitch_class, octave, glyph_rgb, tab_label)
-            else:  # "fix"
-                time_since_tick += dt
-                if time_since_tick >= fix_interval:
-                    time_since_tick -= fix_interval
-                    display.push(pitch_class, octave, glyph_rgb, tab_label)
+                if scroll_mode == "onset":
+                    if is_chord_onset:
+                        display.push_notes(notes, chord_name)
+                else:  # "fix"
+                    time_since_tick += dt
+                    if time_since_tick >= fix_interval:
+                        time_since_tick -= fix_interval
+                        display.push_notes(notes, chord_name)
 
-            status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
-                      + f"  [{scroll_mode}] (Ctrl+C to quit)")
-            display.render(status)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
+                                        chord_name=chord_name, chord_mode=True)
+                          + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
+                display.render(status, chord_mode=True)
+            else:
+                glyph_rgb = _tab_note_rgb(pitch_class)
+                tab_label = _tab_note_label(pitch_class, octave)
+
+                if scroll_mode == "onset":
+                    if got_new and is_onset:
+                        display.push(pitch_class, octave, glyph_rgb, tab_label)
+                else:  # "fix"
+                    time_since_tick += dt
+                    if time_since_tick >= fix_interval:
+                        time_since_tick -= fix_interval
+                        display.push(pitch_class, octave, glyph_rgb, tab_label)
+
+                status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
+                          + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
+                display.render(status, chord_mode=False)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
@@ -368,7 +526,7 @@ def run_gui(result_queue, fullscreen, start_debug, sensitivity):
 
             try:
                 (target_rgb, is_onset, label, freq, confidence, rms,
-                 _fifths_idx, _pitch_class, _octave) = result_queue.get_nowait()
+                 _fifths_idx, _pitch_class, _octave, _note_stack, _chord_name) = result_queue.get_nowait()
             except queue.Empty:
                 is_onset = False
 

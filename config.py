@@ -24,6 +24,19 @@ DEBOUNCE_HOPS = 3
 SILENCE_HOPS = 3
 ONSET_RMS_JUMP_DB = 6.0
 
+# --- Chord mode (chroma-vector chord recognition) ---
+# All provisional pending empirical tuning during real playing, same
+# spirit as MEDIAN_WINDOW/DEBOUNCE_HOPS above.
+CHORD_MATCH_THRESHOLD = 0.80     # cosine similarity; below this, no-match
+CHORD_MEDIAN_WINDOW = 5          # rolling-average window on chroma vectors, pre-match
+CHORD_DEBOUNCE_HOPS = 3          # consecutive-candidate hops before the displayed chord name changes
+NOTE_STACK_ATTACK_HOPS = 2       # consecutive detections before a note-stack entry turns on
+NOTE_STACK_RELEASE_HOPS = 4      # consecutive misses before a note-stack entry turns off
+CHORD_MAX_NOTES = 6              # cap on simultaneously-detected notes
+CHORD_PEAK_MIN_MAG_RATIO = 0.05  # spectral peak-picking: ignore peaks below this fraction of the strongest peak
+CHORD_HARMONIC_TOLERANCE_CENTS = 35.0   # spectral peak-picking: harmonic-consistency pruning window
+CHORD_MAX_PEAK_CANDIDATES = 20   # spectral peak-picking: cap on candidates considered before pruning
+
 # --- Color mapping ---
 HUE_OFFSET_DEG = 0
 MIN_OCTAVE = 2
@@ -52,6 +65,7 @@ TAB_NOTE_LIGHTNESS = 0.5        # fixed, octave-independent -- 0.5 is where a gi
 TAB_FPS = 20
 TAB_FIX_HOPS_PER_SEC = 4        # 'fix' mode: new column every 0.25s
 TAB_COLUMN_WIDTH = 3            # terminal characters per history column/glyph cell
+TAB_COLUMN_WIDTH_CHORD = 9       # chord mode: wide enough for names like "C#13b9/F#"
 TAB_LEGEND_WIDTH = 5            # left-hand column: clef glyphs + staff-line note names
 TAB_VISIBLE_MAXLEN = 300        # on-screen deque cap
 TAB_SESSION_HISTORY_MAX = 5000  # cap on entries retained for the end-of-session dump

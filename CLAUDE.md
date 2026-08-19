@@ -15,10 +15,18 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-20 tests), and detection has been confirmed with a real speaker→mic
-acoustic round-trip test. Pitch-tracking accuracy on real audio varies
+66 tests), and detection has been confirmed with a real speaker→mic
+acoustic round-trip test — both the original monophonic pipeline and
+chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
 tracking, not a bug to chase without a concrete symptom.
+
+Chord mode (chroma-vector chord recognition, opt-in via `P` in terminal
+views) is implemented per the spec at
+[issue #12](https://github.com/pellepang/note-color/issues/12), itself
+synthesized from wayfinder map
+[#1](https://github.com/pellepang/note-color/issues/1) and its ten
+resolved child tickets (#2–#11).
 
 ## Backlog (open problems, not yet fixed)
 
@@ -30,12 +38,22 @@ None currently open.
 mic -> AudioCapture (PortAudio callback thread, never blocks)
     -> bounded queue.Queue (drop-oldest on full)
     -> analysis thread: rolling 2048-sample ring buffer
-                         -> pitch_detect.detect_pitch()   (YIN)
-                         -> note_smoother.NoteSmoother     (stabilize)
-                         -> color_map.note_to_hsl()        (note -> color)
-    -> single-slot queue.Queue (always overwritten with latest result)
-    -> render loop (GUI window, or one of two terminal views)
+                         -> pitch_detect.compute_spectrum()      (shared FFT)
+                         -> pitch_detect.detect_pitch()          (YIN, monophonic)
+                         -> note_smoother.NoteSmoother            (stabilize)
+                         -> color_map.note_to_hsl()               (note -> color)
+                         -> chroma.fold() / fold_bass()           (chord mode)
+                         -> multipitch.detect()                   (chord mode, up to 6 notes)
+                         -> chord_smoother.ChordSmoother           (stabilize chord+notes)
+                         -> chord_templates.match()                (chord mode, chroma -> name)
+    -> single-slot queue.Queue (always overwritten with latest RenderItem)
+    -> render loop (GUI window, or one of three terminal views)
 ```
+
+The chord-mode pipeline (chroma/multipitch/chord_smoother/chord_templates)
+always runs every hop regardless of whether any view has `P` toggled on —
+cheap enough that gating it wasn't worth the extra shared state (see
+Key design decisions). `P` is a pure render-thread-local flag.
 
 Three threads, connected by non-blocking queues at every boundary, so no
 stage can ever stall another. Target end-to-end latency: comfortably under
@@ -45,19 +63,23 @@ stage can ever stall another. Target end-to-end latency: comfortably under
 
 | File | Responsibility |
 |---|---|
-| `config.py` | All tunable constants (sample rate, buffer sizes, thresholds, color/animation params). Check here first. |
+| `config.py` | All tunable constants (sample rate, buffer sizes, thresholds, color/animation/chord-mode params). Check here first. |
 | `audio_capture.py` | `AudioCapture` — `sounddevice.InputStream` callback → bounded drop-oldest queue. `resolve_loopback_device()` finds the system-output monitor for `--source loopback`. |
-| `pitch_detect.py` | `detect_pitch()` — hand-rolled YIN (pure NumPy, FFT autocorrelation + parabolic interpolation). |
-| `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection. |
-| `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `NOTE_NAMES`. |
+| `pitch_detect.py` | `compute_spectrum()` — shared FFT reused by YIN, chroma, and (via its own Hann-windowed variant) multipitch. `detect_pitch()` — hand-rolled YIN (pure NumPy, FFT autocorrelation + parabolic interpolation) over a precomputed spectrum. |
+| `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection (monophonic path). |
+| `chroma.py` | `fold()`/`fold_bass()` — 12-bin chroma vector via a precomputed Gaussian log-frequency weighting matrix summing 1st–4th harmonics per pitch class; `fold_bass()` restricts to <~250Hz for bass/inversion detection. |
+| `chord_templates.py` | ~360-template dictionary (30 qualities × 12 roots) + `match()` — cosine-similarity chord recognition, bass-chroma-gated slash/inversion naming and rotational-tie-breaking. |
+| `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence. |
+| `chord_smoother.py` | `ChordSmoother` — mirrors `NoteSmoother`'s shape for chord mode: chroma rolling-average + chord-name debounce, plus asymmetric attack/release hysteresis per note-stack slot. |
+| `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `NOTE_NAMES`, `NOTE_NAMES_FIFTHS`. |
 | `staff_map.py` | `staff_row()`, `ledger_rows()` — grand-staff placement, used only by `tab` view. |
-| `animation.py` | `ColorAnimator` — crossfade + onset pulse. Used by GUI and terminal-fill views. |
-| `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). |
-| `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill. |
-| `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`. |
-| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history; `dump_ansi()` on quit. |
-| `main.py` | Wires threads together, dispatches GUI/terminal views by CLI flag. `pygame` imported only inside `run_gui`. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`. |
+| `animation.py` | `ColorAnimator` — crossfade + onset pulse. Used by GUI, terminal-fill, and (per-note-keyed) chord-mode fill bands. |
+| `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). Chord mode is out of scope for the GUI (no live-hotkey mechanism). |
+| `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
+| `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
+| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history; `push()`/`push_notes()`, `dump_ansi()` on quit (dump includes chord names when present). |
+| `main.py` | Wires threads together, dispatches GUI/terminal views by CLI flag; `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`. |
 
 ## Running it
 
@@ -83,10 +105,25 @@ file next to `main.py` on quit (override with `--dump-file PATH`).
 
 GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay,
 `Up`/`Down` decrease/increase pitch sensitivity. Terminal modes: `Ctrl+C` to
-quit, `Up`/`Down` sensitivity, `M` toggle audio source live (needs a real
-TTY; no-op otherwise, e.g. piped input). `--sensitivity FLOAT` sets the
-starting value (default 1.0); raises it to register quieter/softer playing
-more readily. Current value shown in the status line (`sens=`).
+quit, `Up`/`Down` sensitivity, `M` toggle audio source live, `P` toggle
+chord mode live (needs a real TTY; no-op otherwise, e.g. piped input).
+`--sensitivity FLOAT` sets the starting value (default 1.0); raises it to
+register quieter/softer playing more readily. Current value shown in the
+status line (`sens=`).
+
+`P` toggles chord mode (chroma-vector chord recognition, up to 6
+simultaneous notes) in any terminal view — off by default, GUI-out-of-scope.
+Status line swaps `note=`/`freq=`/`conf=`/`rms=` for one `chord=<name>`
+field; `sens=`/`src=` unaffected. Per view: `fill` splits into proportional
+horizontal bands, one per active note, pitch-sorted low-to-high
+bottom-to-top; `wheel` steadily lights active wedges in their own colors
+(no pulsing) with the bass wedge bracketed; `tab` stacks up to 6 notes in
+one scrolling column with the chord name in a header row above it, and
+`--scroll onset` advances on chord-identity change rather than per-note
+re-attack. Chord names use jazz symbol notation (`Δ7`, `-7`, `°7`, `ø7`,
+`+`, ASCII `#`/`b`) with this project's flat-biased root spelling, and
+render blank rather than a guess when nothing in the ~360-template
+dictionary clears the match threshold.
 
 `--source {mic,loopback}` (default `mic`) selects the input: `loopback`
 listens to the computer's own audio output instead of the microphone, via
@@ -123,6 +160,32 @@ One-liners; full rationale in `docs/DECISIONS.md`.
 - `tab`'s note color ignores octave, fixed lightness
   (`TAB_NOTE_LIGHTNESS = 0.5`) — octave already encodes as staff row.
 - Terminal views clear on detected resize — avoids ghosting under tiling WMs.
+- Chord mode's pipeline always runs every hop, on by-flag or not — cheap
+  enough (measured ~3ms/hop worst case on Pi Zero 2 W) that `P` can stay a
+  pure render-thread-local flag with zero shared state, unlike `M`'s
+  `AudioCapture.restart()` (which changes what's captured, not just shown).
+- `multipitch.detect()` computes its own Hann-windowed FFT from the ring
+  buffer rather than reusing `pitch_detect.compute_spectrum()`'s unwindowed
+  one — an unwindowed FFT's spectral-leakage sidelobes are strong enough,
+  a semitone or more from a real peak, to register as spurious extra notes
+  in peak-picking (verified empirically). YIN's own shared spectrum is
+  left untouched so its calibrated behavior is unaffected; the extra FFT
+  is well inside the latency budget.
+- Chroma folding's Gaussian log-frequency weighting uses a narrow 0.25
+  semitone sigma, not the wider 0.5 semitones the design docs first
+  proposed — 0.5 let each candidate pitch class's Gaussian tail pick up
+  enough neighboring energy that a large chord template (more active
+  pitch classes) could out-score the correct, sparser template on cosine
+  similarity even for an unambiguous root-position triad. Verified against
+  a synthesized C-E-G triad, both directly and through a live speaker→mic
+  round trip.
+- Bass-note detection from `chroma.fold_bass()` is gated on a confidence
+  ratio (peak bass-chroma value vs. peak main-chroma value, threshold
+  0.25) rather than trusted whenever nonzero — a chord voiced entirely
+  above the ~250Hz bass cutoff has no real bass note, and `fold_bass()`'s
+  output there is just spectral-leakage noise (empirically ~0.15x the
+  main peak) that would otherwise get misread as a slash-chord bass note.
+  A genuine sounding bass note measured ~0.35x+.
 
 ## Known limitations / things learned
 
@@ -138,6 +201,22 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - `~/.local/bin` is on PATH via `~/.zshrc`, for `colorize`.
 - `tab --scroll onset` freezes on sustained notes/silence, by design.
 - Terminals <~22 rows clip outermost `tab`-view ledger-line notes.
+- A minor-7th chord and its relative-major 6th chord share the exact same
+  pitch-class set (e.g. Am7 = A-C-E-G, C6 = C-E-G-A) — an inherent
+  music-theory ambiguity, not a bug. Without a confident bass note to
+  disambiguate the root, `chord_templates.match()` deterministically picks
+  the lower root-index template; this is correct behavior, not a wrong
+  answer, when no bass is actually present.
+- Low bass notes with no harmonic content (a pure sine, no overtones) can
+  be a semitone off in `chroma.fold_bass()`'s bass-note detection — real
+  bass instruments' overtones resolve this fine (see the harmonic-summing
+  rationale above); a pure low tone is an edge case, not representative of
+  real playing, so not chased further without a concrete complaint.
+- Chord mode's thresholds/constants (`CHORD_MATCH_THRESHOLD`,
+  `CHORD_MEDIAN_WINDOW`, `CHORD_DEBOUNCE_HOPS`, `NOTE_STACK_ATTACK_HOPS`/
+  `RELEASE_HOPS`, the multipitch peak-picking constants) are provisional
+  starting values per the spec, not yet tuned against extended real
+  playing beyond the smoke tests already run live.
 
 ## Working practices
 
