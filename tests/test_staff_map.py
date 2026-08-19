@@ -55,14 +55,15 @@ def test_rows_inside_staff_blocks_need_no_ledger():
 
 
 def test_line_note_names_match_standard_staff_mnemonics():
+    # No octave digit -- the staff row position already conveys octave.
     bass = [line_note_name(r) for r in (0, 2, 4, 6, 8)]
-    assert bass == ["G2", "B2", "D3", "F3", "A3"]  # Good Boys Do Fine Always
+    assert bass == ["G", "B", "D", "F", "A"]  # Good Boys Do Fine Always
     treble = [line_note_name(r) for r in (12, 14, 16, 18, 20)]
-    assert treble == ["E4", "G4", "B4", "D5", "F5"]  # Every Good Boy Does Fine
+    assert treble == ["E", "G", "B", "D", "F"]  # Every Good Boy Does Fine
 
 
 def test_clef_anchor_rows_are_staff_lines():
     assert BASS_CLEF_ROW in STAFF_LINE_ROWS
     assert TREBLE_CLEF_ROW in STAFF_LINE_ROWS
-    assert line_note_name(BASS_CLEF_ROW) == "F3"
-    assert line_note_name(TREBLE_CLEF_ROW) == "G4"
+    assert line_note_name(BASS_CLEF_ROW) == "F"
+    assert line_note_name(TREBLE_CLEF_ROW) == "G"

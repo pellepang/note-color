@@ -48,10 +48,14 @@ def staff_row(pitch_class, octave):
 
 
 def line_note_name(row):
-    """Letter+octave for a staff line row (row must be in STAFF_LINE_ROWS --
-    lines are always natural notes, never sharps)."""
+    """Bare letter for a staff line row (row must be in STAFF_LINE_ROWS --
+    lines are always natural notes, never sharps). No octave digit -- the
+    row position on the staff already conveys octave, same reasoning as
+    the notehead *name* render style's label (see terminal_tab_display.py)
+    and tab's octave-independent note color (CLAUDE.md: "tab's note color
+    ignores octave, fixed lightness")."""
     step = row + GRAND_STAFF_REF_STEP
-    return f"{LETTER_NAMES[step % 7]}{step // 7}"
+    return LETTER_NAMES[step % 7]
 
 
 def ledger_rows(row):
