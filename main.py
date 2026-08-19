@@ -10,11 +10,14 @@ debug overlay, Up/Down to adjust pitch-detection sensitivity.
 Terminal mode: Ctrl+C to quit, Up/Down for sensitivity, M to toggle the
 audio source (mic <-> loopback) live, P to toggle chord mode (chroma-vector
 chord recognition, up to 6 simultaneous notes) live -- terminal views only,
-not the GUI. 'tab' view only: N toggles the notehead render style (symbol
-glyph <-> bare letter name), L toggles the clef+note-letter legend column
-on/off, Space freezes/un-freezes the view (scrolling and per-column dimming
-pause; the pipeline keeps running in the background). No display server
-required.
+not the GUI. 'fill'/'wheel' start monophonic and P opts *up* into chord
+mode; 'tab' starts polyphonic (chord mode on) by default and P opts *down*
+to monophonic instead -- same P key, same boolean flip, just a different
+starting value for 'tab'. 'tab' view only: N toggles the notehead render
+style (symbol glyph <-> bare letter name), L toggles the clef+note-letter
+legend column on/off, Space freezes/un-freezes the view (scrolling and
+per-column dimming pause; the pipeline keeps running in the background).
+No display server required.
 """
 
 import argparse
@@ -251,6 +254,10 @@ def _status_text(label, freq, confidence, rms, sensitivity, source_state=None, c
 
 
 def _handle_chord_mode_key(key, chord_mode):
+    """P toggles chord_mode -- a plain boolean flip, direction-agnostic.
+    fill/wheel start False (opt *up* into chord mode); tab starts True
+    (opt *down* to monophonic) -- the starting value lives in each view's
+    own run_terminal_* function, not here."""
     return not chord_mode if (key is not None and key.lower() == "p") else chord_mode
 
 
@@ -445,7 +452,11 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     fix_interval = 1.0 / config.TAB_FIX_HOPS_PER_SEC
     time_since_tick = 0.0
     keys = RawKeys()
-    chord_mode = False
+    # tab opens polyphonic by default (issue #13's standing decision) --
+    # flipped from fill/wheel, where chord_mode starts False and P opts
+    # *up*. Here P still just flips the boolean (_handle_chord_mode_key
+    # is direction-agnostic); only the starting value differs.
+    chord_mode = True
     prev_chord_name = None
     notehead_style = config.TAB_DEFAULT_NOTEHEAD_STYLE
     legend_on = config.TAB_DEFAULT_LEGEND_ON

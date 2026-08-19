@@ -21,8 +21,9 @@ chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
 tracking, not a bug to chase without a concrete symptom.
 
-Chord mode (chroma-vector chord recognition, opt-in via `P` in terminal
-views) is implemented per the spec at
+Chord mode (chroma-vector chord recognition, toggled via `P` in terminal
+views — opt-in/off-by-default in `fill`/`wheel`, opt-out/on-by-default in
+`tab`) is implemented per the spec at
 [issue #12](https://github.com/pellepang/note-color/issues/12), itself
 synthesized from wayfinder map
 [#1](https://github.com/pellepang/note-color/issues/1) and its ten
@@ -79,7 +80,7 @@ stage can ever stall another. Target end-to-end latency: comfortably under
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
 | `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
 | `main.py` | Wires threads together, dispatches GUI/terminal views by CLI flag; `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`. |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`. |
 
 ## Running it
 
@@ -106,7 +107,9 @@ file next to `main.py` on quit (override with `--dump-file PATH`).
 GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay,
 `Up`/`Down` decrease/increase pitch sensitivity. Terminal modes: `Ctrl+C` to
 quit, `Up`/`Down` sensitivity, `M` toggle audio source live, `P` toggle
-chord mode live (needs a real TTY; no-op otherwise, e.g. piped input).
+chord mode live (needs a real TTY; no-op otherwise, e.g. piped input) —
+`fill`/`wheel` start monophonic and `P` opts up into chord mode, `tab`
+starts polyphonic (chord mode on) and `P` opts down to monophonic instead.
 `tab` view only: `N` toggle notehead render style live, `L` toggle the
 clef+note-letter legend column live, `Space` freeze/un-freeze the view
 (see below).
@@ -115,18 +118,22 @@ register quieter/softer playing more readily. Current value shown in the
 status line (`sens=`).
 
 `P` toggles chord mode (chroma-vector chord recognition, up to 6
-simultaneous notes) in any terminal view — off by default, GUI-out-of-scope.
-Status line swaps `note=`/`freq=`/`conf=`/`rms=` for one `chord=<name>`
-field; `sens=`/`src=` unaffected. Per view: `fill` splits into proportional
-horizontal bands, one per active note, pitch-sorted low-to-high
-bottom-to-top; `wheel` steadily lights active wedges in their own colors
-(no pulsing) with the bass wedge bracketed; `tab` stacks up to 6 notes in
-one scrolling column with the chord name in a header row above it, and
-`--scroll onset` advances on chord-identity change rather than per-note
-re-attack. Chord names use jazz symbol notation (`Δ7`, `-7`, `°7`, `ø7`,
-`+`, ASCII `#`/`b`) with this project's flat-biased root spelling, and
-render blank rather than a guess when nothing in the ~360-template
-dictionary clears the match threshold.
+simultaneous notes) in any terminal view — GUI-out-of-scope. `fill`/`wheel`
+start monophonic (off by default) and `P` opts *up* into chord mode; `tab`
+starts polyphonic (chord mode **on** by default) and `P` opts *down* to
+monophonic instead — same key, same plain boolean flip, just a different
+starting value for `tab` (issue #13's standing decision: the sheet-notation
+view is chord-first). Status line swaps `note=`/`freq=`/`conf=`/`rms=` for
+one `chord=<name>` field; `sens=`/`src=` unaffected. Per view: `fill`
+splits into proportional horizontal bands, one per active note, pitch-sorted
+low-to-high bottom-to-top; `wheel` steadily lights active wedges in their
+own colors (no pulsing) with the bass wedge bracketed; `tab` stacks up to 6
+notes in one scrolling column with the chord name in a header row above it
+(shown whenever polyphonic, i.e. by default), and `--scroll onset` advances
+on chord-identity change rather than per-note re-attack. Chord names use
+jazz symbol notation (`Δ7`, `-7`, `°7`, `ø7`, `+`, ASCII `#`/`b`) with this
+project's flat-biased root spelling, and render blank rather than a guess
+when nothing in the ~360-template dictionary clears the match threshold.
 
 The `tab` view renders real sheet-music noteheads instead of colored
 letter-in-cell blocks (issue #13). `N` toggles between the two live
