@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-81 tests), and detection has been confirmed with a real speaker→mic
+93 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -79,8 +79,9 @@ stage can ever stall another. Target end-to-end latency: comfortably under
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
 | `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
+| `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()` (persists, for #43's future settings screen). |
 | `main.py` | Wires threads together, dispatches GUI/terminal views by CLI flag; `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`. |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`. |
 
 ## Running it
 
@@ -177,6 +178,28 @@ apart from a ~100ms gap during the switch); current source shown in the
 status line (`src=`), with a failed switch (e.g. `pactl` unavailable)
 reported inline there instead of crashing.
 
+### Config file
+
+An optional TOML file at `$XDG_CONFIG_HOME/note-color/config.toml`
+(falling back to `~/.config/note-color/config.toml`) additively overrides
+`config.py`'s defaults — absent, empty, or malformed reproduces today's
+exact behavior. Covers two things today, both hot-reloaded live (edit the
+file while the app is running, no restart needed):
+
+- `[keybinds]` — remap any of the five terminal hotkeys (`source_toggle`,
+  `chord_mode_toggle`, `notehead_style_toggle`, `legend_toggle`,
+  `freeze_toggle`) to a different single character, e.g.
+  `source_toggle = "x"`. The status line's hotkey hints (`(m)`, `(p)`,
+  etc.) reflect the remap.
+- `[colors]` — override a note's hue (degrees, 0–360) by name, either
+  sharp or flat spelling, e.g. `C = 200` or `"F#" = 45`. Saturation and
+  octave-driven lightness are untouched by the override.
+
+`[preferences]` is a reserved, currently-unused table for future
+quality-of-life settings (map #37/#40/#43); see `config_store.py`'s
+docstring for the full schema and `docs/DECISIONS.md` for why the schema
+stops here for now.
+
 ## Key design decisions
 
 One-liners; full rationale in `docs/DECISIONS.md`.
@@ -260,6 +283,16 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   backlog risk, per this app's threaded architecture). `TabDisplay.render()`
   doesn't know why nothing new is arriving; it's just told `frozen=True`
   and pins every visible column's age to 0.
+- `config_store.ConfigStore` hot-reloads by `os.stat()`-checking the TOML
+  file's mtime on every accessor call rather than a file-watcher thread —
+  cheap enough to call every hop/frame, same zero-shared-state spirit as
+  `P`/`M`/`N`/`L`, and it's what lets `[keybinds]`/`[colors]` overrides
+  apply live with no restart and no explicit reload call anywhere in the
+  render loop.
+- Per-note `[colors]` overrides replace hue only, not saturation or
+  lightness — read as "override this note's color identity," not "hand it
+  an arbitrary RGB," so octave-driven lightness (fill/GUI) and tab's fixed
+  `TAB_NOTE_LIGHTNESS` both keep working unmodified underneath an override.
 
 ## Known limitations / things learned
 

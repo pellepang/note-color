@@ -17,9 +17,15 @@ def fifths_index(pitch_class):
     return (pitch_class * 7) % 12
 
 
-def note_to_hsl(pitch_class, octave, scheme="chromatic"):
-    step = fifths_index(pitch_class) if scheme == "fifths" else pitch_class
-    hue = (step * 30 + config.HUE_OFFSET_DEG) % 360
+def note_to_hsl(pitch_class, octave, scheme="chromatic", hue_override=None):
+    """`hue_override` (degrees, issue #41's per-note [colors] overrides)
+    replaces the scheme-derived hue outright when given; saturation and
+    octave-driven lightness are unaffected either way."""
+    if hue_override is not None:
+        hue = hue_override % 360
+    else:
+        step = fifths_index(pitch_class) if scheme == "fifths" else pitch_class
+        hue = (step * 30 + config.HUE_OFFSET_DEG) % 360
     octv = max(config.MIN_OCTAVE, min(config.MAX_OCTAVE, octave))
     span = config.MAX_OCTAVE - config.MIN_OCTAVE
     t = (octv - config.MIN_OCTAVE) / span if span else 0.0

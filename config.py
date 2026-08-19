@@ -90,3 +90,16 @@ FADE_COLUMNS = 16               # issue #22: columns of age to fade a scrolled-p
                                  # held at that floor beyond this age. Reached via three
                                  # rounds of live user reaction (4 -> 8 -> 16) -- not a
                                  # value to second-guess without new live feedback.
+
+# --- Config store (issue #41) ---
+# Defaults for every terminal-mode hotkey, keyed by action name -- the
+# source of truth `config_store.ConfigStore.keybind()` falls back to when
+# a user's config.toml doesn't remap that action. Single characters,
+# case-insensitive, except FREEZE_TOGGLE which is literally Space.
+DEFAULT_KEYBINDS = {
+    "source_toggle": "m",
+    "chord_mode_toggle": "p",
+    "notehead_style_toggle": "n",
+    "legend_toggle": "l",
+    "freeze_toggle": " ",
+}

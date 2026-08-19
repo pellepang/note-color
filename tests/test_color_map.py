@@ -65,3 +65,17 @@ def test_chromatic_scheme_unaffected_by_fifths_addition():
     for pitch_class in range(12):
         hue, sat, light = note_to_hsl(pitch_class, 4, scheme="chromatic")
         assert hue == pitch_class * 30
+
+
+def test_hue_override_replaces_scheme_hue():
+    hue, sat, light = note_to_hsl(0, 4, scheme="fifths", hue_override=123)
+    assert hue == 123
+    # Saturation/lightness are untouched by the override.
+    _, base_sat, base_light = note_to_hsl(0, 4, scheme="fifths")
+    assert sat == base_sat
+    assert light == base_light
+
+
+def test_hue_override_wraps_into_0_360():
+    hue, _, _ = note_to_hsl(0, 4, hue_override=400)
+    assert hue == 40
