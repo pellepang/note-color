@@ -14,7 +14,11 @@ from color_map import hsl_to_rgb255, NOTE_NAMES_FIFTHS
 # Ring position i -> pitch class, in circle-of-fifths order (0=C, clockwise).
 FIFTHS_LABELS = [NOTE_NAMES_FIFTHS[(7 * i) % 12] for i in range(12)]
 
-DIM_LIGHTNESS = 0.16
+# Promoted to config.DIM_LIGHTNESS so terminal_tab_display.py's per-column
+# age-based fade (issue #22) can reuse the exact same floor -- see
+# config.py's comment on DIM_LIGHTNESS for the rationale. Keep this alias
+# rather than a second literal copy, so the two views can never drift.
+DIM_LIGHTNESS = config.DIM_LIGHTNESS
 
 
 class WheelDisplay:

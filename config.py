@@ -43,6 +43,13 @@ MIN_OCTAVE = 2
 MAX_OCTAVE = 6
 BASE_LIGHTNESS_RANGE = (0.18, 0.82)
 BASE_SATURATION = 0.75
+# Shared "dim/inactive" lightness floor -- originally terminal_wheel_display.py's
+# own module constant (inactive pitch-class wedges), promoted here so
+# terminal_tab_display.py's per-column age-based fade (issue #22) can reuse
+# the exact same floor without a second copy the two views could drift
+# apart from (same rationale as the NOTE_NAMES_FIFTHS/diatonic_step() fix --
+# see docs/DECISIONS.md).
+DIM_LIGHTNESS = 0.16
 IDLE_RGB = (6, 6, 12)
 DEFAULT_COLOR_SCHEME = "chromatic"  # or "fifths"
 
