@@ -79,3 +79,8 @@ TAB_COLUMN_WIDTH_CHORD = 9       # chord mode: wide enough for names like "C#13b
 TAB_LEGEND_WIDTH = 5            # left-hand column: clef glyphs + staff-line note names
 TAB_VISIBLE_MAXLEN = 300        # on-screen deque cap
 TAB_SESSION_HISTORY_MAX = 5000  # cap on entries retained for the end-of-session dump
+FADE_COLUMNS = 16               # issue #22: columns of age to fade a scrolled-past column
+                                 # linearly from TAB_NOTE_LIGHTNESS down to DIM_LIGHTNESS,
+                                 # held at that floor beyond this age. Reached via three
+                                 # rounds of live user reaction (4 -> 8 -> 16) -- not a
+                                 # value to second-guess without new live feedback.

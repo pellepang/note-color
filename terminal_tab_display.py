@@ -19,6 +19,26 @@ that's still on screen, not just future pushes) alongside its precomputed
 letter+octave `label`, which exists purely for `dump_ansi()`'s on-quit
 text dump (unaffected by the `N`/`L` toggles, per the map's standing
 decision) and is never used by `render()`.
+
+Two further live-togglable behaviors (issues #22/#23, `main.py`'s render-
+thread-local state, no `TabDisplay`-side toggle methods -- same pattern as
+`notehead_style`/`legend_on`): per-column age-based dimming, and a `Space`
+freeze-frame. Dimming (#22): the newest visible column renders at
+`config.TAB_NOTE_LIGHTNESS` (tab's normal, always-used note lightness);
+every older column's lightness fades linearly down to `config.
+DIM_LIGHTNESS` (the same floor `terminal_wheel_display.py` uses for its
+own inactive wedges -- promoted to `config.py` so the two can't drift)
+over `config.FADE_COLUMNS` columns of age, held at that floor beyond it.
+Age is each column's distance from the newest *visible* column (0 =
+newest), recomputed fresh every `render()` call from `pitch_class` (see
+`_column_note_rgb()`) rather than baked in at push time -- a column's age
+changes every frame as newer columns scroll in, so its color can't be
+fixed when pushed. `TabEntry.notes`' precomputed `rgb` field is therefore
+only ever read by `dump_ansi()` now, same as `label`. Freeze-frame (#23,
+`render(..., frozen=True)`): forces every visible column's age to 0,
+overriding the fade entirely, while `main.py` stops pushing new columns --
+`render()` itself doesn't know or care that no new columns are arriving,
+it just keeps redrawing the same history with age pinned at 0.
 """
 
 import shutil
@@ -27,7 +47,7 @@ import time
 from collections import deque, namedtuple
 
 import config
-from color_map import NOTE_NAMES_FIFTHS
+from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
 from staff_map import (
     staff_row, ledger_rows, line_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
     BASS_CLEF_ROW, TREBLE_CLEF_ROW,
@@ -76,7 +96,7 @@ class TabDisplay:
         if len(self.session_history) < config.TAB_SESSION_HISTORY_MAX:
             self.session_history.append(entry)
 
-    def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True):
+    def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False):
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
 
@@ -110,10 +130,15 @@ class TabDisplay:
         pad = visible_cols - len(visible_entries)
 
         columns = [({}, frozenset(), None)] * pad
-        for e in visible_entries:
+        last_index = len(visible_entries) - 1
+        for index, e in enumerate(visible_entries):
+            # Age is distance from the newest *visible* column (0 = newest);
+            # #23's freeze-frame pins every column's age to 0, overriding
+            # #22's fade entirely, without this loop needing to know why.
+            age = 0 if frozen else last_index - index
             row_map = {}
             ledgers = set()
-            for pitch_class, octave, rgb, _label in e.notes:
+            for pitch_class, octave, _rgb, _label in e.notes:
                 # Notes still outside [bottom, top] after the shrink above
                 # (only possible once the staff has hit its 21-row floor,
                 # on a terminal too short even for that) are dropped rather
@@ -129,8 +154,14 @@ class TabDisplay:
                 # (that's dump_ansi()'s letter+octave text, untouched by
                 # notehead_style) -- _cell_text() below renders fresh
                 # against whichever style is current, so a live `N` toggle
-                # restyles already-on-screen columns too.
-                row_map[row] = (rgb, pitch_class)
+                # restyles already-on-screen columns too. Color is also
+                # recomputed fresh here (_column_note_rgb), not the
+                # precomputed `_rgb` this note tuple carries -- that
+                # precomputed value is always TAB_NOTE_LIGHTNESS and is
+                # only ever read by dump_ansi(); a column's age (and thus
+                # its dimming) changes every render as newer columns scroll
+                # in, so it can't be baked in at push time.
+                row_map[row] = (_column_note_rgb(pitch_class, age), pitch_class)
                 ledgers.update(r for r in ledger_rows(row) if bottom <= r <= top)
             columns.append((row_map, frozenset(ledgers), e.chord_name))
 
@@ -205,6 +236,32 @@ def _note_cell(rgb, label, width):
     fg = (20, 20, 20) if lum > 140 else (230, 230, 230)
     text = (label or "")[:width].center(width)
     return f"\033[48;2;{r};{g};{b}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m{text}\033[0m"
+
+
+def _aged_lightness(age):
+    """Issue #22's dimming curve: linear fade from `config.TAB_NOTE_LIGHTNESS`
+    at `age` 0 (the newest visible column) down to `config.DIM_LIGHTNESS`
+    by `config.FADE_COLUMNS` columns of age, held at that floor beyond it.
+    Freeze-frame (#23) passes `age=0` for every visible column, which this
+    formula already resolves to full `TAB_NOTE_LIGHTNESS` -- no separate
+    freeze branch needed here, the caller just lies about age."""
+    if config.FADE_COLUMNS <= 1:
+        return config.DIM_LIGHTNESS
+    fraction = min(age / (config.FADE_COLUMNS - 1), 1.0)
+    return config.TAB_NOTE_LIGHTNESS - (config.TAB_NOTE_LIGHTNESS - config.DIM_LIGHTNESS) * fraction
+
+
+def _column_note_rgb(pitch_class, age):
+    """A note cell's on-screen color, recomputed fresh every render: the
+    same fixed fifths hue/saturation `main.py`'s `_tab_note_rgb()` computes
+    when a note is first pushed, but with lightness taken from
+    `_aged_lightness()` instead of the fixed `config.TAB_NOTE_LIGHTNESS`
+    that precomputed value always uses. `note_to_hsl(..., scheme="fifths")`
+    is used (not `--color-scheme`) for the same reason `_tab_note_rgb()`
+    hardcodes it: `tab` reads as the same color as `wheel`, independent of
+    the active color scheme."""
+    hue, sat, _light = note_to_hsl(pitch_class, config.MAX_OCTAVE, scheme="fifths")
+    return hsl_to_rgb255(hue, sat, _aged_lightness(age))
 
 
 def _accidental_suffix(pitch_class):
