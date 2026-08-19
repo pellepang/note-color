@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-66 tests), and detection has been confirmed with a real speaker→mic
+76 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -77,7 +77,7 @@ stage can ever stall another. Target end-to-end latency: comfortably under
 | `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). Chord mode is out of scope for the GUI (no live-hotkey mechanism). |
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
-| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`), `dump_ansi()` on quit (always letter+octave, unaffected by either toggle). |
+| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
 | `main.py` | Wires threads together, dispatches GUI/terminal views by CLI flag; `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
 | `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`. |
 
@@ -108,7 +108,8 @@ GUI controls: `Esc`/close window to quit, `F` fullscreen, `D` debug overlay,
 quit, `Up`/`Down` sensitivity, `M` toggle audio source live, `P` toggle
 chord mode live (needs a real TTY; no-op otherwise, e.g. piped input).
 `tab` view only: `N` toggle notehead render style live, `L` toggle the
-clef+note-letter legend column live (see below).
+clef+note-letter legend column live, `Space` freeze/un-freeze the view
+(see below).
 `--sensitivity FLOAT` sets the starting value (default 1.0); raises it to
 register quieter/softer playing more readily. Current value shown in the
 status line (`sens=`).
@@ -141,6 +142,19 @@ legend column (clef glyphs + natural-note letters, itself merged into one
 its width for note columns when off. Current state of both shown in the
 status line (`notes=`/`legend=`). The on-quit `dump_ansi()` text dump is
 unaffected by either toggle — always letter+octave, as before.
+
+Past columns dim as they scroll by (issue #22): the newest visible column
+renders at the normal `TAB_NOTE_LIGHTNESS`; every older column's lightness
+fades linearly down to `DIM_LIGHTNESS` (the same floor `wheel`'s inactive
+wedges use) over `FADE_COLUMNS` (16) columns of age, then holds at that
+floor. Hue/saturation are untouched — only lightness moves. `Space`
+freezes the view (issue #23): scrolling and the dimming fade both pause,
+every currently-visible column jumps to full `TAB_NOTE_LIGHTNESS`
+(overriding the fade as if each were the newest column), and the
+underlying audio/detection pipeline keeps running in the background
+regardless — pressing `Space` again resumes live immediately, with no
+catch-up of whatever happened while frozen. Current state shown in the
+status line (`frozen=on/off`).
 
 `--source {mic,loopback}` (default `mic`) selects the input: `loopback`
 listens to the computer's own audio output instead of the microphone, via
@@ -203,14 +217,36 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   output there is just spectral-leakage noise (empirically ~0.15x the
   main peak) that would otherwise get misread as a slash-chord bass note.
   A genuine sounding bass note measured ~0.35x+.
-- `tab`'s notehead style (`N`) and legend visibility (`L`) are pure
-  render-thread-local state in `main.py`, same as `P` — `TabDisplay`
-  itself owns no toggle state, just renders whatever style/visibility
-  `render()` is called with each frame.
+- `tab`'s notehead style (`N`), legend visibility (`L`), and freeze-frame
+  (`Space`) are pure render-thread-local state in `main.py`, same as `P` —
+  `TabDisplay` itself owns no toggle state, just renders whatever
+  style/visibility/frozen-ness `render()` is called with each frame.
 - `tab`'s notehead rendering keeps each note's raw pitch_class/octave (not
   a precomputed label) so a live `N` toggle restyles columns already on
   screen; `dump_ansi()` keeps its own precomputed letter+octave label
   independently, unaffected by either notehead toggle.
+- `tab`'s per-column dimming (issue #22) recomputes each note's color fresh
+  every `render()` call from its raw `pitch_class` and the column's age
+  (distance from the newest *visible* column), rather than reusing the
+  rgb baked in at push time — a column's age changes every frame as newer
+  columns scroll in, so it can't be fixed once at push time. The
+  precomputed push-time rgb survives only for `dump_ansi()`, which stays
+  letter+octave/full-brightness as before, same reasoning as the notehead
+  style toggle above.
+- `DIM_LIGHTNESS` (0.16) is a single constant in `config.py`, imported by
+  both `terminal_wheel_display.py` (inactive wedges) and
+  `terminal_tab_display.py` (dimmed columns) — promoted there specifically
+  so `tab`'s dimming floor and `wheel`'s inactive-wedge lightness can never
+  drift apart, same rationale as the existing `NOTE_NAMES_FIFTHS`/
+  `diatonic_step()` shared-source fix.
+- `tab`'s freeze-frame (`Space`, issue #23) is a view-only pause: while
+  frozen, `main.py`'s `run_terminal_tab` simply stops calling
+  `result_queue.get_nowait()`, so no new columns get pushed and the status
+  line's note/freq/etc. fields hold their last value — the analysis thread
+  keeps overwriting the single-slot queue in the background regardless (no
+  backlog risk, per this app's threaded architecture). `TabDisplay.render()`
+  doesn't know why nothing new is arriving; it's just told `frozen=True`
+  and pins every visible column's age to 0.
 
 ## Known limitations / things learned
 
