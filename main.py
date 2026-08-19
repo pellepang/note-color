@@ -10,7 +10,9 @@ debug overlay, Up/Down to adjust pitch-detection sensitivity.
 Terminal mode: Ctrl+C to quit, Up/Down for sensitivity, M to toggle the
 audio source (mic <-> loopback) live, P to toggle chord mode (chroma-vector
 chord recognition, up to 6 simultaneous notes) live -- terminal views only,
-not the GUI. No display server required.
+not the GUI. 'tab' view only: N toggles the notehead render style (symbol
+glyph <-> bare letter name), L toggles the clef+note-letter legend column
+on/off. No display server required.
 """
 
 import argparse
@@ -250,6 +252,21 @@ def _handle_chord_mode_key(key, chord_mode):
     return not chord_mode if (key is not None and key.lower() == "p") else chord_mode
 
 
+def _handle_notehead_style_key(key, notehead_style):
+    """'tab' view only: N toggles the notehead render style (issue #21) --
+    *symbol* (open notehead glyph + Unicode accidental) <-> *name* (bare
+    letter + ASCII accidental, no octave digit)."""
+    if key is None or key.lower() != "n":
+        return notehead_style
+    return "name" if notehead_style == "symbol" else "symbol"
+
+
+def _handle_legend_key(key, legend_on):
+    """'tab' view only: L toggles the clef+note-letter legend column on/off
+    live (issue #19), reclaiming its width for note columns when off."""
+    return not legend_on if (key is not None and key.lower() == "l") else legend_on
+
+
 def _fade_toward(value, target, dt, tau_ms):
     tau = max(tau_ms, 1) / 1000.0
     alpha = 1.0 - math.exp(-dt / tau)
@@ -414,6 +431,8 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     keys = RawKeys()
     chord_mode = False
     prev_chord_name = None
+    notehead_style = config.TAB_DEFAULT_NOTEHEAD_STYLE
+    legend_on = config.TAB_DEFAULT_LEGEND_ON
 
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
     pitch_class, octave = None, None
@@ -430,6 +449,8 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             _handle_sensitivity_key(key, sensitivity)
             _handle_source_key(key, capture, source_state)
             chord_mode = _handle_chord_mode_key(key, chord_mode)
+            notehead_style = _handle_notehead_style_key(key, notehead_style)
+            legend_on = _handle_legend_key(key, legend_on)
             got_new = False
             is_onset = False
             try:
@@ -439,7 +460,8 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             except queue.Empty:
                 pass
 
-            mode_hint = f"mode={'chord' if chord_mode else 'note'}(p)"
+            mode_hint = (f"mode={'chord' if chord_mode else 'note'}(p)  "
+                         f"notes={notehead_style}(n)  legend={'on' if legend_on else 'off'}(l)")
             if chord_mode:
                 notes = [
                     (e["pitch_class"], e["octave"], _tab_note_rgb(e["pitch_class"]),
@@ -465,7 +487,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
                           + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
-                display.render(status, chord_mode=True)
+                display.render(status, chord_mode=True, notehead_style=notehead_style, legend_on=legend_on)
             else:
                 glyph_rgb = _tab_note_rgb(pitch_class)
                 tab_label = _tab_note_label(pitch_class, octave)
@@ -481,7 +503,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
 
                 status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
                           + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
-                display.render(status, chord_mode=False)
+                display.render(status, chord_mode=False, notehead_style=notehead_style, legend_on=legend_on)
             time.sleep(dt)
     except KeyboardInterrupt:
         pass
