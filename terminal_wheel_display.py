@@ -28,7 +28,7 @@ class WheelDisplay:
         sys.stdout.write("\033[?25l\033[2J")
         sys.stdout.flush()
 
-    def render(self, active_index, pulse, status):
+    def render(self, active_index, pulse, status, legend=""):
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
 
@@ -69,10 +69,12 @@ class WheelDisplay:
 
         status_row = cy + ry + 2
         out.append(f"\033[{status_row};1H\033[K{status}")
+        if legend:
+            out.append(f"\033[{status_row + 1};1H\033[K{legend}")
         sys.stdout.write(clear + "".join(out))
         sys.stdout.flush()
 
-    def render_chord(self, fades, bass_pitch_class, status):
+    def render_chord(self, fades, bass_pitch_class, status, legend=""):
         """Chord mode: `fades` is a 12-element list of 0..1 crossfade
         levels (one per pitch class, ring order via FIFTHS_LABELS/index
         (7*i)%12), steadily lit rather than pulsing -- a sustained chord
@@ -117,6 +119,8 @@ class WheelDisplay:
 
         status_row = cy + ry + 2
         out.append(f"\033[{status_row};1H\033[K{status}")
+        if legend:
+            out.append(f"\033[{status_row + 1};1H\033[K{legend}")
         sys.stdout.write(clear + "".join(out))
         sys.stdout.flush()
 

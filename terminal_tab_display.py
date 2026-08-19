@@ -96,7 +96,8 @@ class TabDisplay:
         if len(self.session_history) < config.TAB_SESSION_HISTORY_MAX:
             self.session_history.append(entry)
 
-    def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False):
+    def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False,
+               help_legend=""):
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
 
@@ -108,7 +109,13 @@ class TabDisplay:
         self._last_size = size
 
         header_rows = 1 if chord_mode else 0
-        usable_rows = max(rows - 1 - header_rows, 1)  # reserve the last row for status text
+        # `help_legend` (issue #40's H toggle) is a *different* toggle from
+        # this method's own `legend_on` (the staff clef/letter column, an
+        # older, unrelated feature -- see the module docstring) and reserves
+        # its own extra trailing row only when populated, same convention
+        # as the other terminal views' render().
+        text_rows = 2 if help_legend else 1
+        usable_rows = max(rows - text_rows - header_rows, 1)  # reserve the trailing row(s) for status/legend text
 
         top, bottom = TOP_ROW, BOTTOM_ROW
         shrink = (top - bottom + 1) - usable_rows
@@ -214,6 +221,8 @@ class TabDisplay:
         for i, line in enumerate(lines, start=1):
             out.append(f"\033[{i};1H\033[K{line}")
         out.append(f"\033[{len(lines) + 1};1H\033[K{status}")
+        if help_legend:
+            out.append(f"\033[{len(lines) + 2};1H\033[K{help_legend}")
         sys.stdout.write(clear + "".join(out))
         sys.stdout.flush()
 

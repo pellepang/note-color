@@ -13,11 +13,16 @@ class TerminalDisplay:
         sys.stdout.write("\033[2J")    # clear screen once
         sys.stdout.flush()
 
-    def render(self, rgb, status=""):
+    def render(self, rgb, status="", legend=""):
         r, g, b = rgb
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
-        rows = max(rows - 1, 1)  # reserve the last row for status text
+        # The H keybind-legend (issue #40) reserves a second trailing row
+        # only when it's actually populated -- legend="" (H off, or no
+        # caller support) reproduces the exact single-status-row layout
+        # this view always had.
+        text_rows = 2 if legend else 1
+        rows = max(rows - text_rows, 1)  # reserve the trailing row(s) for status/legend text
 
         bg = f"\033[48;2;{r};{g};{b}m"
         reset = "\033[0m"
@@ -34,17 +39,20 @@ class TerminalDisplay:
         out = ["\033[H"]  # cursor home (avoids full-clear flicker on unchanged size)
         out.extend([block_line] * rows)
         out.append(reset + "\033[K" + fg + status + reset)
+        if legend:
+            out.append(reset + "\033[K" + fg + legend + reset)
         sys.stdout.write(clear + "\n".join(out))
         sys.stdout.flush()
 
-    def render_bands(self, rgbs, status=""):
+    def render_bands(self, rgbs, status="", legend=""):
         """Chord mode: `rgbs` is a list of RGB tuples, bottom-to-top, one
         per currently-active note -- splits the fill area into that many
         proportional horizontal bands instead of one solid color. A
         single-entry list reduces to exactly `render()`'s behavior."""
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
-        rows = max(rows - 1, 1)
+        text_rows = 2 if legend else 1
+        rows = max(rows - text_rows, 1)
 
         n = len(rgbs)
         base, remainder = divmod(rows, n)
@@ -67,6 +75,8 @@ class TerminalDisplay:
         out = ["\033[H"]
         out.extend(lines)
         out.append(reset + "\033[K" + fg + status + reset)
+        if legend:
+            out.append(reset + "\033[K" + fg + legend + reset)
         sys.stdout.write(clear + "\n".join(out))
         sys.stdout.flush()
 

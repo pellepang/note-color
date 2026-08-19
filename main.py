@@ -6,7 +6,10 @@ mic or system-output loopback -> AudioCapture (callback thread)
     -> main thread: ColorAnimator -> Display (pygame window, or terminal)
 
 GUI controls: Esc/close window to quit, F to toggle fullscreen, D to toggle
-debug overlay, Up/Down to adjust pitch-detection sensitivity.
+debug overlay, Up/Down to adjust pitch-detection sensitivity, H to toggle
+the keybind-legend line, backslash (unshifted '|') to return to the menu
+when run via virtualnote.py's shell (a no-op quit when run standalone --
+see main()).
 Terminal mode: Ctrl+C to quit, Up/Down for sensitivity, M to toggle the
 audio source (mic <-> loopback) live, P to toggle chord mode (chroma-vector
 chord recognition, up to 6 simultaneous notes) live -- terminal views only,
@@ -17,6 +20,10 @@ starting value for 'tab'. 'tab' view only: N toggles the notehead render
 style (symbol glyph <-> bare letter name), L toggles the clef+note-letter
 legend column on/off, Space freezes/un-freezes the view (scrolling and
 per-column dimming pause; the pipeline keeps running in the background).
+Global across every terminal view (issue #40): '|' returns to virtualnote's
+menu (a harmless quit when this module is run standalone via `main.py`,
+which has no menu), H toggles a context-sensitive keybind-legend line
+below the status line, on by default.
 No display server required.
 """
 
@@ -35,6 +42,7 @@ import numpy as np
 import chroma
 import config
 import multipitch
+from config_store import store
 from audio_capture import AudioCapture, resolve_loopback_device
 from pitch_detect import compute_spectrum, detect_pitch
 from note_smoother import NoteSmoother
@@ -126,8 +134,15 @@ def _handle_sensitivity_key(key, sensitivity):
         sensitivity.adjust(SENSITIVITY_STEP)
 
 
+def _key_hint(action):
+    """Status-line hint for a remappable action's bound key (issue #41) --
+    'space' spelled out instead of the literal, invisible character."""
+    bound = store.keybind(action)
+    return "space" if bound == " " else bound
+
+
 def _handle_source_key(key, capture, source_state):
-    if key is None or key.lower() != "m":
+    if key is None or key.lower() != store.keybind("source_toggle").lower():
         return
     new_source = "loopback" if source_state.value == "mic" else "mic"
     try:
@@ -189,7 +204,8 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
             label = "-"
             fifths_idx = None
         else:
-            hue, sat, light = note_to_hsl(pitch_class, octave, scheme=color_scheme)
+            hue, sat, light = note_to_hsl(pitch_class, octave, scheme=color_scheme,
+                                           hue_override=store.note_hue_override(pitch_class))
             target_rgb = hsl_to_rgb255(hue, sat, light)
             label = f"{NOTE_NAMES[pitch_class]}{octave}"
             fifths_idx = fifths_index(pitch_class)
@@ -212,7 +228,10 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
 
         note_stack = []
         for entry in raw_stack:
-            stack_hue, stack_sat, stack_light = note_to_hsl(entry["pitch_class"], entry["octave"], scheme=color_scheme)
+            stack_hue, stack_sat, stack_light = note_to_hsl(
+                entry["pitch_class"], entry["octave"], scheme=color_scheme,
+                hue_override=store.note_hue_override(entry["pitch_class"]),
+            )
             note_stack.append(
                 {
                     "pitch_class": entry["pitch_class"],
@@ -247,7 +266,7 @@ def _status_text(label, freq, confidence, rms, sensitivity, source_state=None, c
         text = (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
                 f"sens={sensitivity.value:.2f} (up/down)")
     if source_state is not None:
-        text += f"  src={source_state.value} (m)"
+        text += f"  src={source_state.value} ({_key_hint('source_toggle')})"
         if source_state.error:
             text += f"  [source switch failed: {source_state.error}]"
     return text
@@ -258,14 +277,16 @@ def _handle_chord_mode_key(key, chord_mode):
     fill/wheel start False (opt *up* into chord mode); tab starts True
     (opt *down* to monophonic) -- the starting value lives in each view's
     own run_terminal_* function, not here."""
-    return not chord_mode if (key is not None and key.lower() == "p") else chord_mode
+    bound = store.keybind("chord_mode_toggle")
+    return not chord_mode if (key is not None and key.lower() == bound.lower()) else chord_mode
 
 
 def _handle_notehead_style_key(key, notehead_style):
     """'tab' view only: N toggles the notehead render style (issue #21) --
     *symbol* (open notehead glyph + Unicode accidental) <-> *name* (bare
     letter + ASCII accidental, no octave digit)."""
-    if key is None or key.lower() != "n":
+    bound = store.keybind("notehead_style_toggle")
+    if key is None or key.lower() != bound.lower():
         return notehead_style
     return "name" if notehead_style == "symbol" else "symbol"
 
@@ -273,7 +294,39 @@ def _handle_notehead_style_key(key, notehead_style):
 def _handle_legend_key(key, legend_on):
     """'tab' view only: L toggles the clef+note-letter legend column on/off
     live (issue #19), reclaiming its width for note columns when off."""
-    return not legend_on if (key is not None and key.lower() == "l") else legend_on
+    bound = store.keybind("legend_toggle")
+    return not legend_on if (key is not None and key.lower() == bound.lower()) else legend_on
+
+
+def _handle_back_to_menu_key(key):
+    """Global (every terminal tool, issue #40): '|' is the always-live
+    back-to-menu keybind, same tier as M/P/H -- a run_terminal_* loop
+    returns the "menu" sentinel the instant this fires, through its
+    existing finally block (keys.restore()/display.quit() still run).
+    GUI wires its own pygame K_BACKSLASH check directly in run_gui rather
+    than sharing this raw-key-string handler (the shifted '|' character
+    isn't how pygame reports the unshifted physical key)."""
+    return key == "|"
+
+
+def _handle_help_legend_key(key, help_legend_on):
+    """Global (every terminal tool, issue #40): H toggles the persistent,
+    context-sensitive keybind-legend line shown below the status line.
+    Default True; session-local only -- no persistence across runs, that's
+    issue #41's job. Direction-agnostic boolean flip, same shape as
+    _handle_chord_mode_key's P. Named to avoid colliding with tab's older,
+    unrelated _handle_legend_key/legend_on (the staff clef+letter legend
+    *column*, a different feature -- see that function's docstring)."""
+    return not help_legend_on if (key is not None and key.lower() == "h") else help_legend_on
+
+
+def _legend_line(view_hints):
+    """Builds the optional extra status-line row shown when the H toggle
+    is on: '|'/'h' first (always live, every view), then whatever hotkeys
+    the calling view actually has. Deliberately a plain joined string, not
+    a UI framework -- issue #40 owns only the toggle plumbing; the visual
+    design of the whole shell (including this line) is #42's job."""
+    return "  ".join(["|=menu", "h=legend"] + view_hints)
 
 
 def _handle_freeze_key(key, frozen):
@@ -287,7 +340,8 @@ def _handle_freeze_key(key, frozen):
     frozen causes no backlog, matching how every other view already
     behaves under backpressure. Un-freezing resumes live immediately, no
     catch-up of anything that happened while frozen."""
-    return not frozen if key == " " else frozen
+    bound = store.keybind("freeze_toggle")
+    return not frozen if (key is not None and key.lower() == bound.lower()) else frozen
 
 
 def _fade_toward(value, target, dt, tau_ms):
@@ -329,6 +383,7 @@ def run_terminal_fill(result_queue, sensitivity, capture, source_state):
     band_animators = {}
     keys = RawKeys()
     chord_mode = False
+    help_legend_on = True
 
     target_rgb, is_onset, label, freq, confidence, rms = config.IDLE_RGB, False, "-", 0.0, 0.0, 0.0
     note_stack, chord_name = [], None
@@ -340,27 +395,32 @@ def run_terminal_fill(result_queue, sensitivity, capture, source_state):
             _handle_sensitivity_key(key, sensitivity)
             _handle_source_key(key, capture, source_state)
             chord_mode = _handle_chord_mode_key(key, chord_mode)
+            help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            if _handle_back_to_menu_key(key):
+                return "menu"
             try:
                 (target_rgb, is_onset, label, freq, confidence, rms,
                  _fifths_idx, _pitch_class, _octave, note_stack, chord_name) = result_queue.get_nowait()
             except queue.Empty:
                 is_onset = False
 
-            mode_hint = f"mode={'chord' if chord_mode else 'note'}(p)"
+            mode_hint = f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  legend(h)"
+            legend = _legend_line(["up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
+                                    f"{_key_hint('chord_mode_toggle')}=mode"]) if help_legend_on else ""
             if chord_mode:
                 bands = _animate_note_stack(band_animators, note_stack, dt)
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
                           + f"  {mode_hint}  (Ctrl+C to quit)")
-                display.render_bands(bands, status)
+                display.render_bands(bands, status, legend)
             else:
                 rgb = animator.update(dt, target_rgb, is_onset)
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
                           + f"  {mode_hint}  (Ctrl+C to quit)")
-                display.render(rgb, status)
+                display.render(rgb, status, legend)
             time.sleep(dt)
     except KeyboardInterrupt:
-        pass
+        return "quit"
     finally:
         keys.restore()
         display.quit()
@@ -374,6 +434,7 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
     dt = 1.0 / display.fps
     keys = RawKeys()
     chord_mode = False
+    help_legend_on = True
     wedge_fades = [0.0] * 12
 
     active_index = None
@@ -387,6 +448,9 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
             _handle_sensitivity_key(key, sensitivity)
             _handle_source_key(key, capture, source_state)
             chord_mode = _handle_chord_mode_key(key, chord_mode)
+            help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            if _handle_back_to_menu_key(key):
+                return "menu"
             is_onset = False
             try:
                 (_target_rgb, is_onset, label, freq, confidence, rms,
@@ -394,7 +458,9 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
             except queue.Empty:
                 pass
 
-            mode_hint = f"mode={'chord' if chord_mode else 'note'}(p)"
+            mode_hint = f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  legend(h)"
+            legend = _legend_line(["up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
+                                    f"{_key_hint('chord_mode_toggle')}=mode"]) if help_legend_on else ""
             if chord_mode:
                 active_pcs = {e["pitch_class"] for e in note_stack}
                 bass_pc = next((e["pitch_class"] for e in note_stack if e["is_bass"]), None)
@@ -404,15 +470,15 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
                           + f"  {mode_hint}  (Ctrl+C to quit)")
-                display.render_chord(wedge_fades, bass_pc, status)
+                display.render_chord(wedge_fades, bass_pc, status, legend)
             else:
                 pulse = 1.0 if is_onset else pulse * math.exp(-dt / pulse_decay)
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
                           + f"  {mode_hint}  (Ctrl+C to quit)")
-                display.render(active_index, pulse, status)
+                display.render(active_index, pulse, status, legend)
             time.sleep(dt)
     except KeyboardInterrupt:
-        pass
+        return "quit"
     finally:
         keys.restore()
         display.quit()
@@ -431,7 +497,8 @@ def _tab_note_rgb(pitch_class):
     HSL, rather than washing out toward white like a high lightness does."""
     if pitch_class is None:
         return config.IDLE_RGB
-    hue, sat, _light = note_to_hsl(pitch_class, config.MAX_OCTAVE, scheme="fifths")
+    hue, sat, _light = note_to_hsl(pitch_class, config.MAX_OCTAVE, scheme="fifths",
+                                    hue_override=store.note_hue_override(pitch_class))
     return hsl_to_rgb255(hue, sat, config.TAB_NOTE_LIGHTNESS)
 
 
@@ -461,6 +528,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     notehead_style = config.TAB_DEFAULT_NOTEHEAD_STYLE
     legend_on = config.TAB_DEFAULT_LEGEND_ON
     frozen = False
+    help_legend_on = True
 
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
     pitch_class, octave = None, None
@@ -480,6 +548,9 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             notehead_style = _handle_notehead_style_key(key, notehead_style)
             legend_on = _handle_legend_key(key, legend_on)
             frozen = _handle_freeze_key(key, frozen)
+            help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            if _handle_back_to_menu_key(key):
+                return "menu"
             got_new = False
             is_onset = False
             # Frozen: don't drain result_queue at all, so the view keeps
@@ -494,9 +565,15 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 except queue.Empty:
                     pass
 
-            mode_hint = (f"mode={'chord' if chord_mode else 'note'}(p)  "
-                         f"notes={notehead_style}(n)  legend={'on' if legend_on else 'off'}(l)  "
-                         f"frozen={'on' if frozen else 'off'}(space)")
+            mode_hint = (f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  "
+                         f"notes={notehead_style}({_key_hint('notehead_style_toggle')})  "
+                         f"legend={'on' if legend_on else 'off'}({_key_hint('legend_toggle')})  "
+                         f"frozen={'on' if frozen else 'off'}({_key_hint('freeze_toggle')})  helplegend(h)")
+            help_legend = _legend_line([
+                "up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
+                f"{_key_hint('chord_mode_toggle')}=mode", f"{_key_hint('notehead_style_toggle')}=notes",
+                f"{_key_hint('legend_toggle')}=stafflegend", f"{_key_hint('freeze_toggle')}=freeze",
+            ]) if help_legend_on else ""
             if chord_mode:
                 notes = [
                     (e["pitch_class"], e["octave"], _tab_note_rgb(e["pitch_class"]),
@@ -524,7 +601,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                                         chord_name=chord_name, chord_mode=True)
                           + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
                 display.render(status, chord_mode=True, notehead_style=notehead_style, legend_on=legend_on,
-                                frozen=frozen)
+                                frozen=frozen, help_legend=help_legend)
             else:
                 glyph_rgb = _tab_note_rgb(pitch_class)
                 tab_label = _tab_note_label(pitch_class, octave)
@@ -542,10 +619,10 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
                           + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
                 display.render(status, chord_mode=False, notehead_style=notehead_style, legend_on=legend_on,
-                                frozen=frozen)
+                                frozen=frozen, help_legend=help_legend)
             time.sleep(dt)
     except KeyboardInterrupt:
-        pass
+        return "quit"
     finally:
         keys.restore()
         try:
@@ -563,6 +640,8 @@ def run_gui(result_queue, fullscreen, start_debug, sensitivity):
     font = pygame.font.SysFont("monospace", 18)
 
     show_debug = start_debug
+    help_legend_on = True
+    back_to_menu = False
     target_rgb, is_onset, label, freq, confidence, rms = config.IDLE_RGB, False, "-", 0.0, 0.0, 0.0
     dt = 1.0 / config.FPS
 
@@ -578,6 +657,19 @@ def run_gui(result_queue, fullscreen, start_debug, sensitivity):
                         display.toggle_fullscreen()
                     elif event.key == pygame.K_d:
                         show_debug = not show_debug
+                    elif event.key == pygame.K_h:
+                        help_legend_on = not help_legend_on
+                    elif event.key == pygame.K_BACKSLASH:
+                        # Unshifted key for '|' -- pygame reports the shifted
+                        # '|' character via this same physical keycode plus a
+                        # shift modifier, not a keycode of its own, so this is
+                        # the GUI's equivalent of the terminal views'
+                        # _handle_back_to_menu_key (issue #40). Same tier as
+                        # Esc: stop the event loop, but signal *why* via
+                        # back_to_menu so the caller (run_session/shell.py)
+                        # can return to the menu instead of tearing down.
+                        display.running = False
+                        back_to_menu = True
                     elif event.key == pygame.K_DOWN:
                         sensitivity.adjust(1.0 / SENSITIVITY_STEP)
                     elif event.key == pygame.K_UP:
@@ -594,12 +686,101 @@ def run_gui(result_queue, fullscreen, start_debug, sensitivity):
             rgb = animator.update(dt, target_rgb, is_onset)
             display.screen.fill(rgb)
             if show_debug:
-                text = font.render(_status_text(label, freq, confidence, rms, sensitivity), True, (255, 255, 255))
+                text = font.render(_status_text(label, freq, confidence, rms, sensitivity) + "  legend(h)",
+                                    True, (255, 255, 255))
                 display.screen.blit(text, (10, 10))
+                if help_legend_on:
+                    legend = font.render(
+                        _legend_line(["esc=quit", "f=fullscreen", "d=debug", "up/down=sensitivity"]),
+                        True, (255, 255, 255))
+                    display.screen.blit(legend, (10, 32))
             pygame.display.flip()
             dt = display.clock.tick(display.fps) / 1000.0
     finally:
         display.quit()
+    return "menu" if back_to_menu else "quit"
+
+
+class SessionState:
+    """Everything a run_* function needs, created lazily once per process
+    and reused for its entire life -- the mechanism behind `virtualnote`'s
+    instant "back to menu" transitions (issue #40). `AudioCapture`, the
+    analysis thread, `Sensitivity`, and `SourceState` all live here rather
+    than being recreated per tool switch: opening the mic and spinning up
+    the analysis thread has a real startup cost (and, for the mic itself,
+    a visible "listening" side effect), so `ensure_started()` defers both
+    until the first tool actually needs them -- sitting at `virtualnote`'s
+    bare menu never opens the mic. Once created they persist across
+    repeated menu round-trips (no `AudioCapture` teardown/rebuild, unlike
+    `M`'s deliberate `.restart()` for an actual source *change*), and so
+    do `sensitivity`/`source_state`'s current values -- better UX than
+    resetting to CLI defaults every time a user picks a different tool.
+    A single `color_scheme` is fixed for the session's whole life, same as
+    it always has been for one process -- there's no live toggle for it,
+    so there's nothing to persist differently per tool switch."""
+
+    def __init__(self, color_scheme, sensitivity_value, source_value):
+        self.color_scheme = color_scheme
+        self.sensitivity = Sensitivity(sensitivity_value)
+        self.source_state = SourceState(source_value)
+        self.capture = None
+        self.result_queue = None
+        self.stop_event = None
+        self.analysis_thread = None
+
+    def ensure_started(self):
+        """Idempotent: a no-op once the capture/analysis thread already
+        exist, so both main()'s standalone (eager, called once) and
+        shell.py's menu loop (lazy, called before every tool entry) can
+        call this unconditionally. May raise RuntimeError if the initial
+        source is 'loopback' and no loopback device can be resolved --
+        callers decide how to surface that (main() maps it to
+        parser.error(); shell.py reports it inline and stays at the menu)."""
+        if self.capture is not None:
+            return
+        device = None
+        if self.source_state.value == "loopback":
+            device = resolve_loopback_device()  # raises RuntimeError on failure
+        self.capture = AudioCapture(config.SAMPLE_RATE, config.BLOCK_SIZE, config.QUEUE_SIZE, device=device)
+        self.capture.start()
+        self.result_queue = queue.Queue(maxsize=1)
+        self.stop_event = threading.Event()
+        self.analysis_thread = threading.Thread(
+            target=analysis_loop,
+            args=(self.capture, self.result_queue, self.stop_event, self.color_scheme, self.sensitivity),
+            daemon=True,
+        )
+        self.analysis_thread.start()
+
+    def stop(self):
+        """Process-exit-only teardown -- never called between tool
+        switches, only once the whole session (menu included) is done."""
+        if self.capture is None:
+            return
+        self.stop_event.set()
+        self.capture.stop()
+
+
+def run_session(view, scroll_mode, dump_file, fullscreen, debug, session):
+    """Dispatches to the right run_* function for `view` ('fill', 'wheel',
+    'tab', or 'gui'), starting `session`'s capture/analysis thread first if
+    this is the first tool entered this process. Returns whatever the
+    run_* function returns: "quit" (Ctrl+C / window-close-or-Esc) or
+    "menu" (the '|' / backslash back-to-menu keybind) -- the caller (either
+    main(), which has no menu to return to, or shell.py's menu loop, which
+    does) decides what to do with that sentinel. This is the extracted
+    body of what used to be main()'s single-shot try/finally, made
+    reusable so shell.py's menu loop can call it repeatedly against the
+    same session (issue #40)."""
+    session.ensure_started()
+    if view == "gui":
+        return run_gui(session.result_queue, fullscreen, debug, session.sensitivity)
+    if view == "wheel":
+        return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state)
+    if view == "tab":
+        return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
+                                 session.capture, session.source_state)
+    return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state)
 
 
 def main():
@@ -628,38 +809,24 @@ def main():
                               "for testing without playing anything out loud")
     args = parser.parse_args()
 
-    device = None
-    if args.source == "loopback":
-        try:
-            device = resolve_loopback_device()
-        except RuntimeError as exc:
-            parser.error(str(exc))
-
-    capture = AudioCapture(config.SAMPLE_RATE, config.BLOCK_SIZE, config.QUEUE_SIZE, device=device)
-    capture.start()
-
-    result_queue = queue.Queue(maxsize=1)
-    stop_event = threading.Event()
-    sensitivity = Sensitivity(args.sensitivity)
-    source_state = SourceState(args.source)
-    analysis_thread = threading.Thread(
-        target=analysis_loop, args=(capture, result_queue, stop_event, args.color_scheme, sensitivity), daemon=True
-    )
-    analysis_thread.start()
-
+    session = SessionState(args.color_scheme, args.sensitivity, args.source)
     try:
-        if args.terminal:
-            if args.view == "wheel":
-                run_terminal_wheel(result_queue, sensitivity, capture, source_state)
-            elif args.view == "tab":
-                run_terminal_tab(result_queue, args.scroll, args.dump_file, sensitivity, capture, source_state)
-            else:
-                run_terminal_fill(result_queue, sensitivity, capture, source_state)
-        else:
-            run_gui(result_queue, args.fullscreen, args.debug, sensitivity)
+        session.ensure_started()
+    except RuntimeError as exc:
+        parser.error(str(exc))
+
+    view = args.view if args.terminal else "gui"
+    try:
+        # The return value ("quit" or "menu") is intentionally ignored:
+        # standalone `main.py` has no menu to fall back to, so a "menu"
+        # sentinel (the user pressed '|'/backslash) is treated the same as
+        # "quit" -- just exit cleanly either way. `virtualnote.py` is what
+        # actually gives '|' somewhere to return to (see shell.py); H still
+        # works here too, harmlessly, since it's pure render-thread-local
+        # state with nothing shell-specific about it.
+        run_session(view, args.scroll, args.dump_file, args.fullscreen, args.debug, session)
     finally:
-        stop_event.set()
-        capture.stop()
+        session.stop()
 
 
 if __name__ == "__main__":
