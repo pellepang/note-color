@@ -19,7 +19,10 @@ _Avoid_: Chord type — "quality" is the standard music-theory term and what the
 A chord quality rotated to a specific root — one of the ~360 entries (30 qualities × 12 roots) tested against the observed chroma vector during matching.
 
 **Chord mode**:
-The opt-in detection mode (toggled via `P` in terminal views) that runs chroma-vector chord recognition instead of monophonic YIN pitch detection. Coexists with the existing default mode; does not replace it.
+The detection mode (toggled via `P` in terminal views) that runs chroma-vector chord recognition instead of monophonic YIN pitch detection. `P`'s default state and direction are view-specific: opt-in (off by default, `P` switches up to chord mode) in `fill` and `wheel`; opt-out (on by default, `P` switches down to monophonic) in `tab`'s notation rendering — see wayfinder map [Sheet-music notation for the tab view](https://github.com/pellepang/note-color/issues/13).
+
+**Notehead**:
+The pitch-bearing glyph drawn at a note's staff position in the `tab` view's notation rendering — the sheet-music equivalent of the colored-letter-block cell it replaces. Has two interchangeable render styles, toggled live via `N`: *symbol* (a real notation notehead glyph) and *name* (a note-name letter character, closer to the previous cell text) — cosmetic only, staff placement is identical either way. Exact symbol glyph set still to be prototyped as of wayfinder map [Sheet-music notation for the tab view](https://github.com/pellepang/note-color/issues/13).
 
 **Bass chroma**:
 A second, separate 12-bin pitch-class estimate folded only from the low-frequency portion of the spectrum (below ~250Hz). Its strongest bin is the detected bass note, used to resolve inversions/slash chords and to break ties between rotationally-symmetric chord templates (dim7, aug) — the main chroma vector alone can't do either, since it discards octave.
