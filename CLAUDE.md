@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-93 tests), and detection has been confirmed with a real speaker→mic
+114 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -48,7 +48,7 @@ mic -> AudioCapture (PortAudio callback thread, never blocks)
                          -> chord_smoother.ChordSmoother           (stabilize chord+notes)
                          -> chord_templates.match()                (chord mode, chroma -> name)
     -> single-slot queue.Queue (always overwritten with latest RenderItem)
-    -> render loop (GUI window, or one of three terminal views)
+    -> render loop (GUI window, or one of three terminal views, or the menu)
 ```
 
 The chord-mode pipeline (chroma/multipitch/chord_smoother/chord_templates)
@@ -59,6 +59,24 @@ Key design decisions). `P` is a pure render-thread-local flag.
 Three threads, connected by non-blocking queues at every boundary, so no
 stage can ever stall another. Target end-to-end latency: comfortably under
 150ms.
+
+**Process/session lifecycle (issue #40).** `AudioCapture`, the analysis
+thread, `Sensitivity`, and `SourceState` are bundled in `main.SessionState`
+and created lazily — on first tool entry, not at process start — via
+`SessionState.ensure_started()`, an idempotent call both `main()` (eager,
+called once) and `virtualnote`'s menu shell (lazy, called before every tool
+entry) can make freely. Once created, a `SessionState` persists for the
+rest of the process's life: `virtualnote`'s menu loop (`shell.py`) reuses
+the same one across every "pick a tool -> run it -> `|` back to menu ->
+pick another tool" round-trip, so switching tools never tears down or
+reopens the mic (unlike `M`'s deliberate `AudioCapture.restart()`, a real
+source *change*, not a tool switch) — that persistence is what makes `|`
+an instant transition rather than a relaunch with startup latency.
+`main.run_session(view, ..., session)` is the shared dispatch point both
+`main()` (standalone, one-shot) and `shell.run_menu_loop()` (repeated)
+call into; each terminal run_* function and `run_gui()` return an explicit
+sentinel, `"quit"` or `"menu"`, instead of swallowing `KeyboardInterrupt`
+into an implicit `None` as before — see Key design decisions.
 
 ## Files
 
@@ -80,27 +98,38 @@ stage can ever stall another. Target end-to-end latency: comfortably under
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
 | `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
 | `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()` (persists, for #43's future settings screen). |
-| `main.py` | Wires threads together, dispatches GUI/terminal views by CLI flag; `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`. |
+| `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
+| `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); deliberately minimal, static ANSI list + highlight — issue #42 owns the real animated visual design and will replace `render()`'s internals, not the surrounding `move()`/`move_to()`/`current_view()` selection plumbing. |
+| `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. |
+| `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly. |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention). |
 
 ## Running it
 
 ```
 cd ~/note-color
-.venv/bin/python main.py                              # GUI window (chromatic scheme)
-.venv/bin/python main.py --terminal --view fill        # terminal fill
-.venv/bin/python main.py --terminal --view wheel        # terminal circle-of-fifths ring
-.venv/bin/python main.py --terminal --view tab --scroll onset   # scrolling staff, new column per note-attack
-.venv/bin/python main.py --terminal --view tab --scroll fix     # scrolling staff, new column every tick
-.venv/bin/python main.py --color-scheme fifths           # any mode, fifths hue mapping instead of chromatic
-.venv/bin/python main.py --terminal --view fill --source loopback  # listen to system audio output, not mic
-.venv/bin/python -m pytest tests/                          # run the test suite
+virtualnote                                            # menu -- pick a tool live
+virtualnote fill                                       # straight to terminal fill
+virtualnote wheel                                       # straight to terminal circle-of-fifths ring
+virtualnote tab onset                                    # straight to scrolling staff, new column per note-attack
+virtualnote tab fix                                       # straight to scrolling staff, new column every tick
+virtualnote gui                                            # straight to the GUI window
+virtualnote fill --color-scheme fifths                      # any tool, fifths hue mapping instead of chromatic
+virtualnote fill --source loopback                           # listen to system audio output, not mic
+.venv/bin/python -m pytest tests/                              # run the test suite
 ```
 
-Shorter launchers on PATH (`~/.local/bin/colorize`, added to `~/.zshrc`'s
-PATH): `colorize fill`, `colorize circle`, `colorize tab fix`, and
-`colorize tab onset` — thin wrappers forwarding extra flags (e.g.
-`colorize tab onset --color-scheme fifths`).
+`virtualnote` (on PATH via `~/.local/bin/virtualnote`, added to `~/.zshrc`'s
+PATH) is the one entry point for every tool this project offers (issue
+#40), retiring the old per-tool `colorize` bash dispatcher. Bare
+`virtualnote` opens an ANSI menu (`menu_display.py`) to pick a tool live;
+`virtualnote <view> [flags]` goes straight to that tool instead, replicating
+every flag `colorize` used to forward. Both paths run through the same
+long-lived process (`shell.py`), not a relaunch per tool — see Architecture.
+`main.py` itself is still directly runnable exactly as before
+(`.venv/bin/python main.py --terminal --view fill`, etc.) for anyone who
+wants the original single-tool-per-process entry point; it just has no menu
+to fall back to (see below).
 
 The `tab` view writes an ANSI-colored note-history dump to a timestamped
 file next to `main.py` on quit (override with `--dump-file PATH`).
@@ -117,6 +146,20 @@ clef+note-letter legend column live, `Space` freeze/un-freeze the view
 `--sensitivity FLOAT` sets the starting value (default 1.0); raises it to
 register quieter/softer playing more readily. Current value shown in the
 status line (`sens=`).
+
+**Global across every tool (issue #40), unaffected by `M`/`P`/`N`/`L`/
+`Space` above.** `|` is the always-live back-to-menu keybind — from inside
+any terminal view, or the GUI (bound to the unshifted backslash key there,
+since pygame reports `|` as backslash+shift rather than a keycode of its
+own) — instantly returns to `virtualnote`'s menu with the mic/analysis
+thread/sensitivity/source state all still running, no relaunch. Run via
+plain `main.py` instead of `virtualnote` (no menu exists there), `|` just
+quits cleanly, same as Ctrl+C. `H` toggles a context-sensitive keybind-
+legend line shown below the status line (on by default); off, a one-word
+`legend(h)`/`helplegend(h)` hint stays in the status line itself so the
+toggle stays discoverable either way. Both are session-local state, same
+as `P`/`N`/`L`/`Space` — no persistence across runs (that's issue #41's
+`[preferences]` table, not yet wired up for `H`).
 
 `P` toggles chord mode (chroma-vector chord recognition, up to 6
 simultaneous notes) in any terminal view — GUI-out-of-scope. `fill`/`wheel`
@@ -293,6 +336,22 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   lightness — read as "override this note's color identity," not "hand it
   an arbitrary RGB," so octave-driven lightness (fill/GUI) and tab's fixed
   `TAB_NOTE_LIGHTNESS` both keep working unmodified underneath an override.
+- `SessionState`'s capture/analysis thread are created lazily on first
+  tool entry, not at `virtualnote` process start — sitting at the bare
+  menu never opens the mic, a real, user-visible side effect (an OS-level
+  "listening" indicator, a mic-access permission prompt) that shouldn't
+  fire just from looking at a menu. `ensure_started()` is idempotent
+  specifically so both `main()`'s eager one-shot call and `shell.py`'s
+  repeated per-tool-entry call can use the exact same code path.
+- Terminal `run_*` functions return an explicit `"quit"`/`"menu"` sentinel
+  string instead of the previous implicit `None` (via a swallowed
+  `KeyboardInterrupt`) — a plain return value, not an exception or a piece
+  of shared mutable state, is the simplest way for `shell.py`'s menu loop
+  to tell "the user pressed `|`, go back to the menu" apart from "the user
+  quit for real," and it composes cleanly with the existing `finally`
+  blocks (`keys.restore()`/`display.quit()`/`dump_ansi()` all still run
+  before the sentinel is returned, same as they always ran before a plain
+  `return`/loop-exit).
 
 ## Known limitations / things learned
 
@@ -305,7 +364,7 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - Target 64-bit Raspberry Pi OS (Bookworm+) — 32-bit is a wheel risk.
 - macOS/Windows gate mic access per-app; a denied prompt gives silent zeros,
   not an error.
-- `~/.local/bin` is on PATH via `~/.zshrc`, for `colorize`.
+- `~/.local/bin` is on PATH via `~/.zshrc`, for `virtualnote` (formerly `colorize`, retired by issue #40).
 - `tab --scroll onset` freezes on sustained notes/silence, by design.
 - Terminals <~22 rows clip outermost `tab`-view ledger-line notes.
 - A minor-7th chord and its relative-major 6th chord share the exact same
