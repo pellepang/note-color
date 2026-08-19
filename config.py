@@ -59,6 +59,9 @@ WHEEL_FPS = 12
 
 # --- Tab / staff view ---
 DEFAULT_SCROLL_MODE = "onset"  # or "fix"
+TAB_DEFAULT_NOTEHEAD_STYLE = "symbol"  # or "name" -- live-togglable with N; symbol
+                                        # picked as more visually distinctive (issue #13/#21)
+TAB_DEFAULT_LEGEND_ON = True           # live-togglable with L
 TAB_NOTE_LIGHTNESS = 0.5        # fixed, octave-independent -- 0.5 is where a given
                                  # hue/saturation looks most vivid; BASE_LIGHTNESS_RANGE's
                                  # top end (used by fill/GUI) is much closer to white

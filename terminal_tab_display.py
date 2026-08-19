@@ -5,6 +5,20 @@ color scheme. Two callers decide *when* a new column is pushed (see
 main.py's run_terminal_tab: 'fix' on a timer, 'onset' on a new note-attack)
 -- this module only owns layout/rendering and the session history used for
 the on-quit ANSI dump.
+
+Two live-togglable notehead render styles (issue #21's finalized decision,
+`N` keybind in main.py): *symbol* (an open notehead glyph, U+1D157, plus a
+real Unicode flat/sharp marker if needed -- no letter or octave text at
+all) and *name* (bare letter + ASCII accidental, e.g. "A", "Bb", "F#" --
+no octave digit, since the staff row already conveys octave). Both use
+`color_map.NOTE_NAMES_FIFTHS` for spelling, matching every other flat-
+biased label in this app. `TabEntry.notes` still stores each note's
+pitch_class/octave (for `_cell_text()` to render fresh against whichever
+style is currently selected -- so toggling `N` live restyles history
+that's still on screen, not just future pushes) alongside its precomputed
+letter+octave `label`, which exists purely for `dump_ansi()`'s on-quit
+text dump (unaffected by the `N`/`L` toggles, per the map's standing
+decision) and is never used by `render()`.
 """
 
 import shutil
@@ -13,6 +27,7 @@ import time
 from collections import deque, namedtuple
 
 import config
+from color_map import NOTE_NAMES_FIFTHS
 from staff_map import (
     staff_row, ledger_rows, line_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
     BASS_CLEF_ROW, TREBLE_CLEF_ROW,
@@ -25,6 +40,14 @@ TabEntry = namedtuple("TabEntry", "notes chord_name t")
 LEDGER_CHAR = "─"
 BASS_CLEF_GLYPH = "𝄢"
 TREBLE_CLEF_GLYPH = "𝄞"
+
+NOTEHEAD_GLYPH = "\U0001D157"  # MUSICAL SYMBOL VOID NOTEHEAD -- #15's winner
+# Real Unicode accidental signs for *symbol* style, keyed by the ASCII
+# suffix NOTE_NAMES_FIFTHS already uses -- #21's finalized decision (an
+# earlier ASCII "b"/"#" stand-in was replaced with these after live
+# reaction; the East_Asian_Width=Ambiguous risk #14 flagged for both is
+# expected/accepted, not a reason to avoid them).
+SYMBOL_ACCIDENTALS = {"b": "♭", "#": "♯"}
 
 
 class TabDisplay:
@@ -53,7 +76,7 @@ class TabDisplay:
         if len(self.session_history) < config.TAB_SESSION_HISTORY_MAX:
             self.session_history.append(entry)
 
-    def render(self, status, chord_mode=False):
+    def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True):
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
 
@@ -78,7 +101,10 @@ class TabDisplay:
                 shrink -= 1
 
         width = config.TAB_COLUMN_WIDTH_CHORD if chord_mode else config.TAB_COLUMN_WIDTH
-        legend_width = config.TAB_LEGEND_WIDTH
+        # `L` (legend_on) reclaims the legend column's width for note
+        # columns entirely when off, rather than just blanking its
+        # content -- issue #19's stated intent for the toggle.
+        legend_width = config.TAB_LEGEND_WIDTH if legend_on else 0
         visible_cols = max((cols - legend_width) // width, 1)
         visible_entries = list(self.entries)[-visible_cols:]
         pad = visible_cols - len(visible_entries)
@@ -87,7 +113,7 @@ class TabDisplay:
         for e in visible_entries:
             row_map = {}
             ledgers = set()
-            for pitch_class, octave, rgb, label in e.notes:
+            for pitch_class, octave, rgb, _label in e.notes:
                 # Notes still outside [bottom, top] after the shrink above
                 # (only possible once the staff has hit its 21-row floor,
                 # on a terminal too short even for that) are dropped rather
@@ -99,7 +125,12 @@ class TabDisplay:
                 row = staff_row(pitch_class, octave)
                 if not (bottom <= row <= top):
                     continue
-                row_map[row] = (rgb, label)
+                # Store the raw pitch_class, not the precomputed `label`
+                # (that's dump_ansi()'s letter+octave text, untouched by
+                # notehead_style) -- _cell_text() below renders fresh
+                # against whichever style is current, so a live `N` toggle
+                # restyles already-on-screen columns too.
+                row_map[row] = (rgb, pitch_class)
                 ledgers.update(r for r in ledger_rows(row) if bottom <= r <= top)
             columns.append((row_map, frozenset(ledgers), e.chord_name))
 
@@ -118,7 +149,9 @@ class TabDisplay:
         for screen_row in range(top, bottom - 1, -1):
             if len(lines) >= usable_rows + header_rows:
                 break
-            if screen_row == BASS_CLEF_ROW:
+            if not legend_on:
+                legend = ""
+            elif screen_row == BASS_CLEF_ROW:
                 legend = BASS_CLEF_GLYPH.center(legend_width)
             elif screen_row == TREBLE_CLEF_ROW:
                 legend = TREBLE_CLEF_GLYPH.center(legend_width)
@@ -129,8 +162,8 @@ class TabDisplay:
             cells = [legend]
             for row_map, ledgers, _chord_name in columns:
                 if screen_row in row_map:
-                    rgb, label = row_map[screen_row]
-                    cells.append(_note_cell(rgb, label, width))
+                    rgb, pitch_class = row_map[screen_row]
+                    cells.append(_note_cell(rgb, _cell_text(pitch_class, notehead_style), width))
                 elif screen_row in ledgers or screen_row in STAFF_LINE_ROWS:
                     cells.append(LEDGER_CHAR * width)
                 else:
@@ -172,3 +205,21 @@ def _note_cell(rgb, label, width):
     fg = (20, 20, 20) if lum > 140 else (230, 230, 230)
     text = (label or "")[:width].center(width)
     return f"\033[48;2;{r};{g};{b}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m{text}\033[0m"
+
+
+def _accidental_suffix(pitch_class):
+    """'b'/'#' suffix from NOTE_NAMES_FIFTHS, or '' for a natural note."""
+    name = NOTE_NAMES_FIFTHS[pitch_class]
+    return name[1:] if len(name) > 1 else ""
+
+
+def _cell_text(pitch_class, style):
+    """The notehead's on-screen text for the given render style -- see the
+    module docstring for what each style shows. `style` is whatever the
+    caller's live `N` toggle currently selects; unrecognized values fall
+    back to *name* rather than raising, so a stale/typo'd style string
+    degrades gracefully instead of crashing the render loop."""
+    if style == "symbol":
+        marker = SYMBOL_ACCIDENTALS.get(_accidental_suffix(pitch_class), "")
+        return NOTEHEAD_GLYPH + marker
+    return NOTE_NAMES_FIFTHS[pitch_class]
