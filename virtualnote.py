@@ -26,7 +26,7 @@ have a consistent way back to the menu without restarting the process."
 import argparse
 
 import config
-from main import SessionState, _positive_float, run_session
+from main import SessionState, _positive_float, _parse_time_signature, run_batch_transcribe, run_session
 from shell import run_menu_loop
 
 
@@ -83,6 +83,8 @@ def build_parser():
     tab_p.add_argument("--dump-file", default=None,
                         help="path for the ANSI session note-history dump written on quit "
                              "(default: note_history_<timestamp>.txt next to main.py)")
+    tab_p.add_argument("--time-signature", type=_parse_time_signature, default=config.DEFAULT_TIME_SIGNATURE,
+                        help="N/D time signature for barline placement (default 4/4)")
     _add_common_flags(tab_p)
 
     gui_p = sub.add_parser("gui", help="native pygame color window")
@@ -90,12 +92,30 @@ def build_parser():
     gui_p.add_argument("--debug", action="store_true", help="show the debug overlay on start")
     _add_common_flags(gui_p)
 
+    transcribe_p = sub.add_parser("transcribe", help="offline rhythm/tempo transcription of an audio file")
+    transcribe_p.add_argument("file", help="path to the audio file to transcribe")
+    transcribe_p.add_argument("--dump-file", default=None,
+                               help="path for the ANSI transcription dump (default: note_history_<timestamp>.txt "
+                                    "next to main.py)")
+    transcribe_p.add_argument("--time-signature", type=_parse_time_signature, default=config.DEFAULT_TIME_SIGNATURE,
+                               help="N/D time signature for barline placement (default 4/4)")
+    # No _add_common_flags(transcribe_p) -- batch has no live audio, so
+    # --color-scheme/--sensitivity/--source don't apply.
+
     return parser
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # 'transcribe' never touches SessionState/audio at all (batch, offline,
+    # no live capture) -- handled and returned before SessionState is even
+    # constructed, mirroring how shell.py's "settings"/"credits" screens
+    # bypass it entirely (see main.py's Key design decisions).
+    if args.view == "transcribe":
+        run_batch_transcribe(args.file, args.time_signature, args.dump_file)
+        return
 
     # 'circle' is colorize's old name for the wheel view -- kept as a
     # subparser alias for zero-cost backward compatibility, normalized to
@@ -119,6 +139,7 @@ def main(argv=None):
                 getattr(args, "fullscreen", False),
                 getattr(args, "debug", False),
                 session,
+                time_signature=getattr(args, "time_signature", config.DEFAULT_TIME_SIGNATURE),
             )
             if result == "menu":
                 # A direct-to-tool launch still has the real menu behind

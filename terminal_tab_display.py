@@ -39,6 +39,33 @@ only ever read by `dump_ansi()` now, same as `label`. Freeze-frame (#23,
 overriding the fade entirely, while `main.py` stops pushing new columns --
 `render()` itself doesn't know or care that no new columns are arriving,
 it just keeps redrawing the same history with age pinned at 0.
+
+Rhythm/onset/duration/tempo (issue #55) added two things to this module:
+
+- Each note in `TabEntry.notes` is now a mutable dict (not a 4-tuple) with
+  a `duration_class` field that starts `None` and is filled in later, once
+  `DurationTracker` (elsewhere) measures how long the note actually
+  sounded -- which is necessarily *after* the column carrying it was
+  already pushed (and quite possibly already on screen). `TabDisplay.
+  finalize_duration()` mutates that dict in place via a side index,
+  `self._open_notes`, so both `self.entries` and `self.session_history`
+  (which hold the very same dict objects, not copies) see the update with
+  no need to touch each container separately. A note whose duration never
+  finalizes (still sounding at quit, or superseded by a same-key
+  re-attack before it finalized) simply keeps `duration_class=None`
+  forever; rendering treats that the same as `duration_tracker.
+  DEFAULT_DURATION_CLASS` ("quarter") -- resolved at render time, not by
+  ever writing that fallback into the dict, so the distinction between
+  "genuinely still open" and "measured as a quarter note" survives for
+  any future consumer that cares (e.g. `dump_ansi()`).
+- Barlines are a second, distinct column type (`BarlineEntry`, pushed via
+  `push_barline()`) mixed into the same `entries`/`session_history`
+  history as `TabEntry` columns -- not a variant of `TabEntry`, since a
+  barline has no notes and no staff-row placement, just a glyph spanning
+  the full staff height at a narrower fixed column width
+  (`config.TAB_BARLINE_WIDTH`). Barline columns age/dim exactly like note
+  columns (same age computation, same `_aged_lightness()` curve) but with
+  no hue, via `_barline_rgb()`.
 """
 
 import shutil
@@ -48,14 +75,23 @@ from collections import deque, namedtuple
 
 import config
 from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
+from duration_tracker import DEFAULT_DURATION_CLASS
 from staff_map import (
     staff_row, ledger_rows, row_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
     BASS_CLEF_ROW, TREBLE_CLEF_ROW,
 )
 
 TabEntry = namedtuple("TabEntry", "notes chord_name t")
-# `notes` is a list of (pitch_class, octave, rgb, label) tuples -- one
-# entry in monophonic mode, up to CHORD_MAX_NOTES in chord mode.
+# `notes` is a list of mutable per-note dicts -- one entry in monophonic
+# mode, up to CHORD_MAX_NOTES in chord mode -- each shaped:
+#   {"pitch_class":, "octave":, "rgb":, "label":, "duration_class": None}
+# `duration_class` starts None and is filled in later by
+# `TabDisplay.finalize_duration()`, once the note's actual sounding
+# duration has been measured (see the module docstring).
+
+BarlineEntry = namedtuple("BarlineEntry", "t")
+# A barline column: no notes, no staff-row placement, just the barline
+# glyph spanning the visible staff height at a fixed, narrow column width.
 
 LEDGER_CHAR = "─"
 BASS_CLEF_GLYPH = "𝄢"
@@ -69,32 +105,125 @@ NOTEHEAD_GLYPH = "\U0001D157"  # MUSICAL SYMBOL VOID NOTEHEAD -- #15's winner
 # expected/accepted, not a reason to avoid them).
 SYMBOL_ACCIDENTALS = {"b": "♭", "#": "♯"}
 
+BARLINE_GLYPH = "\U0001D100"       # MUSICAL SYMBOL SINGLE BARLINE
+
+# Duration glyphs for *symbol* style (issue #55/#49's surveyed codepoints,
+# standard Western-notation "N flags = 2^-(N+2) of a whole note"
+# convention). Composed onto the notehead+accidental text in `_cell_text()`
+# as: notehead+accidental, then a stem (every duration except "whole"),
+# then a flag glyph if the duration has one, then a dot if dotted.
+STEM_GLYPH = "\U0001D165"          # MUSICAL SYMBOL COMBINING STEM
+# One codepoint per flag *count* (not one codepoint concatenated per flag) --
+# U+1D16E is "combining flag-1" (one flag, i.e. an eighth note's single
+# flag), U+1D16F is "combining flag-2" (two flags, sixteenth), U+1D170 is
+# "combining flag-3" (three flags, thirtysecond-note) -- issue #49's
+# surveyed codepoints, standard Western-notation "N flags = 2^-(N+2) of a
+# whole note" convention.
+FLAG_GLYPHS = {
+    "eighth": "\U0001D16E",
+    "dotted-eighth": "\U0001D16E",
+    "sixteenth": "\U0001D16F",
+    "dotted-sixteenth": "\U0001D16F",
+    "thirtysecond": "\U0001D170",
+}
+DOT_GLYPH = "\U0001D16D"           # MUSICAL SYMBOL COMBINING AUGMENTATION DOT
+
+# Duration suffix for *name* style -- composed as f"{letter}·{suffix}"
+# (middle dot, U+00B7), e.g. "Bb·8th". Kept as short text rather than a
+# notation glyph so the *name* style stays internally consistent (text
+# throughout, never a symbol).
+_NAME_STYLE_DURATION_SUFFIXES = {
+    "whole": "whole",
+    "dotted-half": "half.",
+    "half": "half",
+    "dotted-quarter": "4th.",
+    "quarter": "4th",
+    "dotted-eighth": "8th.",
+    "eighth": "8th",
+    "dotted-sixteenth": "16th.",
+    "sixteenth": "16th",
+    "thirtysecond": "32nd",
+}
+
+# One rendered column's shape, whichever kind it is. `row_map`/`ledgers`/
+# `chord_name` are only meaningful for kind == "note"; `rgb` is only
+# meaningful for kind == "barline" (a barline has one flat color across
+# its whole height, not a per-row map).
+Column = namedtuple("Column", "kind width row_map ledgers chord_name rgb")
+
 
 class TabDisplay:
     def __init__(self, fps=20):
         self.fps = fps
         self.entries = deque(maxlen=config.TAB_VISIBLE_MAXLEN)
         self.session_history = []
+        # (pitch_class, octave) -> the most recently pushed, not-yet-
+        # finalized note dict at that key -- see finalize_duration().
+        self._open_notes = {}
         self._t0 = time.monotonic()
         self._last_size = None
         sys.stdout.write("\033[?25l\033[2J")
         sys.stdout.flush()
 
-    def push(self, pitch_class, octave, rgb, label):
-        """Monophonic mode: push one note as a new scrolling column."""
-        self._push_entry([(pitch_class, octave, rgb, label)], chord_name=None)
+    def push(self, pitch_class, octave, rgb, label, t=None):
+        """Monophonic mode: push one note as a new scrolling column. `t`
+        overrides the column's recorded timestamp (seconds) -- live
+        callers omit it and get wall-clock time-since-construction, same
+        as always; batch transcription (main.run_batch_transcribe(), issue
+        #55) passes the note's real onset_time from the recording, since
+        wall-clock time during a fast offline sweep is meaningless (every
+        column would otherwise land at ~0.00s)."""
+        self._push_entry([(pitch_class, octave, rgb, label)], chord_name=None, t=t)
 
-    def push_notes(self, notes, chord_name):
+    def push_notes(self, notes, chord_name, t=None):
         """Chord mode: push up to CHORD_MAX_NOTES (pitch_class, octave,
         rgb, label) tuples as one stacked scrolling column, plus the
-        recognized chord name shown in the header row above it."""
-        self._push_entry(list(notes), chord_name)
+        recognized chord name shown in the header row above it. `t`: see
+        push()."""
+        self._push_entry(list(notes), chord_name, t=t)
 
-    def _push_entry(self, notes, chord_name):
-        entry = TabEntry(notes, chord_name, time.monotonic() - self._t0)
+    def push_barline(self, t=None):
+        """Push a barline column -- no notes, just a divider glyph spanning
+        the staff height, mixed into the same scrolling history as note
+        columns. `t`: see push()."""
+        self._append_history(BarlineEntry(self._resolve_t(t)))
+
+    def _resolve_t(self, t):
+        return t if t is not None else time.monotonic() - self._t0
+
+    def _push_entry(self, notes, chord_name, t=None):
+        note_dicts = []
+        for pitch_class, octave, rgb, label in notes:
+            note = {
+                "pitch_class": pitch_class,
+                "octave": octave,
+                "rgb": rgb,
+                "label": label,
+                "duration_class": None,
+            }
+            note_dicts.append(note)
+            if pitch_class is not None:
+                # Overwrites any previous still-open note at this key --
+                # a rapid re-attack simply abandons the older one (it never
+                # gets a duration_class, which is fine; see the module
+                # docstring).
+                self._open_notes[(pitch_class, octave)] = note
+        self._append_history(TabEntry(note_dicts, chord_name, self._resolve_t(t)))
+
+    def _append_history(self, entry):
         self.entries.append(entry)
         if len(self.session_history) < config.TAB_SESSION_HISTORY_MAX:
             self.session_history.append(entry)
+
+    def finalize_duration(self, pitch_class, octave, duration_class):
+        """Set `duration_class` on the most recent still-open note at
+        (pitch_class, octave), mutating the dict already sitting in both
+        `self.entries` and `self.session_history` in place. A silent
+        no-op if there's no open entry at that key (nothing to finalize,
+        e.g. a stale/duplicate call)."""
+        note = self._open_notes.pop((pitch_class, octave), None)
+        if note is not None:
+            note["duration_class"] = duration_class
 
     def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False,
                help_legend=""):
@@ -132,20 +261,48 @@ class TabDisplay:
         # columns entirely when off, rather than just blanking its
         # content -- issue #19's stated intent for the toggle.
         legend_width = config.TAB_LEGEND_WIDTH if legend_on else 0
-        visible_cols = max((cols - legend_width) // width, 1)
-        visible_entries = list(self.entries)[-visible_cols:]
-        pad = visible_cols - len(visible_entries)
+        available_width = max(cols - legend_width, 0)
 
-        columns = [({}, frozenset(), None)] * pad
+        # Walk the history from newest to oldest, accumulating each
+        # column's *actual* width (barline columns are narrower than note
+        # columns -- config.TAB_BARLINE_WIDTH vs. `width`) until the
+        # available screen width is used up. The newest column is always
+        # included even if it alone doesn't fit, same guarantee the old
+        # fixed-width `max(..., 1)` gave.
+        all_entries = list(self.entries)
+        visible_entries = []
+        used_width = 0
+        for e in reversed(all_entries):
+            e_width = config.TAB_BARLINE_WIDTH if isinstance(e, BarlineEntry) else width
+            if visible_entries and used_width + e_width > available_width:
+                break
+            used_width += e_width
+            visible_entries.append(e)
+        visible_entries.reverse()
+        if visible_entries:
+            pad = max((available_width - used_width) // width, 0)
+        else:
+            pad = max(available_width // width, 1)
+
+        columns = [Column("note", width, {}, frozenset(), None, None)] * pad
         last_index = len(visible_entries) - 1
         for index, e in enumerate(visible_entries):
             # Age is distance from the newest *visible* column (0 = newest);
             # #23's freeze-frame pins every column's age to 0, overriding
             # #22's fade entirely, without this loop needing to know why.
             age = 0 if frozen else last_index - index
+
+            if isinstance(e, BarlineEntry):
+                columns.append(
+                    Column("barline", config.TAB_BARLINE_WIDTH, {}, frozenset(), None, _barline_rgb(age))
+                )
+                continue
+
             row_map = {}
             ledgers = set()
-            for pitch_class, octave, _rgb, _label in e.notes:
+            for note in e.notes:
+                pitch_class = note["pitch_class"]
+                octave = note["octave"]
                 # Notes still outside [bottom, top] after the shrink above
                 # (only possible once the staff has hit its 21-row floor,
                 # on a terminal too short even for that) are dropped rather
@@ -163,14 +320,20 @@ class TabDisplay:
                 # against whichever style is current, so a live `N` toggle
                 # restyles already-on-screen columns too. Color is also
                 # recomputed fresh here (_column_note_rgb), not the
-                # precomputed `_rgb` this note tuple carries -- that
+                # precomputed `rgb` this note dict carries -- that
                 # precomputed value is always TAB_NOTE_LIGHTNESS and is
                 # only ever read by dump_ansi(); a column's age (and thus
                 # its dimming) changes every render as newer columns scroll
-                # in, so it can't be baked in at push time.
-                row_map[row] = (_column_note_rgb(pitch_class, age), pitch_class)
+                # in, so it can't be baked in at push time. duration_class
+                # is resolved to the DEFAULT_DURATION_CLASS fallback here,
+                # at render time -- the dict itself keeps None so the
+                # "genuinely still open" / "measured as a quarter note"
+                # distinction survives for dump_ansi() and any future
+                # consumer.
+                duration_class = note["duration_class"] or DEFAULT_DURATION_CLASS
+                row_map[row] = (_column_note_rgb(pitch_class, age), pitch_class, duration_class)
                 ledgers.update(r for r in ledger_rows(row) if bottom <= r <= top)
-            columns.append((row_map, frozenset(ledgers), e.chord_name))
+            columns.append(Column("note", width, row_map, frozenset(ledgers), e.chord_name, None))
 
         # The staff itself is never shrunk below 21 rows (top=20..bottom=0),
         # even on a terminal shorter than that -- cap what we actually emit
@@ -180,8 +343,11 @@ class TabDisplay:
         lines = []
         if chord_mode:
             header_cells = [" " * legend_width]
-            for _row_map, _ledgers, chord_name in columns:
-                header_cells.append((chord_name or "")[:width].ljust(width))
+            for col in columns:
+                # A barline column has no chord name -- it contributes an
+                # empty cell to the header row, same width as its own
+                # column, rather than skipping the header entirely.
+                header_cells.append((col.chord_name or "")[:col.width].ljust(col.width))
             lines.append("".join(header_cells))
 
         for screen_row in range(top, bottom - 1, -1):
@@ -207,14 +373,20 @@ class TabDisplay:
                 letter_cell = row_note_name(screen_row).center(config.TAB_LETTER_WIDTH)
                 legend = clef_cell + letter_cell
             cells = [legend]
-            for row_map, ledgers, _chord_name in columns:
-                if screen_row in row_map:
-                    rgb, pitch_class = row_map[screen_row]
-                    cells.append(_note_cell(rgb, _cell_text(pitch_class, notehead_style), width))
-                elif screen_row in ledgers or screen_row in STAFF_LINE_ROWS:
-                    cells.append(LEDGER_CHAR * width)
+            for col in columns:
+                if col.kind == "barline":
+                    # Every visible staff row gets the barline glyph --
+                    # not just staff-line/ledger rows -- so it reads as one
+                    # continuous vertical divider across the whole height,
+                    # independent of legend/chord-mode bookkeeping.
+                    cells.append(_barline_cell(col.rgb, col.width))
+                elif screen_row in col.row_map:
+                    rgb, pitch_class, duration_class = col.row_map[screen_row]
+                    cells.append(_note_cell(rgb, _cell_text(pitch_class, notehead_style, duration_class), col.width))
+                elif screen_row in col.ledgers or screen_row in STAFF_LINE_ROWS:
+                    cells.append(LEDGER_CHAR * col.width)
                 else:
-                    cells.append(" " * width)
+                    cells.append(" " * col.width)
             lines.append("".join(cells))
 
         out = []
@@ -229,15 +401,18 @@ class TabDisplay:
     def dump_ansi(self, path):
         lines = []
         for i, e in enumerate(self.session_history):
-            sounding = [n for n in e.notes if n[0] is not None]
+            if isinstance(e, BarlineEntry):
+                lines.append(f"{e.t:8.2f}s  {i:5d}  |")
+                continue
+            sounding = [n for n in e.notes if n["pitch_class"] is not None]
             if not sounding:
                 lines.append(f"{e.t:8.2f}s  {i:5d}  --")
                 continue
             note_strs = []
-            for _pitch_class, _octave, rgb, label in sounding:
-                r, g, b = rgb
+            for n in sounding:
+                r, g, b = n["rgb"]
                 swatch = f"\033[48;2;{r};{g};{b}m  \033[0m"
-                note_strs.append(f"{swatch}  {label}")
+                note_strs.append(f"{swatch}  {n['label']}")
             chord_part = f"  [{e.chord_name}]" if e.chord_name else ""
             lines.append(f"{e.t:8.2f}s  {i:5d}  " + "  ".join(note_strs) + chord_part)
         with open(path, "w") as f:
@@ -254,6 +429,15 @@ def _note_cell(rgb, label, width):
     fg = (20, 20, 20) if lum > 140 else (230, 230, 230)
     text = (label or "")[:width].center(width)
     return f"\033[48;2;{r};{g};{b}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m{text}\033[0m"
+
+
+def _barline_cell(rgb, width):
+    """A barline column's cell: the glyph in foreground color only (no
+    background swatch, unlike a note cell) -- a barline is a divider line,
+    not a data block."""
+    r, g, b = rgb
+    text = BARLINE_GLYPH.center(width)
+    return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
 
 
 def _aged_lightness(age):
@@ -282,19 +466,44 @@ def _column_note_rgb(pitch_class, age):
     return hsl_to_rgb255(hue, sat, _aged_lightness(age))
 
 
+def _barline_rgb(age):
+    """A barline column's on-screen color: the same age-based fade curve
+    every note column uses (_aged_lightness()) but with zero saturation --
+    a barline has no pitch-class identity, so no hue applies, just a
+    neutral/grayscale fade."""
+    return hsl_to_rgb255(0, 0.0, _aged_lightness(age))
+
+
 def _accidental_suffix(pitch_class):
     """'b'/'#' suffix from NOTE_NAMES_FIFTHS, or '' for a natural note."""
     name = NOTE_NAMES_FIFTHS[pitch_class]
     return name[1:] if len(name) > 1 else ""
 
 
-def _cell_text(pitch_class, style):
+def _cell_text(pitch_class, style, duration_class):
     """The notehead's on-screen text for the given render style -- see the
     module docstring for what each style shows. `style` is whatever the
     caller's live `N` toggle currently selects; unrecognized values fall
     back to *name* rather than raising, so a stale/typo'd style string
-    degrades gracefully instead of crashing the render loop."""
+    degrades gracefully instead of crashing the render loop.
+
+    `duration_class` should already be resolved (None -> `duration_tracker.
+    DEFAULT_DURATION_CLASS`) by the caller; resolved again here as a
+    defensive fallback so a direct call with duration_class=None still
+    degrades gracefully instead of raising.
+    """
+    duration_class = duration_class or DEFAULT_DURATION_CLASS
     if style == "symbol":
         marker = SYMBOL_ACCIDENTALS.get(_accidental_suffix(pitch_class), "")
-        return NOTEHEAD_GLYPH + marker
-    return NOTE_NAMES_FIFTHS[pitch_class]
+        text = NOTEHEAD_GLYPH + marker
+        if duration_class != "whole":
+            text += STEM_GLYPH
+            flag = FLAG_GLYPHS.get(duration_class)
+            if flag:
+                text += flag
+        if duration_class.startswith("dotted-"):
+            text += DOT_GLYPH
+        return text
+    letter = NOTE_NAMES_FIFTHS[pitch_class]
+    suffix = _NAME_STYLE_DURATION_SUFFIXES.get(duration_class)
+    return f"{letter}·{suffix}" if suffix else letter

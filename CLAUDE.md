@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-173 tests), and detection has been confirmed with a real speaker→mic
+236 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -29,6 +29,17 @@ synthesized from wayfinder map
 [#1](https://github.com/pellepang/note-color/issues/1) and its ten
 resolved child tickets (#2–#11).
 
+Rhythm/onset/duration/tempo detection (live + batch), and `tab`-view
+rhythm notation (duration glyphs, barlines, `tempo=`/`time=` status
+fields), is implemented per the spec at
+[issue #55](https://github.com/pellepang/note-color/issues/55), itself
+synthesized from wayfinder map
+[#47](https://github.com/pellepang/note-color/issues/47) and its seven
+resolved child tickets (#48–#54). Verified against synthesized
+sine-wave test signals (single sustained tone, multi-note melody) through
+both the live pipeline's unit tests and an actual `virtualnote transcribe`
+run; not yet verified against real (non-synthetic) playing beyond that.
+
 ## Backlog (open problems, not yet fixed)
 
 None currently open.
@@ -41,20 +52,32 @@ mic -> AudioCapture (PortAudio callback thread, never blocks)
     -> analysis thread: rolling 2048-sample ring buffer
                          -> pitch_detect.compute_spectrum()      (shared FFT)
                          -> pitch_detect.detect_pitch()          (YIN, monophonic)
-                         -> note_smoother.NoteSmoother            (stabilize)
+                         -> note_smoother.NoteSmoother            (stabilize, onset-gated)
                          -> color_map.note_to_hsl()               (note -> color)
                          -> chroma.fold() / fold_bass()           (chord mode)
                          -> multipitch.detect()                   (chord mode, up to 6 notes)
                          -> chord_smoother.ChordSmoother           (stabilize chord+notes)
                          -> chord_templates.match()                (chord mode, chroma -> name)
+                         -> onset_detect.chroma_flux()              (rhythm mode, novelty signal)
+                         -> tempo_tracker.TempoTracker               (rhythm mode, live bpm estimate)
+                         -> duration_tracker.DurationTracker          (rhythm mode, mono + chord, per-hop)
     -> single-slot queue.Queue (always overwritten with latest RenderItem)
     -> render loop (GUI window, or one of three terminal views, or the menu)
+
+batch_transcribe.transcribe() (issue #55, offline, `virtualnote transcribe`)
+    -> the same per-hop pipeline above, driven by array slicing instead of
+       AudioCapture, no live queues/threads involved
+    -> duration_tracker.DurationTracker.finalize_noncausal() (per note-slot,
+       non-causal refinement) + librosa.beat.beat_track() (tempo)
+    -> TabDisplay.dump_ansi() (same on-quit dump format the live `tab` view uses)
 ```
 
 The chord-mode pipeline (chroma/multipitch/chord_smoother/chord_templates)
-always runs every hop regardless of whether any view has `P` toggled on —
-cheap enough that gating it wasn't worth the extra shared state (see
-Key design decisions). `P` is a pure render-thread-local flag.
+and the rhythm pipeline (onset_detect/tempo_tracker/duration_tracker) both
+always run every hop regardless of whether any view has `P` toggled on or
+is even `tab` — cheap enough that gating either wasn't worth the extra
+shared state (see Key design decisions). `P` is a pure render-thread-local
+flag; rhythm detection has no toggle at all, live or in `tab`'s render.
 
 Three threads, connected by non-blocking queues at every boundary, so no
 stage can ever stall another. Target end-to-end latency: comfortably under
@@ -85,27 +108,31 @@ into an implicit `None` as before — see Key design decisions.
 | `config.py` | All tunable constants (sample rate, buffer sizes, thresholds, color/animation/chord-mode params). Check here first. |
 | `audio_capture.py` | `AudioCapture` — `sounddevice.InputStream` callback → bounded drop-oldest queue. `resolve_loopback_device()` finds the system-output monitor for `--source loopback`. |
 | `pitch_detect.py` | `compute_spectrum()` — shared FFT reused by YIN, chroma, and (via its own Hann-windowed variant) multipitch. `detect_pitch()` — hand-rolled YIN (pure NumPy, FFT autocorrelation + parabolic interpolation) over a precomputed spectrum. |
-| `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection (monophonic path). |
+| `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection (monophonic path): note-change, an RMS jump, or (issue #55) `onset_detect.spectral_flux()` clearing `ONSET_FLUX_THRESHOLD` against the hop-over-hop spectrum. |
 | `chroma.py` | `fold()`/`fold_bass()` — 12-bin chroma vector via a precomputed Gaussian log-frequency weighting matrix summing 1st–4th harmonics per pitch class; `fold_bass()` restricts to <~250Hz for bass/inversion detection. |
 | `chord_templates.py` | ~360-template dictionary (30 qualities × 12 roots) + `match()` — cosine-similarity chord recognition, bass-chroma-gated slash/inversion naming and rotational-tie-breaking. |
 | `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence. |
 | `chord_smoother.py` | `ChordSmoother` — mirrors `NoteSmoother`'s shape for chord mode: chroma rolling-average + chord-name debounce, plus asymmetric attack/release hysteresis per note-stack slot. |
+| `onset_detect.py` | (issue #55) `spectral_flux()`/`chroma_flux()` — pure, `None`-safe half-wave-rectified positive-magnitude-difference novelty measures between two consecutive `pitch_detect.compute_spectrum()`/`chroma.fold()` frames. `spectral_flux()` feeds `note_smoother.py`'s onset gate; `chroma_flux()` feeds `tempo_tracker.py`. |
+| `duration_tracker.py` | (issue #55) `DurationTracker` — mirrors `ChordSmoother.note_states`' dict-of-state shape, but for *measuring* how long a note sounded rather than debouncing its display. `.update()` (live, causal, keyed by `(pitch_class, octave)`, `is_onset`-aware re-attack preemption) and `.finalize_noncausal()` (batch, centered-smoothed envelope, static method) share one off-threshold definition (`DURATION_DECAY_RATIO`). `duration_class_for_beats()`/`DEFAULT_DURATION_CLASS` — nearest-standard-note-value snapping (incl. dotted), used by both live and batch. |
+| `tempo_tracker.py` | (issue #55) `TempoTracker` — live-only causal BPM estimation via FFT autocorrelation over a rolling `chroma_flux()` novelty-history window (same autocorrelation approach `pitch_detect.py`'s YIN already uses, applied to novelty instead of raw audio); re-estimates every `TEMPO_UPDATE_INTERVAL_HOPS` hops, not every hop. Batch tempo uses `librosa.beat.beat_track()` directly instead (`batch_transcribe.py`) — this module is never imported there. |
+| `batch_transcribe.py` | (issue #55) The only module permitted to import `librosa`. `load_audio()` + `transcribe()` — runs the same per-hop pipeline `analysis_loop()` drives live (mono via `NoteSmoother`, polyphonic via `multipitch.detect()`+`ChordSmoother`), accumulates full-recording-length per-`(pitch_class, octave)` magnitude/onset arrays, then calls `DurationTracker.finalize_noncausal()` per key and `librosa.beat.beat_track()` for tempo. Returns a `TranscriptionResult` (`notes` polyphonic, `mono_notes` monophonic, `bpm`, `hop_seconds`) that `main.run_batch_transcribe()` turns into `TabDisplay` columns. |
 | `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `hue_for_step()` (the shared 30-degrees-per-step hue formula `note_to_hsl()` and `menu_animation.band_color()` both build on), `NOTE_NAMES`, `NOTE_NAMES_FIFTHS`. |
 | `staff_map.py` | `staff_row()`, `ledger_rows()`, `row_note_name()` (general row→letter, every line/space row) — grand-staff placement, used only by `tab` view. |
 | `animation.py` | `ColorAnimator` — crossfade + onset pulse. Used by GUI, terminal-fill, and (per-note-keyed) chord-mode fill bands. |
 | `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). Chord mode is out of scope for the GUI (no live-hotkey mechanism). |
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
-| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
+| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()` (each note stored as a mutable dict, not a tuple — a `duration_class` field starts `None` and is filled in later by `finalize_duration()`, since a note's duration is only known after it decays, well after the column carrying it was pushed; optional `t=` override lets `main.run_batch_transcribe()` stamp a column with the recording's real onset time instead of wall-clock), `push_barline()` (issue #55: a second, distinct column type — no notes, just a divider glyph spanning the staff height at `TAB_BARLINE_WIDTH`, aged/dimmed the same way note columns are but with no hue), `render()` (takes live `notehead_style`/`legend_on`/`frozen`, age-fades each column's lightness per issue #22, and composes duration glyphs/suffixes onto each note per its `duration_class`), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
 | `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()`/`set_keybind()`/`set_note_hue_override()` (persist + write back to the TOML file — the last two back issue #43's settings screen). |
-| `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
+| `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape — `duration_hops`/`bpm_estimate` (issue #55) are its newest two fields. `run_terminal_tab()` drives rhythm notation: per-hop `finalize_duration()` calls (mono via the previous hop's `pitch_class`/`octave`, chord via each `note_stack` entry's own `duration_hops`) and a beat-accumulator triggering `push_barline()`. `run_batch_transcribe()` (issue #55, `virtualnote transcribe`) never touches `SessionState`/audio at all — offline, one-shot, builds `TabDisplay` columns from `batch_transcribe.transcribe()`'s output and calls `dump_ansi()` directly, no render loop. `pygame` imported only inside `run_gui`; `librosa` never imported here at all (see `batch_transcribe.py`). |
 | `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); `render()` draws issue #42's decided animated design (built in #51): `menu_animation`'s spinning donut fills a left-hand pane, with the title/donation-callout/tool-list/hints/status text overlaid in a fixed-width right-hand pane (`_layout()`, `_text_lines()`) — narrow terminals drop the donut and fall back to a centered text-only screen, same shape as the original #40 placeholder. `move()`/`move_to()`/`current_view()` selection plumbing is unchanged by any of this. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens: `settings`, `credits`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. `osc8_link()`/`_donation_line()` (issue #44) build the main screen's clickable author/donation callout. `_resolve_perf_mode()` picks full vs. perf donut rendering: an explicit override (virtualnote's `--menu-perf-mode` flag) beats `config.toml`'s `[preferences].menu_perf_mode` beats `menu_animation.detect_perf_mode()`'s real startup probe. |
 | `menu_animation.py` | Animation math for the menu screen's donut (issues #42/#51), ported from the throwaway prototype at `prototype/issue-42-menu-animation/{donut_fifths.py,autodetect.py}`: `render_frame()` — NumPy-vectorized torus point-projection (`_project()`) + a painter's-algorithm z-buffer via ascending-depth-sort fancy-indexing (no per-point Python loop) — re-skinned with the circle-of-fifths palette (`band_color()`/`FIFTHS_LABELS`), full mode shaded/lettered, perf mode flat/letterless/half-raster. `detect_perf_mode()`/`_decide_perf_mode()` — issue #46's auto-detect heuristic (core-count floor, then a real self-timed `render_frame()` probe against the full-mode frame budget), split into a real-timing wrapper and a pure decision function for testability. |
 | `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps and per-note hue overrides live, using `blessed` for field navigation and "press a key to capture this remap" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS`/`move()`/`keybind_value()`/`color_value()`/`is_valid_remap_key()`/`parse_hue_input()`/`apply_field_edit()`/`clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself is smoke-tested manually, same convention as every `run_terminal_*` loop. |
 | `credits_display.py` | `run_credits_screen()` — `virtualnote`'s static Credits screen (issue #44): author, Claude/AI-assistance credit, and third-party library attribution (`THIRD_PARTY_LIBRARIES`), raw ANSI (no editable state, so no need for `settings_display`'s `blessed` exception). `credits_lines()` is the pure, unit-tested text builder; the render/wait-for-any-keypress loop itself is smoke-tested manually. |
 | `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. `"settings"`/`"credits"` picks are special-cased via `_NON_SESSION_SCREENS` straight to `settings_display.run_settings_screen()`/`credits_display.run_credits_screen()` instead of `run_session()` (issues #43, #44) — neither touches audio, so both always return straight back to the menu. |
-| `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded; `--menu-perf-mode {auto,full,perf}`, top-level-only, issue #51's CLI override for the menu donut) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content), `test_menu_animation.py` (projection/shading helpers, `render_frame()` shape/smoke checks, the auto-detect decision function), `test_menu_display.py` (`_layout()`'s donut/text-pane column split, `_resolve_perf_mode()`'s override precedence, `_text_lines()`'s content). |
+| `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded; `--menu-perf-mode {auto,full,perf}`, top-level-only, issue #51's CLI override for the menu donut; `tab`'s `--time-signature` and the standalone `transcribe <file> [--dump-file] [--time-signature]` subcommand, issue #55) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly — except `transcribe`, handled and returned before `SessionState` is even constructed, since batch never touches live audio. |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content), `test_menu_animation.py` (projection/shading helpers, `render_frame()` shape/smoke checks, the auto-detect decision function), `test_menu_display.py` (`_layout()`'s donut/text-pane column split, `_resolve_perf_mode()`'s override precedence, `_text_lines()`'s content), `test_onset_detect.py`/`test_duration_tracker.py`/`test_tempo_tracker.py`/`test_batch_transcribe.py` (issue #55: synthetic spectra/chroma/magnitude-envelope/periodic-impulse fixtures, same "synthesize the signal, no binary fixtures" convention `test_chroma.py`'s `make_tone()` set). |
 
 ## Running it
 
@@ -119,6 +146,8 @@ virtualnote tab fix                                       # straight to scrollin
 virtualnote gui                                            # straight to the GUI window
 virtualnote fill --color-scheme fifths                      # any tool, fifths hue mapping instead of chromatic
 virtualnote fill --source loopback                           # listen to system audio output, not mic
+virtualnote tab onset --time-signature 3/4                    # barlines placed for 3/4 instead of the default 4/4
+virtualnote transcribe song.wav                                 # offline rhythm/tempo transcription, no live audio
 .venv/bin/python -m pytest tests/                              # run the test suite
 ```
 
@@ -226,6 +255,28 @@ underlying audio/detection pipeline keeps running in the background
 regardless — pressing `Space` again resumes live immediately, with no
 catch-up of whatever happened while frozen. Current state shown in the
 status line (`frozen=on/off`).
+
+**Rhythm notation (issue #55), `tab`-view-only, no toggle — always on
+once a note has a measured duration.** Each note's duration glyph
+(*symbol* style: a combining stem, plus a flag per subdivision below a
+quarter note and a dot if dotted; *name* style: a short text suffix like
+`Bb·8th` instead) reflects however long that note actually sounded,
+snapped to the nearest standard note value — computed once its duration
+finalizes (necessarily after the column was already pushed, possibly
+already scrolled partway off screen) and then fixed for good, unlike
+color's continuous per-frame age-fade. Barlines (a distinct, narrower
+column type, no notehead) appear at estimated bar boundaries, driven by a
+running beat-accumulator against the live tempo estimate and
+`--time-signature N/D` (default `4/4`, plain-digit display only — never
+auto-detected). Both the tempo estimate and the time signature show in
+the status line (`tempo=<bpm|-->`, `time=N/D`); barline placement is an
+approximation tied to that live tempo estimate, not exact bar-for-bar
+accuracy — expected drift, not a bug (see Known limitations).
+`virtualnote transcribe <file> [--dump-file PATH] [--time-signature N/D]`
+runs the same rhythm/duration/tempo detection offline against a
+pre-recorded audio file instead of live input — no terminal window, no
+mic, just a `dump_ansi()`-format text dump written on completion (same
+convention/default path as `tab`'s own on-quit dump).
 
 `--source {mic,loopback}` (default `mic`) selects the input: `loopback`
 listens to the computer's own audio output instead of the microphone, via
@@ -494,6 +545,39 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   which only wraps the menu screen's poll loop, not this dispatch. Caught
   with its own explicit `try/except KeyboardInterrupt: return` around the
   `_NON_SESSION_SCREENS` call instead.
+- `RenderItem.duration_hops`/`bpm_estimate` (issue #55) are exactly two
+  new fields, chosen to match the shape a future score-file/playback
+  consumer (map #24) will want — deliberately *not* a list of every note
+  that finalized this hop, even though chord mode can finalize more than
+  one note in a single hop. Mono's field pairs unambiguously with the
+  *previous* hop's `pitch_class`/`octave` (that's the note `DurationTracker`
+  was actually tracking); chord mode's per-note duration instead rides
+  along inside each `note_stack` entry's own `duration_hops` key (that
+  list already existed, so this isn't a new top-level field) rather than
+  forcing multiple simultaneous finalizations through one flat int.
+- Chord-mode duration tracking always passes `is_onset=False` to
+  `DurationTracker.update()` — `multipitch.detect()` has no persistent
+  per-note identity across hops (independent spectral peak-picking every
+  hop), so there's no reliable signal for "this is a genuine re-attack of
+  an already-sounding pitch" the way `NoteSmoother`'s monophonic onset gate
+  (note-change / RMS jump / spectral flux) has. The ordinary appear/
+  sustain/disappear lifecycle still tracks correctly via absence-based
+  finalization; a same-pitch re-attack mid-sustain with no gap just won't
+  split into two chord-mode notes. A deliberate, bounded scope-narrowing
+  versus the mono path, not an oversight.
+- `TabDisplay.push()`/`.push_notes()`/`.push_barline()` take an optional
+  `t=` timestamp override (issue #55) — live callers omit it and get the
+  original wall-clock time-since-construction; `main.run_batch_
+  transcribe()` passes the note's real onset time from the recording
+  instead, since a batch sweep pushes every column within milliseconds of
+  real time regardless of where the notes actually fall in the file —
+  without the override, `dump_ansi()`'s `t` column would read ~0.00s for
+  an entire transcription.
+- `librosa` is isolated to `batch_transcribe.py` alone, never imported by
+  `main.py` or any live-path module — a dependency chosen purely for
+  offline convenience (`librosa.beat.beat_track()`'s tempo tracker) has no
+  business affecting the live/Pi-constrained path's install footprint or
+  import time.
 
 ## Known limitations / things learned
 
@@ -525,6 +609,17 @@ One-liners; full detail in `docs/DECISIONS.md`.
   `RELEASE_HOPS`, the multipitch peak-picking constants) are provisional
   starting values per the spec, not yet tuned against extended real
   playing beyond the smoke tests already run live.
+- Rhythm mode's thresholds/constants (`ONSET_FLUX_THRESHOLD`,
+  `DURATION_DECAY_RATIO`, `TEMPO_HISTORY_SECONDS`/`MIN_BPM`/`MAX_BPM`/
+  `UPDATE_INTERVAL_HOPS`) are likewise provisional, same convention as
+  chord mode's — verified against synthesized test signals (known-BPM
+  impulse trains, synthetic decay envelopes) and one real
+  `virtualnote transcribe` run against a synthesized melody, not yet
+  tuned against extended real playing.
+- Barline placement (issue #55) is explicitly approximate, tied to the
+  live/estimated tempo rather than exact bar-for-bar accuracy — drift
+  under an imperfect tempo estimate is accepted, not a bug to chase (same
+  posture as chord mode's provisional thresholds above).
 - The treble clef glyph (𝄞) can still render with its bottom clipped off
   in some terminal/font combinations — investigated for issue #20;
   measured (Pillow `ImageFont.getbbox()`) that its covering font

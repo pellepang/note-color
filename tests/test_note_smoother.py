@@ -1,5 +1,9 @@
+import numpy as np
+
 from note_smoother import NoteSmoother
 import config
+
+DUMMY_SPECTRUM = np.zeros(5)
 
 
 def freq_for(pitch_class, octave):
@@ -7,10 +11,10 @@ def freq_for(pitch_class, octave):
     return 440.0 * 2 ** ((midi - 69) / 12)
 
 
-def feed(smoother, pitch_class, octave, count, confidence=0.9, rms=0.1):
+def feed(smoother, pitch_class, octave, count, confidence=0.9, rms=0.1, spectrum=DUMMY_SPECTRUM):
     result = None
     for _ in range(count):
-        result = smoother.update(freq_for(pitch_class, octave), confidence, rms)
+        result = smoother.update(freq_for(pitch_class, octave), confidence, rms, spectrum)
     return result
 
 
@@ -24,7 +28,7 @@ def test_single_frame_octave_blip_does_not_flicker():
     s = NoteSmoother(config)
     feed(s, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW)
     # single-frame octave error blip
-    pitch_class, octave, _ = s.update(freq_for(9, 5), 0.9, 0.1)
+    pitch_class, octave, _ = s.update(freq_for(9, 5), 0.9, 0.1, DUMMY_SPECTRUM)
     assert (pitch_class, octave) == (9, 4)
     # keep playing the real note, still stable
     pitch_class, octave, _ = feed(s, 9, 4, 3)
@@ -36,7 +40,7 @@ def test_brief_silence_gap_does_not_reset_note():
     feed(s, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW)
     # gap shorter than SILENCE_HOPS
     for _ in range(config.SILENCE_HOPS - 1):
-        pitch_class, octave, _ = s.update(None, 0.0, 0.0)
+        pitch_class, octave, _ = s.update(None, 0.0, 0.0, DUMMY_SPECTRUM)
     assert (pitch_class, octave) == (9, 4)
 
 
@@ -45,7 +49,7 @@ def test_sustained_silence_goes_idle():
     feed(s, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW)
     pitch_class, octave, _ = None, None, None
     for _ in range(config.SILENCE_HOPS + 1):
-        pitch_class, octave, _ = s.update(None, 0.0, 0.0)
+        pitch_class, octave, _ = s.update(None, 0.0, 0.0, DUMMY_SPECTRUM)
     assert pitch_class is None and octave is None
 
 
@@ -68,8 +72,29 @@ def test_genuine_note_change_registers_with_onset():
     onset_seen = False
     pitch_class = octave = None
     for _ in range(config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW):
-        pitch_class, octave, is_onset = s.update(freq_for(0, 5), 0.9, 0.1)
+        pitch_class, octave, is_onset = s.update(freq_for(0, 5), 0.9, 0.1, DUMMY_SPECTRUM)
         onset_seen = onset_seen or is_onset
 
     assert (pitch_class, octave) == (0, 5)
     assert onset_seen
+
+
+def test_spectral_flux_triggers_onset_without_note_change_or_rms_jump():
+    s = NoteSmoother(config)
+    # Lock in a stable note first, with a flat (zero) spectrum every hop so
+    # no flux has fired yet.
+    feed(s, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW, rms=0.1, spectrum=np.zeros(64))
+
+    # Same rms (no jump), same note (no change), no silence -- but a big
+    # spectral shift between two consecutive hops should still fire the
+    # flux-triggered onset condition on its own.
+    quiet_spectrum = np.zeros(64)
+    loud_spectrum = np.full(64, 10.0)
+    s.update(freq_for(9, 4), 0.9, 0.1, quiet_spectrum)
+
+    from onset_detect import spectral_flux
+    assert spectral_flux(loud_spectrum, quiet_spectrum) >= config.ONSET_FLUX_THRESHOLD
+
+    pitch_class, octave, is_onset = s.update(freq_for(9, 4), 0.9, 0.1, loud_spectrum)
+    assert (pitch_class, octave) == (9, 4)
+    assert is_onset is True

@@ -10,7 +10,7 @@ import argparse
 import pytest
 
 import config
-from main import _handle_back_to_menu_key, _handle_help_legend_key, _legend_line
+from main import _handle_back_to_menu_key, _handle_help_legend_key, _legend_line, _parse_time_signature
 from menu_display import MenuDisplay, MENU_ITEMS, TOOLS, osc8_link, _donation_line
 from shell import _handle_menu_key
 from virtualnote import build_parser
@@ -206,3 +206,45 @@ def test_invalid_view_rejected():
 def test_sensitivity_must_be_positive():
     with pytest.raises(SystemExit):
         build_parser().parse_args(["fill", "--sensitivity", "-1"])
+
+
+def test_transcribe_requires_file_positional():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["transcribe"])
+
+
+def test_transcribe_defaults():
+    args = build_parser().parse_args(["transcribe", "somefile.wav"])
+    assert args.view == "transcribe"
+    assert args.file == "somefile.wav"
+    assert args.time_signature == (4, 4)
+    assert args.dump_file is None
+
+
+def test_transcribe_accepts_time_signature():
+    args = build_parser().parse_args(["transcribe", "somefile.wav", "--time-signature", "3/4"])
+    assert args.time_signature == (3, 4)
+
+
+def test_transcribe_rejects_malformed_time_signature():
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["transcribe", "somefile.wav", "--time-signature", "nope"])
+
+
+def test_tab_defaults_time_signature_to_four_four():
+    args = build_parser().parse_args(["tab", "onset"])
+    assert args.time_signature == (4, 4)
+
+
+# --- main.py: _parse_time_signature -----------------------------------------
+
+def test_parse_time_signature_valid():
+    assert _parse_time_signature("4/4") == (4, 4)
+    assert _parse_time_signature("3/4") == (3, 4)
+    assert _parse_time_signature("7/8") == (7, 8)
+
+
+@pytest.mark.parametrize("text", ["nope", "4", "4/4/4", "0/4", "4/0", "-3/4", "a/b"])
+def test_parse_time_signature_rejects_bad_input(text):
+    with pytest.raises(argparse.ArgumentTypeError):
+        _parse_time_signature(text)

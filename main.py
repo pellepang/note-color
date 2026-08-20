@@ -39,6 +39,7 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
+import batch_transcribe
 import chroma
 import config
 import multipitch
@@ -47,6 +48,9 @@ from audio_capture import AudioCapture, resolve_loopback_device
 from pitch_detect import compute_spectrum, detect_pitch
 from note_smoother import NoteSmoother
 from chord_smoother import ChordSmoother
+from duration_tracker import DurationTracker, duration_class_for_beats
+from onset_detect import chroma_flux
+from tempo_tracker import TempoTracker
 from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES, NOTE_NAMES_FIFTHS
 from animation import ColorAnimator
 
@@ -136,6 +140,22 @@ def _positive_float(text):
     return value
 
 
+def _parse_time_signature(text):
+    """'N/D' -> (N, D) as positive ints, for --time-signature. Mirrors
+    _positive_float's style: raises argparse.ArgumentTypeError on anything
+    that isn't exactly two positive-integer parts separated by '/'."""
+    parts = text.split("/")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("must be in N/D form, e.g. 3/4")
+    try:
+        numerator, denominator = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be in N/D form, e.g. 3/4") from None
+    if numerator <= 0 or denominator <= 0:
+        raise argparse.ArgumentTypeError("both N and D must be > 0")
+    return numerator, denominator
+
+
 def _handle_sensitivity_key(key, sensitivity):
     if key == "DOWN":
         sensitivity.adjust(1.0 / SENSITIVITY_STEP)
@@ -171,9 +191,10 @@ def _handle_source_key(key, capture, source_state):
 class RenderItem(NamedTuple):
     """Per-hop analysis result, single-slot queue item. The first 9 fields
     are the original monophonic-pipeline shape/order; `note_stack` and
-    `chord_name` are chord-mode additions. Existing call sites keep
-    unpacking the first 9 positionally, adding a trailing capture for the
-    two new fields."""
+    `chord_name` are chord-mode additions, and `duration_hops`/
+    `bpm_estimate` (issue #55) are the rhythm-pipeline additions after
+    that. Existing call sites keep unpacking the first 9 positionally,
+    adding a trailing capture for each later addition."""
 
     target_rgb: tuple
     is_onset: bool
@@ -186,12 +207,19 @@ class RenderItem(NamedTuple):
     octave: Optional[int]
     note_stack: list
     chord_name: Optional[str]
+    duration_hops: Optional[int]   # set only on the hop a note's duration finalizes, else None
+    bpm_estimate: Optional[float]  # live tempo estimate, or None before enough history exists
 
 
 def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
     chord_smoother = ChordSmoother(config)
+    mono_duration_tracker = DurationTracker(config)
+    chord_duration_tracker = DurationTracker(config)
+    tempo_tracker = TempoTracker(config, config.BLOCK_SIZE / config.SAMPLE_RATE)
+    prev_chroma = None
+    hop_index = 0
 
     while not stop_event.is_set():
         try:
@@ -206,7 +234,7 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
         smoother.set_sensitivity(sensitivity.value)
         spectrum = compute_spectrum(ring)
         freq, confidence = detect_pitch(ring, config.SAMPLE_RATE, spectrum, config.FMIN, config.FMAX, config.YIN_THRESHOLD)
-        pitch_class, octave, is_onset = smoother.update(freq, confidence, rms)
+        pitch_class, octave, is_onset = smoother.update(freq, confidence, rms, spectrum)
 
         if pitch_class is None:
             target_rgb = config.IDLE_RGB
@@ -225,6 +253,21 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
         # flag with no shared state to coordinate.
         main_chroma = chroma.fold(spectrum, config.SAMPLE_RATE)
         bass_chroma = chroma.fold_bass(spectrum, config.SAMPLE_RATE)
+
+        # Tempo tracking (issue #55) rides on the same chroma-flux novelty
+        # signal chord mode already computes each hop -- always-on, same
+        # "cheap enough, no gating" convention as the rest of the chord
+        # pipeline above.
+        chroma_novelty = chroma_flux(main_chroma, prev_chroma)
+        bpm_estimate = tempo_tracker.update(chroma_novelty)
+        prev_chroma = main_chroma
+
+        # Monophonic duration tracking: at most one note-slot active at a
+        # time, so mono_finalized has at most one entry.
+        mono_notes = [(pitch_class, octave, rms, is_onset)] if pitch_class is not None else []
+        mono_finalized = mono_duration_tracker.update(mono_notes, hop_index)
+        duration_hops = mono_finalized[0][2] if mono_finalized else None
+
         raw_notes = multipitch.detect(
             ring,
             config.SAMPLE_RATE,
@@ -233,6 +276,21 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
             harmonic_tolerance_cents=config.CHORD_HARMONIC_TOLERANCE_CENTS,
             max_peak_candidates=config.CHORD_MAX_PEAK_CANDIDATES,
         )
+
+        # Chord-mode duration tracking. is_onset is hardcoded False here
+        # deliberately: multipitch.detect() has no persistent per-note
+        # identity across hops (it's independent spectral peak-picking
+        # every hop), so there's no reliable signal for "this is a genuine
+        # re-attack of an already-sounding pitch" the way NoteSmoother's
+        # monophonic path has one -- the ordinary appear/sustain/disappear
+        # lifecycle still tracks correctly via DurationTracker's
+        # absence-based finalization, it just won't split a same-pitch
+        # re-attack mid-sustain into two separate chord-mode notes. A
+        # deliberate, bounded scope-narrowing versus the mono path.
+        chord_notes = [(nc.pitch_class, nc.octave, nc.confidence, False) for nc in raw_notes]
+        chord_finalized = chord_duration_tracker.update(chord_notes, hop_index)
+        chord_finalized_by_key = {(pc, oct_): dur for pc, oct_, dur in chord_finalized}
+
         chord_name, raw_stack = chord_smoother.update(main_chroma, bass_chroma, raw_notes)
 
         note_stack = []
@@ -248,11 +306,13 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
                     "confidence": entry["confidence"],
                     "rgb": hsl_to_rgb255(stack_hue, stack_sat, stack_light),
                     "is_bass": entry["is_bass"],
+                    "duration_hops": chord_finalized_by_key.get((entry["pitch_class"], entry["octave"])),
                 }
             )
 
         item = RenderItem(target_rgb, is_onset, label, freq, confidence, rms, fifths_idx, pitch_class, octave,
-                           note_stack, chord_name)
+                           note_stack, chord_name, duration_hops, bpm_estimate)
+        hop_index += 1
         _overwrite(result_queue, item)
 
 
@@ -409,7 +469,8 @@ def run_terminal_fill(result_queue, sensitivity, capture, source_state):
                 return "menu"
             try:
                 (target_rgb, is_onset, label, freq, confidence, rms,
-                 _fifths_idx, _pitch_class, _octave, note_stack, chord_name) = result_queue.get_nowait()
+                 _fifths_idx, _pitch_class, _octave, note_stack, chord_name,
+                 _duration_hops, _bpm_estimate) = result_queue.get_nowait()
             except queue.Empty:
                 is_onset = False
 
@@ -463,7 +524,8 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
             is_onset = False
             try:
                 (_target_rgb, is_onset, label, freq, confidence, rms,
-                 active_index, _pitch_class, _octave, note_stack, chord_name) = result_queue.get_nowait()
+                 active_index, _pitch_class, _octave, note_stack, chord_name,
+                 _duration_hops, _bpm_estimate) = result_queue.get_nowait()
             except queue.Empty:
                 pass
 
@@ -520,7 +582,8 @@ def _tab_note_label(pitch_class, octave):
     return f"{NOTE_NAMES_FIFTHS[pitch_class]}{octave}"
 
 
-def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state):
+def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state,
+                      time_signature=config.DEFAULT_TIME_SIGNATURE):
     from terminal_tab_display import TabDisplay
 
     display = TabDisplay(fps=config.TAB_FPS)
@@ -539,9 +602,21 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     frozen = False
     help_legend_on = True
 
+    # time_signature arrives pre-validated as an (int, int) tuple from the
+    # CLI layer (main._parse_time_signature / virtualnote.py), not a
+    # string, so no parsing needed here. A "beat" throughout this codebase's
+    # duration math (duration_tracker._DURATION_CLASSES) is a quarter
+    # note -- beats_per_bar converts the time signature's own beat unit
+    # into quarter-note-beats per bar.
+    beats_numerator, beats_denominator = time_signature
+    beats_per_bar = beats_numerator * (4.0 / beats_denominator)
+    beats_accumulated = 0.0
+    hop_seconds = config.BLOCK_SIZE / config.SAMPLE_RATE
+
     label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
     pitch_class, octave = None, None
     note_stack, chord_name = [], None
+    bpm_estimate = None
 
     resolved_dump = dump_file or os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
@@ -567,12 +642,57 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             # pushed below -- the analysis thread keeps overwriting the
             # single-slot queue in the background regardless (issue #23).
             if not frozen:
+                # The note that was displayed *last* hop -- this is the key
+                # duration_hops (if set this hop) actually belongs to, since
+                # DurationTracker was fed exactly this smoothed pitch_class/
+                # octave sequence one hop behind what's about to be
+                # displayed now.
+                prev_pitch_class, prev_octave = pitch_class, octave
                 try:
                     (_target_rgb, is_onset, label, freq, confidence, rms,
-                     _fifths_idx, pitch_class, octave, note_stack, chord_name) = result_queue.get_nowait()
+                     _fifths_idx, pitch_class, octave, note_stack, chord_name,
+                     duration_hops, bpm_estimate) = result_queue.get_nowait()
                     got_new = True
                 except queue.Empty:
                     pass
+
+                if got_new:
+                    # Monophonic duration finalization belongs to the note
+                    # displayed *before* this hop's update (see above).
+                    if duration_hops is not None and prev_pitch_class is not None:
+                        beats = (duration_hops * hop_seconds * bpm_estimate / 60.0) if bpm_estimate else None
+                        dclass = duration_class_for_beats(beats)
+                        display.finalize_duration(prev_pitch_class, prev_octave, dclass)
+                        beats_accumulated += (
+                            duration_hops * hop_seconds * bpm_estimate / 60.0 if bpm_estimate else 0.0
+                        )
+
+                    # Chord-mode duration tracking runs every hop regardless
+                    # of the current chord_mode display toggle -- same
+                    # always-on-pipeline convention as chroma/multipitch
+                    # elsewhere in this codebase.
+                    for entry in note_stack:
+                        if entry["duration_hops"] is None:
+                            continue
+                        beats = (
+                            entry["duration_hops"] * hop_seconds * bpm_estimate / 60.0
+                        ) if bpm_estimate else None
+                        dclass = duration_class_for_beats(beats)
+                        display.finalize_duration(entry["pitch_class"], entry["octave"], dclass)
+                        beats_accumulated += (
+                            entry["duration_hops"] * hop_seconds * bpm_estimate / 60.0 if bpm_estimate else 0.0
+                        )
+
+                    # A while, not an if, so a hop that somehow crosses more
+                    # than one bar boundary (e.g. after a long freeze)
+                    # doesn't lose barlines; keeping the remainder rather
+                    # than zeroing avoids compounding drift.
+                    while beats_accumulated >= beats_per_bar:
+                        display.push_barline()
+                        beats_accumulated -= beats_per_bar
+
+            tempo_str = f"{bpm_estimate:.0f}" if bpm_estimate else "--"
+            time_str = f"{beats_numerator}/{beats_denominator}"
 
             mode_hint = (f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  "
                          f"notes={notehead_style}({_key_hint('notehead_style_toggle')})  "
@@ -608,7 +728,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
 
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
-                          + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
+                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
                 display.render(status, chord_mode=True, notehead_style=notehead_style, legend_on=legend_on,
                                 frozen=frozen, help_legend=help_legend)
             else:
@@ -626,7 +746,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                             display.push(pitch_class, octave, glyph_rgb, tab_label)
 
                 status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
-                          + f"  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
+                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
                 display.render(status, chord_mode=False, notehead_style=notehead_style, legend_on=legend_on,
                                 frozen=frozen, help_legend=help_legend)
             time.sleep(dt)
@@ -688,7 +808,8 @@ def run_gui(result_queue, fullscreen, start_debug, sensitivity):
 
             try:
                 (target_rgb, is_onset, label, freq, confidence, rms,
-                 _fifths_idx, _pitch_class, _octave, _note_stack, _chord_name) = result_queue.get_nowait()
+                 _fifths_idx, _pitch_class, _octave, _note_stack, _chord_name,
+                 _duration_hops, _bpm_estimate) = result_queue.get_nowait()
             except queue.Empty:
                 is_onset = False
 
@@ -770,7 +891,8 @@ class SessionState:
         self.capture.stop()
 
 
-def run_session(view, scroll_mode, dump_file, fullscreen, debug, session):
+def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
+                 time_signature=config.DEFAULT_TIME_SIGNATURE):
     """Dispatches to the right run_* function for `view` ('fill', 'wheel',
     'tab', or 'gui'), starting `session`'s capture/analysis thread first if
     this is the first tool entered this process. Returns whatever the
@@ -780,7 +902,8 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session):
     does) decides what to do with that sentinel. This is the extracted
     body of what used to be main()'s single-shot try/finally, made
     reusable so shell.py's menu loop can call it repeatedly against the
-    same session (issue #40)."""
+    same session (issue #40). `time_signature` is 'tab'-view-only (issue
+    #55's barline placement) -- every other view ignores it."""
     session.ensure_started()
     if view == "gui":
         return run_gui(session.result_queue, fullscreen, debug, session.sensitivity)
@@ -788,8 +911,84 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session):
         return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state)
     if view == "tab":
         return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
-                                 session.capture, session.source_state)
+                                 session.capture, session.source_state, time_signature=time_signature)
     return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state)
+
+
+def run_batch_transcribe(file_path, time_signature, dump_file):
+    """Offline transcription entry point (issue #55, `virtualnote
+    transcribe`): loads `file_path`, runs batch_transcribe.transcribe()
+    over the whole array, then builds TabDisplay columns from the result
+    and dumps them via dump_ansi() -- no live render loop, no terminal
+    interactivity, .render() is never called (a real TabDisplay is still
+    constructed, reusing its column-building/dump_ansi() logic, which is
+    what's actually needed here; its constructor's stray `\\033[?25l\\033[2J`
+    terminal-control escape codes on stdout are harmless and not worth
+    suppressing for a one-shot batch run).
+
+    Column-building choice: batch_transcribe.transcribe()'s polyphonic
+    `notes` list (each NoteEvent already carries a resolved chord_name at
+    its own onset) is grouped by onset_hop -- every NoteEvent sharing the
+    same onset_hop becomes one push_notes() column (a single note is just
+    a one-note "chord" here, so push_notes() covers both solo notes and
+    real chords uniformly -- TabDisplay.push()/.push_notes() both just
+    build a TabEntry internally, see terminal_tab_display.py, so
+    dump_ansi()'s output is identical either way). Barlines are pushed by
+    accumulating each column's beats -- the *longest* of its simultaneous
+    notes' durations, in whichever unit result.bpm resolves beats to --
+    against the same beats_per_bar formula run_terminal_tab() uses, walked
+    in onset order across the whole file."""
+    from terminal_tab_display import TabDisplay
+
+    audio = batch_transcribe.load_audio(file_path)
+    result = batch_transcribe.transcribe(audio, config.SAMPLE_RATE, time_signature=time_signature)
+
+    beats_numerator, beats_denominator = time_signature
+    beats_per_bar = beats_numerator * (4.0 / beats_denominator)
+
+    display = TabDisplay(fps=config.TAB_FPS)
+
+    by_hop = {}
+    for note in result.notes:
+        by_hop.setdefault(note.onset_hop, []).append(note)
+
+    beats_accumulated = 0.0
+    for onset_hop in sorted(by_hop):
+        notes_here = by_hop[onset_hop]
+        onset_time = onset_hop * result.hop_seconds
+        chord_name = next((n.chord_name for n in notes_here if n.chord_name), None)
+        push_tuples = [
+            (n.pitch_class, n.octave, _tab_note_rgb(n.pitch_class), _tab_note_label(n.pitch_class, n.octave))
+            for n in notes_here
+        ]
+        # `t=onset_time`: without this, TabDisplay stamps every column with
+        # wall-clock time-since-construction, which is meaningless here --
+        # a batch sweep pushes every column within milliseconds of real
+        # time regardless of where the notes actually fall in the
+        # recording (dump_ansi()'s "t" column would otherwise read ~0.00s
+        # for the whole file).
+        display.push_notes(push_tuples, chord_name, t=onset_time)
+
+        column_beats = 0.0
+        for n in notes_here:
+            note_beats = (n.duration_hops * result.hop_seconds * result.bpm / 60.0) if result.bpm else None
+            dclass = duration_class_for_beats(note_beats)
+            display.finalize_duration(n.pitch_class, n.octave, dclass)
+            column_beats = max(column_beats, note_beats or 0.0)
+
+        beats_accumulated += column_beats
+        while beats_accumulated >= beats_per_bar:
+            # A barline crossed here belongs at (approximately) this
+            # column's onset time -- the same approximation the live path
+            # already accepts for barline placement (issue #55/#53).
+            display.push_barline(t=onset_time)
+            beats_accumulated -= beats_per_bar
+
+    resolved_dump_path = dump_file or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+    )
+    display.dump_ansi(resolved_dump_path)
 
 
 def main():
@@ -816,6 +1015,8 @@ def main():
                          help="'mic' (default) listens to the microphone; 'loopback' listens to the "
                               "computer's own audio output instead (PipeWire/PulseAudio on Linux only), "
                               "for testing without playing anything out loud")
+    parser.add_argument("--time-signature", type=_parse_time_signature, default=config.DEFAULT_TIME_SIGNATURE,
+                         help="'tab' view only: N/D time signature for barline placement (default 4/4)")
     args = parser.parse_args()
 
     session = SessionState(args.color_scheme, args.sensitivity, args.source)
@@ -833,7 +1034,8 @@ def main():
         # actually gives '|' somewhere to return to (see shell.py); H still
         # works here too, harmlessly, since it's pure render-thread-local
         # state with nothing shell-specific about it.
-        run_session(view, args.scroll, args.dump_file, args.fullscreen, args.debug, session)
+        run_session(view, args.scroll, args.dump_file, args.fullscreen, args.debug, session,
+                     time_signature=args.time_signature)
     finally:
         session.stop()
 

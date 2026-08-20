@@ -6,7 +6,17 @@ import sys
 import pytest
 
 import config
-from terminal_tab_display import NOTEHEAD_GLYPH, TabDisplay, _aged_lightness, _column_note_rgb
+from duration_tracker import DEFAULT_DURATION_CLASS
+from terminal_tab_display import (
+    BARLINE_GLYPH,
+    DOT_GLYPH,
+    FLAG_GLYPHS,
+    NOTEHEAD_GLYPH,
+    STEM_GLYPH,
+    TabDisplay,
+    _aged_lightness,
+    _column_note_rgb,
+)
 
 
 def _render(monkeypatch, rows, cols=80, pushes=(), notehead_style="symbol", legend_on=True, frozen=False):
@@ -185,3 +195,149 @@ def test_freeze_forces_all_visible_columns_to_full_brightness(monkeypatch):
     luminances = _bg_luminances(out)
     assert len(luminances) == 2
     assert luminances[0] == luminances[1]
+
+
+# --- issue #55: rhythm notation (durations + barlines) ---
+
+def _render_display(monkeypatch, rows, cols=80, setup=None, notehead_style="symbol", legend_on=True,
+                     frozen=False, chord_mode=False):
+    """Like `_render()` above, but takes an arbitrary `setup(display)`
+    callback instead of a flat list of monophonic pushes -- needed for
+    tests that call push_notes()/push_barline()/finalize_duration()
+    directly. Returns (rendered_output, display) so a test can also
+    inspect display state after rendering."""
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=None: (cols, rows))
+    display = TabDisplay(fps=20)
+    display._last_size = (cols, rows)
+    if setup is not None:
+        setup(display)
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    display.render("status", chord_mode=chord_mode, notehead_style=notehead_style, legend_on=legend_on,
+                    frozen=frozen)
+    return buf.getvalue(), display
+
+
+def _fg_luminances(out):
+    """Every `\\033[38;2;r;g;bm` foreground color in render() output, in
+    the order they appear -- barline cells are foreground-only (see
+    `_barline_cell`), so isolate them by rendering nothing but barlines."""
+    rgbs = [tuple(int(v) for v in m) for m in re.findall(r"\033\[38;2;(\d+);(\d+);(\d+)m", out)]
+    return [0.299 * r + 0.587 * g + 0.114 * b for r, g, b in rgbs]
+
+
+def test_finalize_duration_sets_matching_note_and_noops_for_unknown_key(monkeypatch):
+    display = TabDisplay(fps=20)
+    display.push(0, 4, (200, 50, 50), "C4")
+    display.finalize_duration(0, 4, "eighth")
+    assert display.entries[-1].notes[0]["duration_class"] == "eighth"
+
+    # Unknown (pitch_class, octave) key -- silent no-op, must not raise.
+    display.finalize_duration(5, 5, "quarter")
+
+
+def test_rapid_reattack_supersedes_older_open_note(monkeypatch):
+    display = TabDisplay(fps=20)
+    display.push(0, 4, (200, 50, 50), "C4-old")
+    old_note = display.entries[-1].notes[0]
+    display.push(0, 4, (200, 50, 50), "C4-new")  # same key, re-attack
+    new_note = display.entries[-1].notes[0]
+
+    display.finalize_duration(0, 4, "half")
+
+    assert new_note["duration_class"] == "half"
+    assert old_note["duration_class"] is None  # abandoned, never finalized
+
+
+def test_push_barline_renders_glyph_spanning_staff_at_barline_width(monkeypatch):
+    def setup(display):
+        display.push(0, 4, (200, 50, 50), "C4")
+        display.push_barline()
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, setup=setup)
+    cells = re.findall(r"\033\[38;2;\d+;\d+;\d+m(.*?)\033\[0m", out)
+    barline_cells = [c for c in cells if BARLINE_GLYPH in c]
+    assert len(barline_cells) > 1  # spans multiple staff rows, not just one
+    for cell in barline_cells:
+        assert len(cell) == config.TAB_BARLINE_WIDTH
+
+
+def test_push_barline_does_not_crash_render_in_either_chord_mode(monkeypatch):
+    for chord_mode in (False, True):
+        def setup(display, chord_mode=chord_mode):
+            if chord_mode:
+                display.push_notes([(0, 4, (200, 50, 50), "C4")], "C")
+            else:
+                display.push(0, 4, (200, 50, 50), "C4")
+            display.push_barline()
+
+        out, _ = _render_display(monkeypatch, rows=30, cols=100, setup=setup, chord_mode=chord_mode)
+        assert BARLINE_GLYPH in out
+
+
+def test_older_barline_renders_dimmer_than_newest(monkeypatch):
+    def setup(display):
+        display.push_barline()
+        display.push_barline()
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, setup=setup)
+    luminances = _fg_luminances(out)
+    assert len(luminances) >= 2 and len(luminances) % 2 == 0
+    older_vals = luminances[0::2]
+    newest_vals = luminances[1::2]
+    assert max(older_vals) == min(older_vals)  # constant color per column, across rows
+    assert max(newest_vals) == min(newest_vals)
+    assert newest_vals[0] > older_vals[0]
+
+
+def _setup_single_chord_note(pitch_class=0, octave=4, duration_class=None):
+    def setup(display):
+        display.push_notes([(pitch_class, octave, (200, 50, 50), "C4")], "Cmaj")
+        if duration_class is not None:
+            display.finalize_duration(pitch_class, octave, duration_class)
+    return setup
+
+
+def test_symbol_style_eighth_note_renders_stem_and_flag(monkeypatch):
+    out, _ = _render_display(
+        monkeypatch, rows=30, cols=100, chord_mode=True, notehead_style="symbol",
+        setup=_setup_single_chord_note(duration_class="eighth"),
+    )
+    assert STEM_GLYPH in out
+    assert FLAG_GLYPHS["eighth"] in out
+
+
+def test_symbol_style_whole_note_renders_no_stem(monkeypatch):
+    out, _ = _render_display(
+        monkeypatch, rows=30, cols=100, chord_mode=True, notehead_style="symbol",
+        setup=_setup_single_chord_note(duration_class="whole"),
+    )
+    assert STEM_GLYPH not in out
+
+
+def test_symbol_style_dotted_quarter_renders_dot(monkeypatch):
+    out, _ = _render_display(
+        monkeypatch, rows=30, cols=100, chord_mode=True, notehead_style="symbol",
+        setup=_setup_single_chord_note(duration_class="dotted-quarter"),
+    )
+    assert DOT_GLYPH in out
+
+
+def test_name_style_eighth_note_renders_duration_suffix(monkeypatch):
+    out, _ = _render_display(
+        monkeypatch, rows=30, cols=100, chord_mode=True, notehead_style="name",
+        setup=_setup_single_chord_note(duration_class="eighth"),
+    )
+    assert "·8th" in out  # "\xb7" == middle dot
+
+
+def test_unfinalized_note_renders_like_default_duration_class(monkeypatch):
+    out_unfinalized, _ = _render_display(
+        monkeypatch, rows=30, cols=100, chord_mode=True, notehead_style="symbol",
+        setup=_setup_single_chord_note(duration_class=None),
+    )
+    out_default, _ = _render_display(
+        monkeypatch, rows=30, cols=100, chord_mode=True, notehead_style="symbol",
+        setup=_setup_single_chord_note(duration_class=DEFAULT_DURATION_CLASS),
+    )
+    assert out_unfinalized == out_default

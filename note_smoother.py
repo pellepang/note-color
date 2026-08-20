@@ -8,6 +8,8 @@ displayed note is allowed to change.
 import math
 from collections import deque
 
+from onset_detect import spectral_flux
+
 
 class NoteSmoother:
     def __init__(self, cfg, sensitivity=1.0):
@@ -17,6 +19,7 @@ class NoteSmoother:
         self.base_rms_silence_threshold = cfg.RMS_SILENCE_THRESHOLD
         self.base_confidence_threshold = cfg.CONFIDENCE_THRESHOLD
         self.onset_rms_ratio = 10 ** (cfg.ONSET_RMS_JUMP_DB / 20.0)
+        self.onset_flux_threshold = cfg.ONSET_FLUX_THRESHOLD
         self.set_sensitivity(sensitivity)
 
         self.history = deque(maxlen=self.median_window)
@@ -26,6 +29,7 @@ class NoteSmoother:
         self.silence_count = 0
         self.prev_rms = 0.0
         self.was_silent = True
+        self.prev_spectrum = None
 
     def set_sensitivity(self, sensitivity):
         """Higher sensitivity lowers both gates, so quieter/softer playing
@@ -34,15 +38,21 @@ class NoteSmoother:
         self.rms_silence_threshold = self.base_rms_silence_threshold / self.sensitivity
         self.confidence_threshold = self.base_confidence_threshold / self.sensitivity
 
-    def update(self, freq_hz, confidence, rms):
+    def update(self, freq_hz, confidence, rms, spectrum):
         """Returns (pitch_class, octave, is_onset). pitch_class/octave are
-        None when idle (silence or unpitched input)."""
+        None when idle (silence or unpitched input). `spectrum` is this
+        hop's pitch_detect.compute_spectrum() output, used only for the
+        spectral-flux onset condition below -- prev_spectrum is tracked
+        (and updated on every call, including this silence-gated early
+        return) so flux history stays valid across a silence gap, the same
+        way prev_rms already is."""
         if freq_hz is None or rms < self.rms_silence_threshold or confidence < self.confidence_threshold:
             self.history.clear()
             self.candidate_note = None
             self.candidate_count = 0
             self.silence_count += 1
             self.prev_rms = rms
+            self.prev_spectrum = spectrum
             if self.silence_count >= self.silence_hops:
                 self.current_note = None
                 self.was_silent = True
@@ -75,9 +85,12 @@ class NoteSmoother:
             is_onset = True
         elif self.prev_rms > 0 and rms / self.prev_rms >= self.onset_rms_ratio:
             is_onset = True
+        elif spectral_flux(spectrum, self.prev_spectrum) >= self.onset_flux_threshold:
+            is_onset = True
 
         self.was_silent = False
         self.prev_rms = rms
+        self.prev_spectrum = spectrum
 
         if self.current_note is None:
             return None, None, is_onset

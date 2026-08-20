@@ -148,3 +148,20 @@ MENU_MIN_DONUT_COLS = 30
 MENU_AUTODETECT_CPU_FLOOR = 2
 MENU_AUTODETECT_PROBE_FRAMES = 3
 MENU_AUTODETECT_FRAME_BUDGET = 1.0 / MENU_FPS_FULL
+
+# --- Rhythm/onset/duration/tempo detection (issue #55) ---
+# All provisional pending empirical tuning against real playing, same
+# convention as chord mode's own constants above.
+ONSET_FLUX_THRESHOLD = 0.15      # spectral_flux() OR-condition added to NoteSmoother's is_onset test
+DURATION_DECAY_RATIO = 0.25      # current/peak magnitude ratio below which a note counts as "off" --
+                                  # deliberately reuses chroma.fold_bass()'s bass-confidence ratio
+                                  # value for consistency, not because the two thresholds must mean
+                                  # the same thing
+TEMPO_HISTORY_SECONDS = 8.0      # rolling novelty-history window TempoTracker autocorrelates over
+TEMPO_MIN_BPM = 40
+TEMPO_MAX_BPM = 240
+TEMPO_UPDATE_INTERVAL_HOPS = 20  # ~0.46s at BLOCK_SIZE=512/SAMPLE_RATE=22050 -- re-estimate tempo
+                                  # this often rather than every hop, amortizing the autocorrelation cost
+DEFAULT_TIME_SIGNATURE = "4/4"   # display-only (main.py/virtualnote.py) -- never auto-detected
+TAB_BARLINE_WIDTH = 1             # terminal characters per barline column -- narrower than a note
+                                   # column (TAB_COLUMN_WIDTH), so it reads as a divider, not data
