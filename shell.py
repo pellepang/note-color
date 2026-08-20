@@ -57,7 +57,7 @@ def _handle_menu_key(key, menu):
     return None
 
 
-def run_menu_loop(session, fps=None):
+def run_menu_loop(session, fps=None, perf_mode_override=None):
     """Shows the menu; on a tool being picked, runs it via run_session()
     against the shared `session`; on that tool returning "menu" (the '|'
     keybind), loops back to the menu with capture/analysis thread/
@@ -65,12 +65,19 @@ def run_menu_loop(session, fps=None):
     user quits from the menu itself (Ctrl+C with no tool running) or a
     tool returns "quit" (Ctrl+C / window-close-or-Esc from inside it) --
     either way, the caller (virtualnote.py) is expected to tear the
-    session down right after this returns."""
-    fps = fps or config.TERMINAL_FPS
-    dt = 1.0 / fps
+    session down right after this returns.
 
+    `fps`, if given, overrides the poll/render loop's cadence outright
+    (kept for callers/tests that want a fixed rate); otherwise each
+    MenuDisplay's own `fps` (30 full mode / 15 perf mode, issue #51) paces
+    the loop -- the animated donut's own designed frame rate, not the
+    unrelated config.TERMINAL_FPS every *tool* view polls at.
+    `perf_mode_override` ('full'/'perf'/None) is virtualnote's
+    --menu-perf-mode CLI flag, forwarded to MenuDisplay's own
+    config/CLI-override resolution (see menu_display._resolve_perf_mode)."""
     while True:
-        menu = MenuDisplay()
+        menu = MenuDisplay(perf_mode_override=perf_mode_override)
+        dt = 1.0 / (fps or menu.fps)
         keys = RawKeys()
         selection = None
         status = ""

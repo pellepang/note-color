@@ -99,12 +99,13 @@ into an implicit `None` as before — see Key design decisions.
 | `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
 | `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()`/`set_keybind()`/`set_note_hue_override()` (persist + write back to the TOML file — the last two back issue #43's settings screen). |
 | `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
-| `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); deliberately minimal, static ANSI list + highlight — issue #42 owns the real animated visual design and will replace `render()`'s internals, not the surrounding `move()`/`move_to()`/`current_view()` selection plumbing. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens: `settings`, `credits`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. `osc8_link()`/`_donation_line()` (issue #44) build the main screen's clickable author/donation callout. |
+| `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); `render()` draws issue #42's decided animated design (built in #51): `menu_animation`'s spinning donut fills a left-hand pane, with the title/donation-callout/tool-list/hints/status text overlaid in a fixed-width right-hand pane (`_layout()`, `_text_lines()`) — narrow terminals drop the donut and fall back to a centered text-only screen, same shape as the original #40 placeholder. `move()`/`move_to()`/`current_view()` selection plumbing is unchanged by any of this. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens: `settings`, `credits`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. `osc8_link()`/`_donation_line()` (issue #44) build the main screen's clickable author/donation callout. `_resolve_perf_mode()` picks full vs. perf donut rendering: an explicit override (virtualnote's `--menu-perf-mode` flag) beats `config.toml`'s `[preferences].menu_perf_mode` beats `menu_animation.detect_perf_mode()`'s real startup probe. |
+| `menu_animation.py` | Animation math for the menu screen's donut (issues #42/#51), ported from the throwaway prototype at `prototype/issue-42-menu-animation/{donut_fifths.py,autodetect.py}`: `render_frame()` — NumPy-vectorized torus point-projection (`_project()`) + a painter's-algorithm z-buffer via ascending-depth-sort fancy-indexing (no per-point Python loop) — re-skinned with the circle-of-fifths palette (`band_color()`/`FIFTHS_LABELS`), full mode shaded/lettered, perf mode flat/letterless/half-raster. `detect_perf_mode()`/`_decide_perf_mode()` — issue #46's auto-detect heuristic (core-count floor, then a real self-timed `render_frame()` probe against the full-mode frame budget), split into a real-timing wrapper and a pure decision function for testability. |
 | `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps and per-note hue overrides live, using `blessed` for field navigation and "press a key to capture this remap" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS`/`move()`/`keybind_value()`/`color_value()`/`is_valid_remap_key()`/`parse_hue_input()`/`apply_field_edit()`/`clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself is smoke-tested manually, same convention as every `run_terminal_*` loop. |
 | `credits_display.py` | `run_credits_screen()` — `virtualnote`'s static Credits screen (issue #44): author, Claude/AI-assistance credit, and third-party library attribution (`THIRD_PARTY_LIBRARIES`), raw ANSI (no editable state, so no need for `settings_display`'s `blessed` exception). `credits_lines()` is the pure, unit-tested text builder; the render/wait-for-any-keypress loop itself is smoke-tested manually. |
 | `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. `"settings"`/`"credits"` picks are special-cased via `_NON_SESSION_SCREENS` straight to `settings_display.run_settings_screen()`/`credits_display.run_credits_screen()` instead of `run_session()` (issues #43, #44) — neither touches audio, so both always return straight back to the menu. |
-| `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content). |
+| `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded; `--menu-perf-mode {auto,full,perf}`, top-level-only, issue #51's CLI override for the menu donut) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly. |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content), `test_menu_animation.py` (projection/shading helpers, `render_frame()` shape/smoke checks, the auto-detect decision function), `test_menu_display.py` (`_layout()`'s donut/text-pane column split, `_resolve_perf_mode()`'s override precedence, `_text_lines()`'s content). |
 
 ## Running it
 
@@ -124,17 +125,25 @@ virtualnote fill --source loopback                           # listen to system 
 `virtualnote` (on PATH via `~/.local/bin/virtualnote`, added to `~/.zshrc`'s
 PATH) is the one entry point for every tool this project offers (issue
 #40), retiring the old per-tool `colorize` bash dispatcher. Bare
-`virtualnote` opens an ANSI menu (`menu_display.py`) to pick a tool live —
-the four audio tools above, a `Settings` entry (issue #43) for editing
-keybind remaps and per-note color overrides live (see the Config file
-section below), and a `Credits` entry (issue #44) with full attribution;
-the menu screen itself also names the author and a clickable donation link
-(`config.AUTHOR_NAME`/`DONATION_URL`) right below the title, regardless of
-which entry is selected. `virtualnote <view> [flags]` goes straight to an
-audio tool instead, replicating every flag `colorize` used to forward
-(`settings`/`credits` have no direct-launch form, menu-only). Both paths
-run through the same long-lived process (`shell.py`), not a relaunch per
-tool — see Architecture.
+`virtualnote` opens an animated ANSI menu (`menu_display.py`, issue #42's
+design, built in #51) to pick a tool live — a spinning ASCII donut
+re-skinned with the circle-of-fifths palette (rim letters in full mode)
+beside the tool list: the four audio tools above, a `Settings` entry
+(issue #43) for editing keybind remaps and per-note color overrides live
+(see the Config file section below), and a `Credits` entry (issue #44)
+with full attribution; the menu screen itself also names the author and a
+clickable donation link (`config.AUTHOR_NAME`/`DONATION_URL`) right below
+the title, regardless of which entry is selected. A performance-mode
+fallback (half raster, coarser sampling, no letters, half framerate) is
+auto-detected at startup for weaker hardware; `--menu-perf-mode
+{auto,full,perf}` overrides it (as does `config.toml`'s
+`[preferences].menu_perf_mode`, checked when the flag is omitted). Narrow
+terminals drop the donut entirely and show a centered text-only list.
+`virtualnote <view> [flags]` goes straight to an audio tool instead,
+replicating every flag `colorize` used to forward (`settings`/`credits`
+have no direct-launch form, menu-only). Both paths run through the same
+long-lived process (`shell.py`), not a relaunch per tool — see
+Architecture.
 `main.py` itself is still directly runnable exactly as before
 (`.venv/bin/python main.py --terminal --view fill`, etc.) for anyone who
 wants the original single-tool-per-process entry point; it just has no menu
@@ -406,6 +415,58 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   placeholder Patreon URL — shipping now rather than blocking on a real
   account existing was #44's explicit call; swapping in the real URL later
   is a one-line change.
+- The menu donut's point-projection (issue #42's flagged, #51's fixed
+  problem) is vectorized with NumPy rather than kept as the prototype's
+  plain-Python double loop over theta/phi: the whole grid's trig/torus
+  algebra runs as array ops (`menu_animation._project()`), and the
+  painter's-algorithm z-buffer is built via an ascending-depth `argsort`
+  followed by fancy-index assignment (NumPy keeps the *last* write to a
+  repeated index, so sorting by depth ascending makes the nearest point
+  per cell win) instead of a per-point `if ooz > zbuffer[idx]` comparison
+  — same "push the hot loop into NumPy" approach `pitch_detect.py`/
+  `chroma.py`/`multipitch.py` already use for this codebase's FFT math.
+  Measured on this dev machine: ~80ms/frame (prototype, matching the
+  order of magnitude of #42's own ~149ms desktop measurement) down to
+  ~12ms/frame (vectorized, 80x40 terminal) — a ~7x speedup, comfortably
+  under the 33ms/30fps full-mode budget; ~9ms/frame measured even at a
+  much larger 200x50 terminal, since raster size (not the fixed
+  theta/phi sampling grid) barely moves the cost. Only the row/column
+  string-assembly loop (bounded by terminal size, already small) stays
+  plain Python — it wasn't the measured bottleneck.
+- The animated menu screen's layout (issue #51) puts the donut and the
+  title/donation/tool-list/hints/status text in two side-by-side panes
+  (`menu_display._layout()`) rather than overlaying text on top of the
+  donut raster or replacing it outright — simplest to get right with this
+  project's raw-ANSI/no-terminal-graphics-library constraint (no alpha
+  blending, so "overlay" would mean either fully clobbering donut cells
+  under the text or fiddly per-glyph transparency tracking), and keeps
+  the two independently redrawable: the donut pane is always fully
+  explicit content (every cell is a glyph or a space, no diffing needed)
+  written first, and the text pane's `\033[K`-then-write per line is
+  addressed strictly to its own columns, so neither redraw can clobber
+  the other. Below `config.MENU_MIN_DONUT_COLS` of leftover width the
+  donut is dropped rather than shrunk further — a corner of a donut too
+  small to read is worse than no donut, and the resulting text-only
+  fallback is exactly this screen's original #40 placeholder shape, not
+  a new code path to maintain.
+- The auto-detect heuristic's real-timing probe (`detect_perf_mode()`)
+  and its actual decision (`_decide_perf_mode()`) are two separate
+  functions, not one — mirrors this repo's existing "pure logic unit-
+  tested, real I/O/timing smoke-tested" convention (see `tests/`'s Files
+  entry): `_decide_perf_mode()` takes a cpu count and a probe average (or
+  `None`) as plain arguments and is fully deterministic, so the floor/
+  budget branches are unit-tested without spending real wall-clock time
+  or depending on the test machine's actual core count.
+- The menu's perf-mode override resolution order (issue #42's "config/CLI
+  override" requirement) is explicit CLI flag > `config.toml`'s
+  `[preferences].menu_perf_mode` > the real auto-detect probe
+  (`menu_display._resolve_perf_mode()`) — CLI wins because it's the most
+  explicit, most temporary signal (a one-off `--menu-perf-mode perf` to
+  work around a bad autodetect on unfamiliar hardware shouldn't require
+  editing a config file); `--menu-perf-mode auto` still exists specifically
+  so a CLI invocation can force auto-detection even when a config.toml
+  preference has pinned a mode, rather than "auto" only ever meaning "no
+  flag was passed."
 
 ## Known limitations / things learned
 

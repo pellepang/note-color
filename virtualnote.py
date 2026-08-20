@@ -50,11 +50,25 @@ def _add_common_flags(parser):
                               "for testing without playing anything out loud")
 
 
+def _add_menu_flags(parser):
+    """Only meaningful for the bare-menu screen (issue #42/#51's animated
+    donut) -- added to the top-level parser only, not per-subcommand,
+    since a direct `virtualnote <view>` launch may never even show the
+    menu. Default None (not 'auto') so an unset flag defers to
+    config.toml's [preferences].menu_perf_mode instead of silently
+    overriding it -- see menu_display._resolve_perf_mode."""
+    parser.add_argument("--menu-perf-mode", choices=["auto", "full", "perf"], default=None,
+                         help="force the animated menu's donut into full or perf (degraded) rendering "
+                              "instead of the auto-detected default; 'auto' explicitly re-enables "
+                              "auto-detection, overriding a config.toml [preferences].menu_perf_mode setting")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="virtualnote", description="Unified entry point for every note-color tool -- bare, opens a menu."
     )
     _add_common_flags(parser)
+    _add_menu_flags(parser)
     sub = parser.add_subparsers(dest="view")
 
     fill_p = sub.add_parser("fill", help="full-terminal color fill")
@@ -89,9 +103,10 @@ def main(argv=None):
     view = "wheel" if args.view == "circle" else args.view
 
     session = SessionState(args.color_scheme, args.sensitivity, args.source)
+    perf_mode_override = args.menu_perf_mode
     try:
         if view is None:
-            run_menu_loop(session)
+            run_menu_loop(session, perf_mode_override=perf_mode_override)
         else:
             try:
                 session.ensure_started()
@@ -109,7 +124,7 @@ def main(argv=None):
                 # A direct-to-tool launch still has the real menu behind
                 # it (unlike main.py standalone) -- '|' from here lands
                 # you there, same as bare `virtualnote` would have.
-                run_menu_loop(session)
+                run_menu_loop(session, perf_mode_override=perf_mode_override)
     finally:
         session.stop()
 

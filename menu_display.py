@@ -1,19 +1,28 @@
 """virtualnote's menu screen (issue #40): pick a tool, then go run it.
 
-Deliberately minimal -- a static, numbered list of tools with the current
-selection highlighted, raw ANSI, no animation. Issue #42 owns the actual
-animated visual design map #37 wants for this screen and will replace this
-module's render() internals wholesale; the surrounding selection plumbing
-(the tool list, the selected-index state, move()/move_to()/current_view())
-is issue #40's to define and is meant to stay stable across that rewrite --
-shell.py only ever calls move()/move_to()/current_view()/render()/quit(),
-never reaches into anything #42 would touch.
+render() draws issue #42's decided animated design (issue #51 built it):
+a spinning ASCII donut re-skinned with the app's circle-of-fifths palette
+(menu_animation.py owns the actual animation math/auto-detect heuristic)
+as a left-hand pane, with the title/donation-callout/tool-list/hints/
+status text overlaid in a fixed-width right-hand pane beside it -- see
+_layout()'s docstring for the split and menu_animation.py's module
+docstring for the animation itself. Narrow terminals (below
+config.MENU_MIN_DONUT_COLS of leftover width) drop the donut entirely and
+fall back to a centered text-only screen, same shape as this module's
+original #40 placeholder.
+
+The selection plumbing (the tool list, the selected-index state,
+move()/move_to()/current_view()) is issue #40's and is unchanged by any of
+this -- shell.py only ever calls move()/move_to()/current_view()/
+render()/quit(), never reaches into render()'s internals.
 """
 
 import shutil
 import sys
 
 import config
+import menu_animation
+from config_store import store
 
 # (view name passed to main.run_session, one-line description). Order here
 # is also menu order and digit-key order (1-indexed) -- see shell.py's
@@ -46,21 +55,96 @@ def osc8_link(text, url):
     return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
 
 
-def _donation_line(cols):
+def _donation_line(width):
     """The main menu screen's author + donation callout (issue #44) --
-    centered on `cols` using the *visible* text's width, since the OSC 8
+    centered on `width` using the *visible* text's width, since the OSC 8
     escape bytes wrapping the URL would otherwise throw off str.center()'s
     character count without changing what's actually drawn on screen."""
     prefix = f"by {config.AUTHOR_NAME}  --  please support on {config.DONATION_PLATFORM}: "
     visible = prefix + config.DONATION_URL
-    pad = max((cols - len(visible)) // 2, 0)
+    pad = max((width - len(visible)) // 2, 0)
     return " " * pad + prefix + osc8_link(config.DONATION_URL, config.DONATION_URL)
 
 
+def _layout(cols, rows):
+    """Pure column-split math (no ANSI/terminal I/O) for the animated menu
+    screen: a fixed-width text pane (title/donation/tool-list/hints/
+    status) pinned to the terminal's right edge, with the donut animation
+    filling the leftover columns to its left, separated by a 1-column gap.
+
+    Below config.MENU_MIN_DONUT_COLS of leftover width, the donut is
+    dropped entirely (donut_cols=0) rather than squeezed unreadably small,
+    and the text pane re-centers on the full terminal width instead of
+    staying pinned right -- the same centered-list look this screen had
+    before #51's animation, just as the narrow-terminal fallback now
+    rather than the only mode. `rows` isn't used by the split itself (the
+    donut is exactly as tall as the terminal either way) but is accepted
+    for symmetry with render_frame()'s signature and so callers don't need
+    to special-case it.
+    """
+    text_width = min(config.MENU_TEXT_PANE_WIDTH, max(cols, 1))
+    donut_cols = cols - text_width - 1  # 1-column gap between panes
+    if donut_cols < config.MENU_MIN_DONUT_COLS:
+        text_col = max((cols - text_width) // 2 + 1, 1)
+        return 0, text_col, text_width
+    return donut_cols, donut_cols + 2, text_width
+
+
+def _resolve_perf_mode(cols, rows, override=None):
+    """Resolution order for issue #42's "config/CLI override" requirement:
+    an explicit `override` ('full'/'perf', from virtualnote's
+    --menu-perf-mode flag) wins outright; otherwise config.toml's
+    [preferences].menu_perf_mode (default 'auto'); 'auto' at either level
+    falls through to menu_animation.detect_perf_mode()'s real startup
+    probe. Returns (perf: bool, reason: str)."""
+    choice = override or store.preference("menu_perf_mode", "auto")
+    if choice in ("full", "perf"):
+        return choice == "perf", f"menu_perf_mode={choice}"
+    return menu_animation.detect_perf_mode(cols, rows)
+
+
+def _text_lines(rows, text_width, selected, status):
+    """The text pane's content as a {terminal_row: content} map, pure and
+    instance-free (selected/status passed in) so it's unit-testable
+    without a MenuDisplay or a terminal. Vertical placement mirrors this
+    screen's pre-#51 layout exactly, just narrowed to `text_width` instead
+    of the full terminal width."""
+    title = "note-color"
+    top = max(rows // 2 - len(MENU_ITEMS) - 2, 1)
+    lines = {
+        top: title.center(text_width),
+        top + 1: _donation_line(text_width),
+    }
+    for i, (_view, desc) in enumerate(MENU_ITEMS):
+        row = top + 2 + i
+        marker = "> " if i == selected else "  "
+        line = f"{marker}{i + 1}. {desc}"
+        if i == selected:
+            line = f"\033[7m{line}\033[0m"  # reverse-video highlight
+        lines[row] = line
+    hint_row = top + 2 + len(MENU_ITEMS) + 1
+    lines[hint_row] = "Up/Down or 1-{}=select  Enter=go  Ctrl+C=quit".format(len(MENU_ITEMS))
+    lines[hint_row + 1] = status
+    return lines
+
+
 class MenuDisplay:
-    def __init__(self):
+    def __init__(self, perf_mode_override=None):
         self.selected = 0
         self._last_size = None
+        self.A, self.B = 1.0, 0.5  # donut rotation phase, advanced each render()
+
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        donut_cols, _, _ = _layout(size.columns, size.lines)
+        if donut_cols > 0:
+            self.perf, self._perf_reason = _resolve_perf_mode(donut_cols, size.lines, perf_mode_override)
+        else:
+            # No donut pane at this size -- nothing to probe; perf/fps
+            # still needs a value (used by shell.py to pace the loop) so
+            # default to the cheaper cadence rather than guessing.
+            self.perf, self._perf_reason = True, "no donut pane (narrow terminal)"
+        self.fps = config.MENU_FPS_PERF if self.perf else config.MENU_FPS_FULL
+
         sys.stdout.write("\033[?25l\033[2J")
         sys.stdout.flush()
 
@@ -83,25 +167,20 @@ class MenuDisplay:
         clear = "\033[2J" if size != self._last_size else ""
         self._last_size = size
 
-        title = "note-color"
-        top = max(rows // 2 - len(MENU_ITEMS) - 2, 1)
+        donut_cols, text_col, text_width = _layout(cols, rows)
+        out = [clear] if clear else []
 
-        out = [f"\033[{top};1H\033[K" + title.center(cols)]
-        out.append(f"\033[{top + 1};1H\033[K" + _donation_line(cols))
-        for i, (_view, desc) in enumerate(MENU_ITEMS):
-            row = top + 2 + i
-            marker = "> " if i == self.selected else "  "
-            line = f"{marker}{i + 1}. {desc}"
-            if i == self.selected:
-                line = f"\033[7m{line}\033[0m"  # reverse-video highlight
-            out.append(f"\033[{row};1H\033[K{line}")
+        if donut_cols > 0:
+            donut_lines = menu_animation.render_frame(donut_cols, rows, self.A, self.B, self.perf)
+            self.A += config.MENU_DONUT_SPIN_A_STEP
+            self.B += config.MENU_DONUT_SPIN_B_STEP
+            for i, line in enumerate(donut_lines):
+                out.append(f"\033[{i + 1};1H{line}")
 
-        hint = "Up/Down or 1-{}=select  Enter=go  Ctrl+C=quit".format(len(MENU_ITEMS))
-        hint_row = top + 2 + len(MENU_ITEMS) + 1
-        out.append(f"\033[{hint_row};1H\033[K{hint}")
-        status_row = hint_row + 1
-        out.append(f"\033[{status_row};1H\033[K{status}")
-        sys.stdout.write(clear + "".join(out))
+        for row, content in _text_lines(rows, text_width, self.selected, status).items():
+            out.append(f"\033[{row};{text_col}H\033[K{content}")
+
+        sys.stdout.write("".join(out))
         sys.stdout.flush()
 
     def quit(self):

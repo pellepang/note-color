@@ -113,3 +113,38 @@ DEFAULT_KEYBINDS = {
 AUTHOR_NAME = "Pelle"
 DONATION_PLATFORM = "Patreon"
 DONATION_URL = "https://patreon.com/notecolor"
+
+# --- Menu animation (issues #42/#51) ---
+# Spinning ASCII donut re-skinned with the circle-of-fifths palette, on
+# virtualnote's bare menu screen. Full mode's spacings/fps are the "show
+# off the app" default (#39); perf mode (half raster + coarser sampling +
+# no letters + half fps) is the auto-detected fallback for weaker
+# hardware -- see menu_animation.py.
+MENU_DONUT_FULL_THETA_SPACING = 0.07
+MENU_DONUT_FULL_PHI_SPACING = 0.02
+MENU_DONUT_PERF_THETA_SPACING = 0.10
+MENU_DONUT_PERF_PHI_SPACING = 0.03
+MENU_DONUT_PERF_BLOCK_WIDTH = 2   # perf mode: each computed cell prints this many terminal columns wide
+MENU_DONUT_SPIN_A_STEP = 0.04     # per-frame rotation increment, x-axis
+MENU_DONUT_SPIN_B_STEP = 0.02     # per-frame rotation increment, z-axis
+MENU_FPS_FULL = 30
+MENU_FPS_PERF = 15
+# Right-hand text overlay pane (title/donation/tool list/hints/status)
+# beside the donut -- issues #43/#44 added Settings/Credits/the donation
+# callout after #42's design was decided, so the animated screen needs a
+# legible home for all of it, not just the bare tool list #42 prototyped
+# against. Below MENU_MIN_DONUT_COLS of leftover width, the donut is
+# dropped entirely (text pane re-centers) rather than squeezed unreadably
+# small.
+MENU_TEXT_PANE_WIDTH = 46
+MENU_MIN_DONUT_COLS = 30
+# Auto-detect heuristic (issue #46's decision): a core-count floor skips
+# the startup probe outright on weak hardware; otherwise a few real,
+# off-screen render_frame() calls at the terminal's actual size are timed
+# against full mode's own frame budget. "auto" is overridable via
+# config.toml's [preferences].menu_perf_mode ("auto"/"full"/"perf") or
+# virtualnote's --menu-perf-mode flag, per #42's "config/CLI override for
+# cases the heuristic gets wrong."
+MENU_AUTODETECT_CPU_FLOOR = 2
+MENU_AUTODETECT_PROBE_FRAMES = 3
+MENU_AUTODETECT_FRAME_BUDGET = 1.0 / MENU_FPS_FULL
