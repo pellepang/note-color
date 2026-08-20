@@ -198,25 +198,35 @@ def render_frame(cols_term, rows, A, B, perf):
             band_codes[band] = f"\033[38;2;{r};{g};{b}m"
         return band_codes[band]
 
+    # block_w doesn't necessarily divide cols_term evenly (perf mode's
+    # block_w=2 leaves a 1-column remainder on any odd-width donut pane,
+    # e.g. the very common 80-column-terminal case) -- widening the last
+    # raster column to absorb that remainder keeps every row's *printed*
+    # width exactly cols_term, matching this function's own contract
+    # above. Full mode's block_w=1 always divides evenly, so this is a
+    # no-op there.
+    last_col_w = cols_term - (cols - 1) * block_w
+
     lines = []
     for y_row in range(rows):
         row_start = cols * y_row
         cells = []
         for x_col in range(cols):
             idx = row_start + x_col
+            w = last_col_w if x_col == cols - 1 else block_w
             if not filled[idx]:
-                cells.append((None, " " * block_w))
+                cells.append((None, " " * w))
                 continue
             band = int(band_of[idx])
             if idx in labels:
                 r, g, b = band_color(band)
                 letter = FIFTHS_LABELS[labels[idx]][0]
-                cells.append((f"\033[1m\033[38;2;255;255;255m\033[48;2;{r};{g};{b}m", letter * block_w))
+                cells.append((f"\033[1m\033[38;2;255;255;255m\033[48;2;{r};{g};{b}m", letter * w))
             elif perf:
-                cells.append((code_for(band), "@" * block_w))
+                cells.append((code_for(band), "@" * w))
             else:
                 ch = _SHADE_CHARS[int(shade_of[idx])]
-                cells.append((code_for(band), ch * block_w))
+                cells.append((code_for(band), ch * w))
         lines.append(render_row(cells, cols))
     return lines
 

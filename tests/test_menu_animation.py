@@ -100,6 +100,36 @@ def test_render_frame_perf_mode_never_emits_shading_variety():
     assert "." not in joined and "*" not in joined and "#" not in joined
 
 
+def _visible_width(line):
+    """Strips ANSI SGR escapes to get the actual printed column count."""
+    import re
+    return len(re.sub(r"\033\[[0-9;]*m", "", line))
+
+
+def test_render_frame_perf_mode_matches_requested_width_when_odd():
+    # Perf mode's block_w=2 raster cells don't evenly divide an odd
+    # cols_term (e.g. an 80-column terminal's 33-column leftover donut
+    # pane, per menu_display._layout) -- every row must still print
+    # exactly cols_term columns, not floor(cols_term / block_w) * block_w,
+    # or the donut pane falls short of the space menu_display allocated it
+    # and leftover/stale terminal content can show through the gap since
+    # donut rows aren't \033[K-cleared per cell.
+    for cols_term in (1, 31, 33, 47, 79):
+        lines = render_frame(cols_term, 5, A=1.0, B=0.5, perf=True)
+        for line in lines:
+            assert _visible_width(line) == cols_term
+
+
+def test_render_frame_full_mode_matches_requested_width_when_odd():
+    # Full mode's block_w=1 always divides evenly, but assert the
+    # contract explicitly so a future full-mode block_w change is caught
+    # too.
+    for cols_term in (1, 31, 33, 47, 79):
+        lines = render_frame(cols_term, 5, A=1.0, B=0.5, perf=False)
+        for line in lines:
+            assert _visible_width(line) == cols_term
+
+
 # --- auto-detect heuristic's decision function ------------------------------
 
 def test_decide_perf_mode_weak_cpu_skips_probe():
