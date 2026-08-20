@@ -115,7 +115,7 @@ def is_valid_remap_key(ch):
     keys above -- anything else (an empty read, a control character, '|',
     'h'/'H') is rejected and the capture prompt just stays open, the field
     left unchanged."""
-    if not (isinstance(ch, str) and len(ch) == 1 and (ch == " " or ch.isprintable())):
+    if not (isinstance(ch, str) and len(ch) == 1 and ch.isprintable()):
         return False
     return ch.lower() not in _RESERVED_KEYS
 
@@ -169,9 +169,8 @@ def _render(term, selected, message):
         lines.append(_highlight(term, row, i == selected))
     lines.append("")
     lines.append(term.underline("Note colors (hue override, degrees)"))
-    for offset in range(len(NOTE_NAMES)):
-        pitch_class = offset
-        index = len(KEYBIND_ACTIONS) + offset
+    for pitch_class in range(len(NOTE_NAMES)):
+        index = len(KEYBIND_ACTIONS) + pitch_class
         dot = term.color_rgb(*color_swatch_rgb(pitch_class))("●") if term.does_styling else "●"
         row = f"  {dot} {color_label(pitch_class):<4s} {color_value(pitch_class)}"
         lines.append(_highlight(term, row, index == selected))

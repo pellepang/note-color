@@ -17,6 +17,17 @@ def fifths_index(pitch_class):
     return (pitch_class * 7) % 12
 
 
+def hue_for_step(step):
+    """Hue (degrees) for a step 0..11 around a 12-tone wheel -- `step` is
+    either a chromatic pitch_class or a fifths-order index (fifths_index()'s
+    output), whichever convention the caller is already using; this is just
+    the even 30-degree spacing plus config.HUE_OFFSET_DEG, shared by
+    note_to_hsl() below and any view that colors a fifths-order band/wedge
+    directly (menu_animation.py's donut) rather than starting from a
+    chromatic pitch_class."""
+    return (step * 30 + config.HUE_OFFSET_DEG) % 360
+
+
 def note_to_hsl(pitch_class, octave, scheme="chromatic", hue_override=None):
     """`hue_override` (degrees, issue #41's per-note [colors] overrides)
     replaces the scheme-derived hue outright when given; saturation and
@@ -25,7 +36,7 @@ def note_to_hsl(pitch_class, octave, scheme="chromatic", hue_override=None):
         hue = hue_override % 360
     else:
         step = fifths_index(pitch_class) if scheme == "fifths" else pitch_class
-        hue = (step * 30 + config.HUE_OFFSET_DEG) % 360
+        hue = hue_for_step(step)
     octv = max(config.MIN_OCTAVE, min(config.MAX_OCTAVE, octave))
     span = config.MAX_OCTAVE - config.MIN_OCTAVE
     t = (octv - config.MIN_OCTAVE) / span if span else 0.0

@@ -137,12 +137,12 @@ class MenuDisplay:
         size = shutil.get_terminal_size(fallback=(80, 24))
         donut_cols, _, _ = _layout(size.columns, size.lines)
         if donut_cols > 0:
-            self.perf, self._perf_reason = _resolve_perf_mode(donut_cols, size.lines, perf_mode_override)
+            self.perf, _reason = _resolve_perf_mode(donut_cols, size.lines, perf_mode_override)
         else:
             # No donut pane at this size -- nothing to probe; perf/fps
             # still needs a value (used by shell.py to pace the loop) so
             # default to the cheaper cadence rather than guessing.
-            self.perf, self._perf_reason = True, "no donut pane (narrow terminal)"
+            self.perf = True
         self.fps = config.MENU_FPS_PERF if self.perf else config.MENU_FPS_FULL
 
         sys.stdout.write("\033[?25l\033[2J")

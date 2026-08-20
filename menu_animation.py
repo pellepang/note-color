@@ -24,6 +24,7 @@ interactive per-frame loop -- smoke-tested manually, like every other
 run_terminal_*/render() path in this app.
 """
 
+import functools
 import math
 import os
 import time
@@ -31,7 +32,7 @@ import time
 import numpy as np
 
 import config
-from color_map import hsl_to_rgb255, NOTE_NAMES_FIFTHS
+from color_map import hsl_to_rgb255, hue_for_step, NOTE_NAMES_FIFTHS
 
 # Classic "spinning donut" torus/projection constants (the algorithm this
 # is built on, Andy Sloane's ASCII donut) -- fixed geometry of the shape
@@ -51,14 +52,26 @@ _SHADE_CHARS = ["." , "*", "#", "@"]
 
 def band_for_phi(phi):
     """Which of the 12 circle-of-fifths bands a given phi angle (radians)
-    falls in -- pure modular arithmetic, used both per-point (labels) and
-    vectorized (main raster, via the same formula inlined in
-    render_frame)."""
+    falls in -- pure modular arithmetic. Not currently called from
+    render_frame() itself (the vectorized raster path re-derives the same
+    formula inline since it must operate on a whole array at once, and the
+    per-point label loop already has its band as its own loop index) --
+    kept as the single documented/tested source of truth for the formula
+    either path would reach for."""
     return int((phi % (2 * math.pi)) / (2 * math.pi) * 12) % 12
 
 
+@functools.lru_cache(maxsize=12)
 def band_color(band):
-    hue = (band * 30 + config.HUE_OFFSET_DEG) % 360
+    """RGB for one of the 12 circle-of-fifths bands -- `band` is already a
+    fifths-order index (0=C, clockwise), the same convention
+    color_map.hue_for_step() expects, so no extra fifths_index() detour is
+    needed here (unlike note_to_hsl(), which starts from a chromatic
+    pitch_class). Fixed mid-lightness (not octave-driven -- this donut has
+    no octave concept). Cached: `band` and config's hue/lightness constants
+    are both fixed for the process's life, and this is recomputed by every
+    filled raster cell of every rendered frame."""
+    hue = hue_for_step(band)
     lo, hi = config.BASE_LIGHTNESS_RANGE
     return hsl_to_rgb255(hue, config.BASE_SATURATION, min(lo + (hi - lo) * 0.5, hi))
 
@@ -88,6 +101,25 @@ def render_row(cells, cols):
             run_chars.append(ch)
     flush()
     return "".join(parts)
+
+
+@functools.lru_cache(maxsize=2)
+def _theta_phi_grid(theta_spacing, phi_spacing):
+    """The (Theta, Phi) meshgrid depends only on the fixed per-mode spacing
+    constants, never on rotation (A/B) or terminal size -- so it's the same
+    two arrays every full-mode frame and every perf-mode frame for the
+    process's whole life. Cached (at most 2 entries, one per perf mode)
+    instead of rebuilt with np.meshgrid() on every one of the ~15-30
+    frames/sec render_frame() is called at."""
+    theta_vals = np.arange(0.0, 2 * math.pi, theta_spacing)
+    phi_vals = np.arange(0.0, 2 * math.pi, phi_spacing)
+    return np.meshgrid(theta_vals, phi_vals, indexing="ij")
+
+
+@functools.lru_cache(maxsize=12)
+def _ansi_code_for_band(band):
+    r, g, b = band_color(band)
+    return f"\033[38;2;{r};{g};{b}m"
 
 
 def _project(theta, phi, A, B, K1):
@@ -141,9 +173,7 @@ def render_frame(cols_term, rows, A, B, perf):
     cols = max(1, cols_term // block_w)
     K1 = cols * K2 * 3 / (8 * (R1 + R2))
 
-    theta_vals = np.arange(0.0, 2 * math.pi, theta_spacing)
-    phi_vals = np.arange(0.0, 2 * math.pi, phi_spacing)
-    Theta, Phi = np.meshgrid(theta_vals, phi_vals, indexing="ij")
+    Theta, Phi = _theta_phi_grid(theta_spacing, phi_spacing)
 
     x, y, ooz, L = _project(Theta, Phi, A, B, K1)
     xp = (cols / 2 + K1 * ooz * x).astype(np.int64)
@@ -190,14 +220,6 @@ def render_frame(cols_term, rows, A, B, perf):
                 if oozi >= zbuffer[idxi] * 0.97:
                     labels[idxi] = i
 
-    band_codes = {}
-
-    def code_for(band):
-        if band not in band_codes:
-            r, g, b = band_color(band)
-            band_codes[band] = f"\033[38;2;{r};{g};{b}m"
-        return band_codes[band]
-
     # block_w doesn't necessarily divide cols_term evenly (perf mode's
     # block_w=2 leaves a 1-column remainder on any odd-width donut pane,
     # e.g. the very common 80-column-terminal case) -- widening the last
@@ -223,10 +245,10 @@ def render_frame(cols_term, rows, A, B, perf):
                 letter = FIFTHS_LABELS[labels[idx]][0]
                 cells.append((f"\033[1m\033[38;2;255;255;255m\033[48;2;{r};{g};{b}m", letter * w))
             elif perf:
-                cells.append((code_for(band), "@" * w))
+                cells.append((_ansi_code_for_band(band), "@" * w))
             else:
                 ch = _SHADE_CHARS[int(shade_of[idx])]
-                cells.append((code_for(band), ch * w))
+                cells.append((_ansi_code_for_band(band), ch * w))
         lines.append(render_row(cells, cols))
     return lines
 
