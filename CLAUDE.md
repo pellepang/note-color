@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-142 tests), and detection has been confirmed with a real speaker→mic
+171 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -90,7 +90,7 @@ into an implicit `None` as before — see Key design decisions.
 | `chord_templates.py` | ~360-template dictionary (30 qualities × 12 roots) + `match()` — cosine-similarity chord recognition, bass-chroma-gated slash/inversion naming and rotational-tie-breaking. |
 | `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence. |
 | `chord_smoother.py` | `ChordSmoother` — mirrors `NoteSmoother`'s shape for chord mode: chroma rolling-average + chord-name debounce, plus asymmetric attack/release hysteresis per note-stack slot. |
-| `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `NOTE_NAMES`, `NOTE_NAMES_FIFTHS`. |
+| `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `hue_for_step()` (the shared 30-degrees-per-step hue formula `note_to_hsl()` and `menu_animation.band_color()` both build on), `NOTE_NAMES`, `NOTE_NAMES_FIFTHS`. |
 | `staff_map.py` | `staff_row()`, `ledger_rows()`, `row_note_name()` (general row→letter, every line/space row) — grand-staff placement, used only by `tab` view. |
 | `animation.py` | `ColorAnimator` — crossfade + onset pulse. Used by GUI, terminal-fill, and (per-note-keyed) chord-mode fill bands. |
 | `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). Chord mode is out of scope for the GUI (no live-hotkey mechanism). |
@@ -244,22 +244,27 @@ reported inline there instead of crashing.
 An optional TOML file at `$XDG_CONFIG_HOME/note-color/config.toml`
 (falling back to `~/.config/note-color/config.toml`) additively overrides
 `config.py`'s defaults — absent, empty, or malformed reproduces today's
-exact behavior. Covers two things today, both hot-reloaded live (edit the
+exact behavior. Covers three things today, all hot-reloaded live (edit the
 file while the app is running, no restart needed):
 
 - `[keybinds]` — remap any of the five terminal hotkeys (`source_toggle`,
   `chord_mode_toggle`, `notehead_style_toggle`, `legend_toggle`,
   `freeze_toggle`) to a different single character, e.g.
   `source_toggle = "x"`. The status line's hotkey hints (`(m)`, `(p)`,
-  etc.) reflect the remap.
+  etc.) reflect the remap. Editable live from the menu's Settings screen
+  (below), or by hand.
 - `[colors]` — override a note's hue (degrees, 0–360) by name, either
   sharp or flat spelling, e.g. `C = 200` or `"F#" = 45`. Saturation and
-  octave-driven lightness are untouched by the override.
-
-`[preferences]` is a reserved, currently-unused table for future
-quality-of-life settings (map #37/#40); see `config_store.py`'s
-docstring for the full schema and `docs/DECISIONS.md` for why the schema
-stops here for now.
+  octave-driven lightness are untouched by the override. Also editable
+  from the Settings screen.
+- `[preferences]` — free-form quality-of-life settings, hand-edit only (no
+  screen owns this table); today's one wired-up key is
+  `menu_perf_mode = "auto"/"full"/"perf"` (issue #51's menu-donut override
+  — see `menu_display._resolve_perf_mode()`). The rest of the table is
+  still reserved for future settings (e.g. #40's still-unwired global `H`
+  keybind-legend on/off persistence); see `config_store.py`'s docstring
+  for the full schema and `docs/DECISIONS.md` for why the schema stops
+  here for now.
 
 **Settings screen (issue #43).** `virtualnote`'s menu has a `Settings`
 entry (same tier as any tool) that opens an interactive editor

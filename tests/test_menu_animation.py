@@ -5,9 +5,12 @@ see the issue for the actual before/after numbers). Per this repo's test
 convention, the interactive per-frame loop and any real terminal I/O are
 smoke-tested manually, not driven by pytest."""
 
+import math
+
 import config
 from menu_animation import (
     band_color,
+    band_for_phi,
     render_row,
     render_frame,
     _decide_perf_mode,
@@ -15,7 +18,18 @@ from menu_animation import (
 )
 
 
-# --- band_color --------------------------------------------------------
+# --- band_for_phi / band_color ---------------------------------------------
+
+def test_band_for_phi_covers_all_twelve_bands_evenly():
+    for i in range(12):
+        phi = (i + 0.5) * (2 * math.pi / 12)
+        assert band_for_phi(phi) == i
+
+
+def test_band_for_phi_wraps_negative_and_over_two_pi():
+    assert band_for_phi(-0.01) == band_for_phi(2 * math.pi - 0.01)
+    assert band_for_phi(2 * math.pi + 0.1) == band_for_phi(0.1)
+
 
 def test_band_color_returns_valid_rgb_for_every_band():
     for band in range(12):

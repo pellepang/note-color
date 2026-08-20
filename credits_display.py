@@ -84,14 +84,14 @@ def run_credits_screen():
     graceful-degradation rationale as main.RawKeys."""
     from main import RawKeys
 
-    donation_link = f"please support on {config.DONATION_PLATFORM}: " + \
+    donation_line = f"please support on {config.DONATION_PLATFORM}: " + \
         osc8_link(config.DONATION_URL, config.DONATION_URL)
 
     sys.stdout.write("\033[?25l")
     sys.stdout.flush()
     keys = RawKeys()
     try:
-        _render(donation_link)
+        _render(donation_line)
         if not keys.active:
             return
         while keys.poll() is None:

@@ -28,10 +28,16 @@ Schema (all tables optional):
     "F#" = 45
 
     [preferences]
-    # Free-form booleans/numbers/strings for other quality-of-life
-    # settings (e.g. #40's future global 'H' keybind-legend on/off state,
-    # under key "keybind_legend_on") -- this ticket only owns the
-    # load/persist mechanics, not any particular preference's UI.
+    # Free-form booleans/numbers/strings for quality-of-life settings, no
+    # dedicated editor screen (unlike [keybinds]/[colors] -- hand-edit
+    # only). One key is wired up today:
+    menu_perf_mode = "auto"
+    # "auto" (default) / "full" / "perf" -- issue #51's menu-donut
+    # render-mode override; see menu_display._resolve_perf_mode(). The
+    # rest of the table stays reserved for future settings this ticket
+    # only owns the load/persist mechanics for, not any particular one's
+    # UI (e.g. #40's still-unwired global 'H' keybind-legend on/off
+    # state, under key "keybind_legend_on").
 """
 
 import os
