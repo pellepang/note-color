@@ -90,17 +90,38 @@ def _layout(cols, rows):
     return donut_cols, donut_cols + 2, text_width
 
 
+# shell.py's run_menu_loop() constructs a fresh MenuDisplay on every '|'
+# back-to-menu round trip (not just once at process start), so without this
+# cache the 'auto' path's real timing probe (menu_animation.detect_perf_mode
+# -- MENU_AUTODETECT_PROBE_FRAMES real frame renders) would re-run on every
+# single trip back to the menu, silently working against the "instant
+# transition, no relaunch latency" architecture goal '|' exists for (see
+# CLAUDE.md's SessionState docstring/Architecture section). Keyed on
+# (cols, rows) only -- cpu_count is constant for the process's life, and a
+# genuine resize legitimately deserves a fresh probe at the new size, same
+# spirit as this app's existing "terminal views clear on detected resize"
+# behavior. An explicit override ('full'/'perf', from --menu-perf-mode or
+# config.toml) never touches the probe at all, so it's already free and
+# isn't cached here.
+_perf_probe_cache = {}
+
+
 def _resolve_perf_mode(cols, rows, override=None):
     """Resolution order for issue #42's "config/CLI override" requirement:
     an explicit `override` ('full'/'perf', from virtualnote's
     --menu-perf-mode flag) wins outright; otherwise config.toml's
     [preferences].menu_perf_mode (default 'auto'); 'auto' at either level
     falls through to menu_animation.detect_perf_mode()'s real startup
-    probe. Returns (perf: bool, reason: str)."""
+    probe, cached per terminal size (see `_perf_probe_cache` above) so it
+    only actually runs once per size seen this process. Returns
+    (perf: bool, reason: str)."""
     choice = override or store.preference("menu_perf_mode", "auto")
     if choice in ("full", "perf"):
         return choice == "perf", f"menu_perf_mode={choice}"
-    return menu_animation.detect_perf_mode(cols, rows)
+    key = (cols, rows)
+    if key not in _perf_probe_cache:
+        _perf_probe_cache[key] = menu_animation.detect_perf_mode(cols, rows)
+    return _perf_probe_cache[key]
 
 
 def _text_lines(rows, text_width, selected, status):

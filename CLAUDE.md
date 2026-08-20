@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-171 tests), and detection has been confirmed with a real speaker→mic
+173 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -472,6 +472,28 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   so a CLI invocation can force auto-detection even when a config.toml
   preference has pinned a mode, rather than "auto" only ever meaning "no
   flag was passed."
+- `_resolve_perf_mode()`'s auto-probe result is cached per `(cols, rows)`
+  in a module-level dict (`menu_display._perf_probe_cache`) — without it,
+  `shell.py`'s `run_menu_loop()` building a fresh `MenuDisplay` on every
+  `|` back-to-menu round trip would re-run `detect_perf_mode()`'s real
+  frame-timing probe every single time, quietly working against the
+  "instant transition, no relaunch latency" reason `|` exists at all (see
+  Architecture). A resize still gets a fresh probe at the new size
+  (different cache key) — only a repeat visit at an already-measured size
+  is free. An explicit override (CLI flag or config.toml) never touches
+  the probe or the cache, since it's already free.
+- Settings/Credits (issues #43/#44) don't return a `"menu"`/`"quit"`
+  sentinel the way every `run_terminal_*` view does — `shell.py`'s
+  `_NON_SESSION_SCREENS` dispatch always loops back to the menu regardless
+  of their return value, since neither has any other state to distinguish.
+  Ctrl+C during either still needs to quit the whole app like everywhere
+  else, though: both screens' raw-keyboard mode (blessed's `cbreak()` for
+  Settings, `main.RawKeys` for Credits) leaves SIGINT enabled exactly like
+  every other terminal view, so a bare `KeyboardInterrupt` does reach
+  `shell.py` — just outside the menu-polling loop's own `try/except`,
+  which only wraps the menu screen's poll loop, not this dispatch. Caught
+  with its own explicit `try/except KeyboardInterrupt: return` around the
+  `_NON_SESSION_SCREENS` call instead.
 
 ## Known limitations / things learned
 

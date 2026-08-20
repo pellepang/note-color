@@ -5,9 +5,23 @@ Per this repo's convention, MenuDisplay's selection-state API is covered
 in test_shell.py (unchanged by #51) and the interactive render() loop
 itself is smoke-tested manually, not here."""
 
+import pytest
+
 import config
 import menu_display
 from menu_display import MENU_ITEMS, _layout, _resolve_perf_mode, _text_lines
+
+
+@pytest.fixture(autouse=True)
+def clear_perf_probe_cache():
+    """_resolve_perf_mode's per-(cols, rows) auto-probe cache is a plain
+    module-level dict shared across the whole test session -- without
+    clearing it, whichever test happens to run first for a given size
+    would silently poison every later test at that same size, since the
+    cache doesn't know it's being fed stubs instead of the real probe."""
+    menu_display._perf_probe_cache.clear()
+    yield
+    menu_display._perf_probe_cache.clear()
 
 
 # --- _layout -----------------------------------------------------------
@@ -64,6 +78,39 @@ def test_resolve_perf_mode_auto_calls_real_autodetect(monkeypatch):
     perf, reason = _resolve_perf_mode(60, 30, override=None)
     assert perf is False
     assert reason == "stubbed"
+
+
+def test_resolve_perf_mode_auto_probe_is_cached_per_size(monkeypatch):
+    # shell.py builds a fresh MenuDisplay on every '|' back-to-menu round
+    # trip -- without caching, the real probe (several actual frame
+    # renders) would re-run every single time, working against the
+    # "instant transition" back-to-menu is supposed to give.
+    monkeypatch.setattr(menu_display.store, "preference", lambda name, default: "auto")
+    calls = []
+
+    def fake_probe(cols, rows):
+        calls.append((cols, rows))
+        return False, "stubbed"
+
+    monkeypatch.setattr(menu_display.menu_animation, "detect_perf_mode", fake_probe)
+
+    _resolve_perf_mode(60, 30, override=None)
+    _resolve_perf_mode(60, 30, override=None)
+    assert calls == [(60, 30)]  # second call at the same size hit the cache
+
+    _resolve_perf_mode(80, 24, override=None)
+    assert calls == [(60, 30), (80, 24)]  # a different size still probes fresh
+
+
+def test_resolve_perf_mode_override_never_touches_the_cache(monkeypatch):
+    monkeypatch.setattr(menu_display.store, "preference", lambda name, default: "auto")
+    calls = []
+    monkeypatch.setattr(menu_display.menu_animation, "detect_perf_mode",
+                         lambda cols, rows: calls.append((cols, rows)) or (False, "stubbed"))
+
+    _resolve_perf_mode(60, 30, override="full")  # bypasses the probe entirely
+    _resolve_perf_mode(60, 30, override=None)     # auto at the same size -- must still probe for real
+    assert calls == [(60, 30)]
 
 
 # --- _text_lines -----------------------------------------------------------

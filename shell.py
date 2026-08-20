@@ -99,8 +99,17 @@ def run_menu_loop(session, fps=None, perf_mode_override=None):
             # (issues #43, #44) -- neither touches audio, so neither ever
             # calls session.ensure_started(), unlike every real tool. Both
             # always return straight to the menu; there's no "quit" out of
-            # either.
-            _NON_SESSION_SCREENS[selection]()
+            # either via their own return value (unlike run_session's
+            # "menu"/"quit" sentinel) -- but Ctrl+C during either must still
+            # quit the whole app, same as every other view, so it's caught
+            # here explicitly rather than left to propagate out of
+            # run_menu_loop() uncaught (both screens' own cbreak-mode raw
+            # keyboard handling leaves SIGINT/KeyboardInterrupt enabled,
+            # same as main.RawKeys elsewhere in this app).
+            try:
+                _NON_SESSION_SCREENS[selection]()
+            except KeyboardInterrupt:
+                return
             continue
 
         try:
