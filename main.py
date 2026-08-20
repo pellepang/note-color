@@ -99,6 +99,15 @@ class RawKeys:
             self._old_settings = termios.tcgetattr(sys.stdin)
             tty.setcbreak(sys.stdin.fileno())
 
+    @property
+    def active(self):
+        """True once a real TTY was found and raw mode entered -- lets a
+        caller that *requires* a keypress to proceed (unlike every
+        run_terminal_* loop, which just keeps rendering regardless) avoid
+        blocking forever on poll(), which always returns None when this is
+        False."""
+        return self._active
+
     _ARROW_BY_FINAL_BYTE = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}
 
     def poll(self):

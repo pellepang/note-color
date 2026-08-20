@@ -13,6 +13,8 @@ never reaches into anything #42 would touch.
 import shutil
 import sys
 
+import config
+
 # (view name passed to main.run_session, one-line description). Order here
 # is also menu order and digit-key order (1-indexed) -- see shell.py's
 # _handle_menu_key.
@@ -23,7 +25,7 @@ TOOLS = [
     ("gui", "GUI -- native color window"),
 ]
 
-# TOOLS plus the non-audio screens (issue #43's Settings; #44's future
+# TOOLS plus the non-audio screens (issue #43's Settings, issue #44's
 # Credits) that live in the same menu but don't go through
 # main.run_session -- shell.py special-cases these view names instead of
 # dispatching them there. Selection/render/digit-jump all operate on this
@@ -31,7 +33,28 @@ TOOLS = [
 # while TOOLS itself stays exactly the set run_session knows how to launch.
 MENU_ITEMS = TOOLS + [
     ("settings", "Settings -- keybinds & note colors"),
+    ("credits", "Credits -- author & attribution"),
 ]
+
+
+def osc8_link(text, url):
+    """Wraps `text` in an OSC 8 terminal hyperlink escape sequence pointing
+    at `url` -- genuinely clickable in terminals that support it (kitty,
+    iTerm2, wezterm, gnome-terminal, etc.), and degrades to plain `text`
+    everywhere else with no separate fallback branch needed (#37/#39's
+    settled approach for the donation callout)."""
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
+def _donation_line(cols):
+    """The main menu screen's author + donation callout (issue #44) --
+    centered on `cols` using the *visible* text's width, since the OSC 8
+    escape bytes wrapping the URL would otherwise throw off str.center()'s
+    character count without changing what's actually drawn on screen."""
+    prefix = f"by {config.AUTHOR_NAME}  --  please support on {config.DONATION_PLATFORM}: "
+    visible = prefix + config.DONATION_URL
+    pad = max((cols - len(visible)) // 2, 0)
+    return " " * pad + prefix + osc8_link(config.DONATION_URL, config.DONATION_URL)
 
 
 class MenuDisplay:
@@ -64,7 +87,7 @@ class MenuDisplay:
         top = max(rows // 2 - len(MENU_ITEMS) - 2, 1)
 
         out = [f"\033[{top};1H\033[K" + title.center(cols)]
-        out.append(f"\033[{top + 1};1H\033[K")
+        out.append(f"\033[{top + 1};1H\033[K" + _donation_line(cols))
         for i, (_view, desc) in enumerate(MENU_ITEMS):
             row = top + 2 + i
             marker = "> " if i == self.selected else "  "

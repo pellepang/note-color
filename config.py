@@ -103,3 +103,13 @@ DEFAULT_KEYBINDS = {
     "legend_toggle": "l",
     "freeze_toggle": " ",
 }
+
+# --- Credits & donation (issue #44) ---
+# Author callout shown on the menu screen itself and, in full, on the
+# separate Credits screen (credits_display.py). DONATION_URL is a
+# placeholder -- #44's standing decision was to ship the screen now rather
+# than block on a Patreon account existing; swapping in the real URL once
+# one does is a one-line fill-in, not a reason this was withheld.
+AUTHOR_NAME = "Pelle"
+DONATION_PLATFORM = "Patreon"
+DONATION_URL = "https://patreon.com/notecolor"

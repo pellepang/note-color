@@ -23,6 +23,14 @@ import config
 from main import RawKeys, run_session
 from menu_display import MenuDisplay, MENU_ITEMS
 from settings_display import run_settings_screen
+from credits_display import run_credits_screen
+
+# Menu entries handled directly by this module instead of main.run_session
+# -- neither touches audio/SessionState (issues #43, #44).
+_NON_SESSION_SCREENS = {
+    "settings": run_settings_screen,
+    "credits": run_credits_screen,
+}
 
 
 def _handle_menu_key(key, menu):
@@ -79,12 +87,13 @@ def run_menu_loop(session, fps=None):
         keys.restore()
         menu.quit()
 
-        if selection == "settings":
-            # Settings is a menu entry, not a run_session tool (issue #43)
-            # -- it doesn't touch audio, so it never calls
-            # session.ensure_started(), unlike every real tool. Always
-            # returns to the menu; there's no "quit" out of it.
-            run_settings_screen()
+        if selection in _NON_SESSION_SCREENS:
+            # Settings/Credits are menu entries, not run_session tools
+            # (issues #43, #44) -- neither touches audio, so neither ever
+            # calls session.ensure_started(), unlike every real tool. Both
+            # always return straight to the menu; there's no "quit" out of
+            # either.
+            _NON_SESSION_SCREENS[selection]()
             continue
 
         try:

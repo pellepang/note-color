@@ -9,8 +9,9 @@ import argparse
 
 import pytest
 
+import config
 from main import _handle_back_to_menu_key, _handle_help_legend_key, _legend_line
-from menu_display import MenuDisplay, MENU_ITEMS, TOOLS
+from menu_display import MenuDisplay, MENU_ITEMS, TOOLS, osc8_link, _donation_line
 from shell import _handle_menu_key
 from virtualnote import build_parser
 
@@ -51,11 +52,12 @@ def test_menu_display_starts_at_first_tool():
     assert menu.current_view() == TOOLS[0][0]
 
 
-def test_menu_items_includes_settings_after_every_tool():
-    # Settings is reachable from the menu at the same tier as any tool
-    # (#43) but isn't itself a run_session-launchable tool.
+def test_menu_items_includes_settings_and_credits_after_every_tool():
+    # Settings and Credits are reachable from the menu at the same tier as
+    # any tool (#43, #44) but neither is a run_session-launchable tool.
     assert MENU_ITEMS[:len(TOOLS)] == TOOLS
     assert MENU_ITEMS[len(TOOLS)][0] == "settings"
+    assert MENU_ITEMS[len(TOOLS) + 1][0] == "credits"
 
 
 def test_menu_display_move_wraps_both_directions():
@@ -77,6 +79,28 @@ def test_menu_display_move_to_out_of_range_is_ignored():
     assert menu.selected == 2  # unchanged -- out of range
     menu.move_to(-1)
     assert menu.selected == 2  # unchanged -- out of range
+
+
+# --- menu_display.py: donation callout (issue #44) -------------------------
+
+def test_osc8_link_wraps_text_with_escape_codes():
+    link = osc8_link("click me", "https://example.com")
+    assert link.startswith("\033]8;;https://example.com\033\\click me")
+    assert link.endswith("\033]8;;\033\\")
+
+
+def test_donation_line_names_author_and_platform():
+    line = _donation_line(120)
+    assert config.AUTHOR_NAME in line
+    assert config.DONATION_PLATFORM in line
+    assert config.DONATION_URL in line
+
+
+def test_donation_line_never_negative_pads_on_narrow_terminals():
+    # Shouldn't raise or produce a negative amount of leading whitespace
+    # when the terminal is narrower than the visible text.
+    line = _donation_line(1)
+    assert config.DONATION_URL in line
 
 
 # --- shell.py: menu key dispatch -------------------------------------------
@@ -107,6 +131,13 @@ def test_menu_key_digit_selects_settings_entry():
     selection = _handle_menu_key(str(len(TOOLS) + 1), menu)
     assert selection == "settings"
     assert menu.selected == len(TOOLS)
+
+
+def test_menu_key_digit_selects_credits_entry():
+    menu = MenuDisplay()
+    selection = _handle_menu_key(str(len(TOOLS) + 2), menu)
+    assert selection == "credits"
+    assert menu.selected == len(TOOLS) + 1
 
 
 def test_menu_key_digit_out_of_range_is_ignored():

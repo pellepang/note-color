@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-134 tests), and detection has been confirmed with a real speaker→mic
+142 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -99,11 +99,12 @@ into an implicit `None` as before — see Key design decisions.
 | `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
 | `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()`/`set_keybind()`/`set_note_hue_override()` (persist + write back to the TOML file — the last two back issue #43's settings screen). |
 | `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
-| `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); deliberately minimal, static ANSI list + highlight — issue #42 owns the real animated visual design and will replace `render()`'s internals, not the surrounding `move()`/`move_to()`/`current_view()` selection plumbing. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens like `settings`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. |
+| `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); deliberately minimal, static ANSI list + highlight — issue #42 owns the real animated visual design and will replace `render()`'s internals, not the surrounding `move()`/`move_to()`/`current_view()` selection plumbing. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens: `settings`, `credits`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. `osc8_link()`/`_donation_line()` (issue #44) build the main screen's clickable author/donation callout. |
 | `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps and per-note hue overrides live, using `blessed` for field navigation and "press a key to capture this remap" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS`/`move()`/`keybind_value()`/`color_value()`/`is_valid_remap_key()`/`parse_hue_input()`/`apply_field_edit()`/`clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself is smoke-tested manually, same convention as every `run_terminal_*` loop. |
-| `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. A `"settings"` pick is special-cased straight to `settings_display.run_settings_screen()` instead of `run_session()` (issue #43) — it never touches audio, so it always returns straight back to the menu. |
+| `credits_display.py` | `run_credits_screen()` — `virtualnote`'s static Credits screen (issue #44): author, Claude/AI-assistance credit, and third-party library attribution (`THIRD_PARTY_LIBRARIES`), raw ANSI (no editable state, so no need for `settings_display`'s `blessed` exception). `credits_lines()` is the pure, unit-tested text builder; the render/wait-for-any-keypress loop itself is smoke-tested manually. |
+| `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. `"settings"`/`"credits"` picks are special-cased via `_NON_SESSION_SCREENS` straight to `settings_display.run_settings_screen()`/`credits_display.run_credits_screen()` instead of `run_session()` (issues #43, #44) — neither touches audio, so both always return straight back to the menu. |
 | `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`). |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content). |
 
 ## Running it
 
@@ -124,12 +125,16 @@ virtualnote fill --source loopback                           # listen to system 
 PATH) is the one entry point for every tool this project offers (issue
 #40), retiring the old per-tool `colorize` bash dispatcher. Bare
 `virtualnote` opens an ANSI menu (`menu_display.py`) to pick a tool live —
-the four audio tools above, plus a `Settings` entry (issue #43) for editing
-keybind remaps and per-note color overrides live, see the Config file
-section below; `virtualnote <view> [flags]` goes straight to a tool
-instead, replicating every flag `colorize` used to forward (`settings` has
-no direct-launch form, menu-only). Both paths run through the same
-long-lived process (`shell.py`), not a relaunch per tool — see Architecture.
+the four audio tools above, a `Settings` entry (issue #43) for editing
+keybind remaps and per-note color overrides live (see the Config file
+section below), and a `Credits` entry (issue #44) with full attribution;
+the menu screen itself also names the author and a clickable donation link
+(`config.AUTHOR_NAME`/`DONATION_URL`) right below the title, regardless of
+which entry is selected. `virtualnote <view> [flags]` goes straight to an
+audio tool instead, replicating every flag `colorize` used to forward
+(`settings`/`credits` have no direct-launch form, menu-only). Both paths
+run through the same long-lived process (`shell.py`), not a relaunch per
+tool — see Architecture.
 `main.py` itself is still directly runnable exactly as before
 (`.venv/bin/python main.py --terminal --view fill`, etc.) for anyone who
 wants the original single-tool-per-process entry point; it just has no menu
@@ -385,6 +390,22 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   from any `store.keybind()` lookup, so binding an action onto either would
   make that key double-fire (the action, then instantly back to the menu,
   or flip the help legend) instead of working as a normal remap.
+- The Credits screen (#44) is static content with no user-editable state,
+  so it stays raw ANSI rather than reaching for the Settings screen's
+  `blessed` exception — consistent with #37/#39's "scoped exception, not a
+  wholesale framework adoption" framing. It waits for *any* keypress to
+  return to the menu, not specifically `|` — there's no other state on a
+  static info screen a stray key could disturb, so being lenient there is
+  strictly more usable than requiring the exact global back-to-menu key.
+- The main menu screen's donation callout uses an OSC 8 terminal hyperlink
+  escape sequence (`menu_display.osc8_link()`), not a plain printed URL —
+  genuinely clickable in terminals that support it (kitty, iTerm2, wezterm,
+  gnome-terminal, etc.) and silently degrades to plain text everywhere
+  else, since an unsupported terminal just ignores the escape bytes. No
+  separate fallback branch needed. `DONATION_URL` in `config.py` is a
+  placeholder Patreon URL — shipping now rather than blocking on a real
+  account existing was #44's explicit call; swapping in the real URL later
+  is a one-line change.
 
 ## Known limitations / things learned
 
