@@ -110,6 +110,31 @@ class ConfigStore:
         self._data.setdefault("preferences", {})[name] = value
         self._write()
 
+    def set_keybind(self, action, key):
+        """Persists a remap for `action` (one of config.DEFAULT_KEYBINDS'
+        keys) -- the interactive editor this exists for is #43's settings
+        screen; `keybind()` picks the new value up on its next call via the
+        usual mtime-checked hot-reload, no restart needed."""
+        self._refresh()
+        self._data.setdefault("keybinds", {})[action] = key
+        self._write()
+
+    def set_note_hue_override(self, pitch_class, hue):
+        """Sets (or, with `hue=None`, clears) `pitch_class`'s hue override.
+        Always writes back under sharp spelling (matching the module
+        docstring's read/write-spelling split) and drops any existing entry
+        for the same pitch class under *either* spelling first, so a user
+        who originally set 'Db' in the file by hand doesn't end up with both
+        'Db' and 'C#' present after an edit here."""
+        self._refresh()
+        colors = self._data.setdefault("colors", {})
+        for name, pc in NOTE_NAME_TO_PITCH_CLASS.items():
+            if pc == pitch_class:
+                colors.pop(name, None)
+        if hue is not None:
+            colors[_SHARP_NAME_BY_PITCH_CLASS[pitch_class]] = float(hue) % 360
+        self._write()
+
     def _write(self):
         directory = os.path.dirname(self.path)
         if directory:

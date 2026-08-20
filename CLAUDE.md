@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-114 tests), and detection has been confirmed with a real speaker→mic
+134 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -97,12 +97,13 @@ into an implicit `None` as before — see Key design decisions.
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
 | `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()`, `render()` (takes live `notehead_style`/`legend_on`/`frozen`, and age-fades each column's lightness per issue #22), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
-| `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()` (persists, for #43's future settings screen). |
+| `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()`/`set_keybind()`/`set_note_hue_override()` (persist + write back to the TOML file — the last two back issue #43's settings screen). |
 | `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape. `pygame` imported only inside `run_gui`. |
-| `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); deliberately minimal, static ANSI list + highlight — issue #42 owns the real animated visual design and will replace `render()`'s internals, not the surrounding `move()`/`move_to()`/`current_view()` selection plumbing. |
-| `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. |
+| `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); deliberately minimal, static ANSI list + highlight — issue #42 owns the real animated visual design and will replace `render()`'s internals, not the surrounding `move()`/`move_to()`/`current_view()` selection plumbing. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens like `settings`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. |
+| `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps and per-note hue overrides live, using `blessed` for field navigation and "press a key to capture this remap" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS`/`move()`/`keybind_value()`/`color_value()`/`is_valid_remap_key()`/`parse_hue_input()`/`apply_field_edit()`/`clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself is smoke-tested manually, same convention as every `run_terminal_*` loop. |
+| `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. A `"settings"` pick is special-cased straight to `settings_display.run_settings_screen()` instead of `run_session()` (issue #43) — it never touches audio, so it always returns straight back to the menu. |
 | `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention). |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`). |
 
 ## Running it
 
@@ -122,9 +123,12 @@ virtualnote fill --source loopback                           # listen to system 
 `virtualnote` (on PATH via `~/.local/bin/virtualnote`, added to `~/.zshrc`'s
 PATH) is the one entry point for every tool this project offers (issue
 #40), retiring the old per-tool `colorize` bash dispatcher. Bare
-`virtualnote` opens an ANSI menu (`menu_display.py`) to pick a tool live;
-`virtualnote <view> [flags]` goes straight to that tool instead, replicating
-every flag `colorize` used to forward. Both paths run through the same
+`virtualnote` opens an ANSI menu (`menu_display.py`) to pick a tool live —
+the four audio tools above, plus a `Settings` entry (issue #43) for editing
+keybind remaps and per-note color overrides live, see the Config file
+section below; `virtualnote <view> [flags]` goes straight to a tool
+instead, replicating every flag `colorize` used to forward (`settings` has
+no direct-launch form, menu-only). Both paths run through the same
 long-lived process (`shell.py`), not a relaunch per tool — see Architecture.
 `main.py` itself is still directly runnable exactly as before
 (`.venv/bin/python main.py --terminal --view fill`, etc.) for anyone who
@@ -239,9 +243,24 @@ file while the app is running, no restart needed):
   octave-driven lightness are untouched by the override.
 
 `[preferences]` is a reserved, currently-unused table for future
-quality-of-life settings (map #37/#40/#43); see `config_store.py`'s
+quality-of-life settings (map #37/#40); see `config_store.py`'s
 docstring for the full schema and `docs/DECISIONS.md` for why the schema
 stops here for now.
+
+**Settings screen (issue #43).** `virtualnote`'s menu has a `Settings`
+entry (same tier as any tool) that opens an interactive editor
+(`settings_display.py`) for exactly the `[keybinds]`/`[colors]` overrides
+above — Up/Down moves between fields, Enter edits the highlighted one
+(captures the very next keypress for a keybind row; opens an inline
+0–360 digit entry for a color row), Backspace/Delete resets a color row
+straight back to "default", and `|`/Esc returns to the menu, same
+always-live convention every other tool uses. Edits write straight through
+`config_store.set_keybind()`/`set_note_hue_override()` and take effect
+immediately via the store's existing hot-reload — no restart, same live-UX
+as `M`/`P`. A remap can't be bound to `|` or `h`/`H` — both are global keys
+every terminal loop checks unconditionally, so binding an action onto
+either would make that key double-fire instead of working as a normal
+remap.
 
 ## Key design decisions
 
@@ -352,6 +371,20 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   blocks (`keys.restore()`/`display.quit()`/`dump_ansi()` all still run
   before the sentinel is returned, same as they always ran before a plain
   `return`/loop-exit).
+- The Settings screen (#43) is a `blessed` app, not raw ANSI — the one
+  deliberate, scoped exception to this project's raw-ANSI-everywhere
+  convention, settled by #37/#39's grilling specifically for this screen's
+  form controls (field navigation, "press a key to capture this remap").
+  It's reached from `shell.py`'s menu loop by name (`selection ==
+  "settings"`) rather than through `main.run_session()` — it doesn't touch
+  `SessionState` at all, so opening it never triggers the lazy
+  mic-open `ensure_started()` every real tool does.
+- A keybind can't be remapped onto `|` or `h`/`H` in the Settings screen
+  (`settings_display.is_valid_remap_key`) — both are global keys checked
+  unconditionally by every `run_terminal_*` loop, ahead of or independent
+  from any `store.keybind()` lookup, so binding an action onto either would
+  make that key double-fire (the action, then instantly back to the menu,
+  or flip the help legend) instead of working as a normal remap.
 
 ## Known limitations / things learned
 

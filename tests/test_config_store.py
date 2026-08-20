@@ -93,6 +93,50 @@ def test_hot_reload_picks_up_external_edit(tmp_path):
     assert store.keybind("source_toggle") == "y"
 
 
+def test_set_keybind_persists_and_reloads(tmp_path):
+    path = tmp_path / "config.toml"
+    store = ConfigStore(path=str(path))
+    store.set_keybind("chord_mode_toggle", "x")
+
+    reloaded = ConfigStore(path=str(path))
+    assert reloaded.keybind("chord_mode_toggle") == "x"
+    # Un-remapped actions still fall back to their default.
+    assert reloaded.keybind("legend_toggle") == config.DEFAULT_KEYBINDS["legend_toggle"]
+
+
+def test_set_note_hue_override_persists_under_sharp_spelling(tmp_path):
+    path = tmp_path / "config.toml"
+    store = ConfigStore(path=str(path))
+    store.set_note_hue_override(3, 90)  # D#/Eb
+
+    reloaded = ConfigStore(path=str(path))
+    assert reloaded.note_hue_override(3) == 90
+    assert '"D#"' in path.read_text() or "D#" in path.read_text()
+
+
+def test_set_note_hue_override_replaces_existing_flat_spelling(tmp_path):
+    path = tmp_path / "config.toml"
+    _write(path, '[colors]\n"Eb" = 90\n')
+    store = ConfigStore(path=str(path))
+    store.set_note_hue_override(3, 200)  # same pitch class, new value
+
+    reloaded = ConfigStore(path=str(path))
+    assert reloaded.note_hue_override(3) == 200
+    # Only one entry survives for this pitch class -- not both spellings.
+    text = path.read_text()
+    assert text.count("=") == 1
+
+
+def test_set_note_hue_override_none_clears_it(tmp_path):
+    path = tmp_path / "config.toml"
+    _write(path, "[colors]\nC = 200\n")
+    store = ConfigStore(path=str(path))
+    store.set_note_hue_override(0, None)
+
+    reloaded = ConfigStore(path=str(path))
+    assert reloaded.note_hue_override(0) is None
+
+
 def test_deleting_file_after_load_reverts_to_defaults(tmp_path):
     path = tmp_path / "config.toml"
     _write(path, '[keybinds]\nsource_toggle = "x"\n')

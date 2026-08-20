@@ -10,7 +10,7 @@ import argparse
 import pytest
 
 from main import _handle_back_to_menu_key, _handle_help_legend_key, _legend_line
-from menu_display import MenuDisplay, TOOLS
+from menu_display import MenuDisplay, MENU_ITEMS, TOOLS
 from shell import _handle_menu_key
 from virtualnote import build_parser
 
@@ -51,13 +51,20 @@ def test_menu_display_starts_at_first_tool():
     assert menu.current_view() == TOOLS[0][0]
 
 
+def test_menu_items_includes_settings_after_every_tool():
+    # Settings is reachable from the menu at the same tier as any tool
+    # (#43) but isn't itself a run_session-launchable tool.
+    assert MENU_ITEMS[:len(TOOLS)] == TOOLS
+    assert MENU_ITEMS[len(TOOLS)][0] == "settings"
+
+
 def test_menu_display_move_wraps_both_directions():
     menu = MenuDisplay()
     menu.move(-1)
-    assert menu.selected == len(TOOLS) - 1  # wraps from first to last
+    assert menu.selected == len(MENU_ITEMS) - 1  # wraps from first to last
     menu.move(1)
     assert menu.selected == 0
-    for _ in range(len(TOOLS)):
+    for _ in range(len(MENU_ITEMS)):
         menu.move(1)
     assert menu.selected == 0  # a full lap returns to the start
 
@@ -66,7 +73,7 @@ def test_menu_display_move_to_out_of_range_is_ignored():
     menu = MenuDisplay()
     menu.move_to(2)
     assert menu.selected == 2
-    menu.move_to(len(TOOLS) + 5)
+    menu.move_to(len(MENU_ITEMS) + 5)
     assert menu.selected == 2  # unchanged -- out of range
     menu.move_to(-1)
     assert menu.selected == 2  # unchanged -- out of range
@@ -95,9 +102,16 @@ def test_menu_key_digit_jumps_and_selects_in_one_key():
     assert selection == TOOLS[2][0]
 
 
+def test_menu_key_digit_selects_settings_entry():
+    menu = MenuDisplay()
+    selection = _handle_menu_key(str(len(TOOLS) + 1), menu)
+    assert selection == "settings"
+    assert menu.selected == len(TOOLS)
+
+
 def test_menu_key_digit_out_of_range_is_ignored():
     menu = MenuDisplay()
-    result = _handle_menu_key(str(len(TOOLS) + 1), menu)
+    result = _handle_menu_key(str(len(MENU_ITEMS) + 1), menu)
     assert result is None
     assert menu.selected == 0
 

@@ -21,17 +21,18 @@ import time
 
 import config
 from main import RawKeys, run_session
-from menu_display import MenuDisplay, TOOLS
+from menu_display import MenuDisplay, MENU_ITEMS
+from settings_display import run_settings_screen
 
 
 def _handle_menu_key(key, menu):
     """Pure selection-state update for one keypress on the menu screen.
-    Returns the chosen view name ('fill'/'wheel'/'tab'/'gui') the instant
-    a tool is selected (Enter confirms the highlighted row; a digit key
-    1..len(TOOLS) jumps straight to and selects that row in one keypress,
-    the one-key-select convenience the old `colorize <subcommand>` launcher
-    had). Returns None while still just browsing (arrow keys, or no key
-    at all)."""
+    Returns the chosen view name ('fill'/'wheel'/'tab'/'gui'/'settings')
+    the instant an entry is selected (Enter confirms the highlighted row;
+    a digit key 1..len(MENU_ITEMS) jumps straight to and selects that row
+    in one keypress, the one-key-select convenience the old
+    `colorize <subcommand>` launcher had). Returns None while still just
+    browsing (arrow keys, or no key at all)."""
     if key is None:
         return None
     if key == "UP":
@@ -42,7 +43,7 @@ def _handle_menu_key(key, menu):
         return menu.current_view()
     elif key.isdigit() and key != "0":
         index = int(key) - 1
-        if index < len(TOOLS):
+        if index < len(MENU_ITEMS):
             menu.move_to(index)
             return menu.current_view()
     return None
@@ -77,6 +78,14 @@ def run_menu_loop(session, fps=None):
             return
         keys.restore()
         menu.quit()
+
+        if selection == "settings":
+            # Settings is a menu entry, not a run_session tool (issue #43)
+            # -- it doesn't touch audio, so it never calls
+            # session.ensure_started(), unlike every real tool. Always
+            # returns to the menu; there's no "quit" out of it.
+            run_settings_screen()
+            continue
 
         try:
             result = run_session(selection, config.DEFAULT_SCROLL_MODE, None, False, False, session)
