@@ -1,6 +1,7 @@
 import numpy as np
 
 from note_smoother import NoteSmoother
+from pitch_detect import compute_spectrum
 import config
 
 DUMMY_SPECTRUM = np.zeros(5)
@@ -77,6 +78,47 @@ def test_genuine_note_change_registers_with_onset():
 
     assert (pitch_class, octave) == (0, 5)
     assert onset_seen
+
+
+def test_steady_real_size_tone_only_onsets_on_the_initial_attack():
+    # Issue #66: with the unnormalized raw spectral_flux() sum, a
+    # perfectly sustained real-size tone misfired is_onset on nearly
+    # every hop (100% in the reported live repro) because the raw flux
+    # between two hops -- differing only by the natural phase advance a
+    # sliding ring buffer sees -- sat orders of magnitude over
+    # config.ONSET_FLUX_THRESHOLD.
+    #
+    # Feed a totally fresh NoteSmoother a long run of real
+    # config.WINDOW_SIZE spectra for one sustained tone -- same
+    # amplitude, same note, same rms throughout, only phase advancing
+    # hop to hop (exactly the live scenario the bug report described).
+    # The only *legitimate* onsets in a run like this are right at the
+    # start: the very first hop (silence -> sound) and the debounce
+    # lock-in a few hops later once the candidate note is confirmed --
+    # both real, separate mechanisms from spectral_flux, not part of
+    # this bug. Once the note is locked in and sustained, nothing about
+    # a steady tone should ever re-trigger is_onset again -- that
+    # "misfires on nearly every hop" was exactly the reported bug.
+    sr, w, hop_size = config.SAMPLE_RATE, config.WINDOW_SIZE, config.BLOCK_SIZE
+    freq = freq_for(9, 4)  # A4
+    t = np.arange(w) / sr
+    rms = 0.1
+
+    s = NoteSmoother(config)
+    onset_flags = []
+    lock_in_hop = config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW
+    n_hops = lock_in_hop + 60
+    for i in range(n_hops):
+        phase = 2 * np.pi * freq * (i * hop_size) / sr
+        spectrum = compute_spectrum(0.2 * np.sin(2 * np.pi * freq * t + phase))
+        pitch_class, octave, is_onset = s.update(freq, 0.9, rms, spectrum)
+        onset_flags.append(is_onset)
+
+    assert (pitch_class, octave) == (9, 4)
+    assert onset_flags[0] is True  # the initial attack out of silence
+    # No onset anywhere in the long sustained tail well past lock-in --
+    # this is the actual regression check.
+    assert onset_flags[lock_in_hop:] == [False] * (len(onset_flags) - lock_in_hop)
 
 
 def test_spectral_flux_triggers_onset_without_note_change_or_rms_jump():

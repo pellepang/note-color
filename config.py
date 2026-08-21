@@ -171,7 +171,14 @@ MENU_AUTODETECT_FRAME_BUDGET = 1.0 / MENU_FPS_FULL
 # --- Rhythm/onset/duration/tempo detection (issue #55) ---
 # All provisional pending empirical tuning against real playing, same
 # convention as chord mode's own constants above.
-ONSET_FLUX_THRESHOLD = 0.15      # spectral_flux() OR-condition added to NoteSmoother's is_onset test
+ONSET_FLUX_THRESHOLD = 0.3       # spectral_flux() OR-condition added to NoteSmoother's is_onset test --
+                                  # a *relative* threshold (fraction of the previous frame's total
+                                  # spectral magnitude, see onset_detect.spectral_flux(), issue #66) --
+                                  # empirically, a sustained tone's worst-case hop-to-hop wobble tops
+                                  # out around ~0.3 across this app's pitch/amplitude range, while even
+                                  # a quiet genuine attack clears ~0.33 and normal playing volume clears
+                                  # it several times over. Not the same units as the pre-#66 raw-sum
+                                  # value this replaces -- don't compare the two numbers directly.
 DURATION_DECAY_RATIO = 0.25      # current/peak magnitude ratio below which a note counts as "off" --
                                   # deliberately reuses chroma.fold_bass()'s bass-confidence ratio
                                   # value for consistency, not because the two thresholds must mean
