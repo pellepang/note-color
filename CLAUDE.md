@@ -40,20 +40,6 @@ sine-wave test signals (single sustained tone, multi-note melody) through
 both the live pipeline's unit tests and an actual `virtualnote transcribe`
 run; not yet verified against real (non-synthetic) playing beyond that.
 
-## Backlog (open problems, not yet fixed)
-
-- Live chord-mode duration tracking (`main.py`'s `chord_duration_tracker`)
-  is wired to raw, undebounced `multipitch.detect()` output instead of
-  `chord_smoother`'s already-debounced note stack, so a single-hop raw
-  detection flicker on an otherwise continuously-sustained/displayed note
-  fragments it into two short, individually-wrong duration events in
-  `tab`'s rhythm notation. `batch_transcribe.py`'s offline path already
-  does this correctly (derives duration tracking from the debounced
-  stack) -- the live path is the one out of sync. See issue #64; the fix
-  itself looks small (reorder `analysis_loop()` and feed the debounced
-  stack instead) but wasn't made directly since it touches `main.py`,
-  which had unrelated in-flight changes at investigation time.
-
 ## Architecture
 
 ```
