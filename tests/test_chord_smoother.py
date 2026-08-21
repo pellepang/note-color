@@ -104,3 +104,24 @@ def test_lowest_active_note_is_marked_bass():
     assert by_pc[0]["is_bass"] is True
     assert by_pc[4]["is_bass"] is False
     assert by_pc[7]["is_bass"] is False
+
+
+def test_chord_change_overflowing_max_notes_shows_incoming_notes_not_stale_ones():
+    # A chord change can briefly push more than CHORD_MAX_NOTES slots into
+    # "active" at once: the outgoing chord's notes are still coasting
+    # through their release hysteresis while the incoming chord's notes
+    # have just cleared attack_hops. Regression for a bug where the
+    # overflow was trimmed by pitch (always keep the lowest notes), which
+    # silently hid an entire freshly-attacked chord above it until the old
+    # one's release window fully timed out -- confidence-based trimming
+    # should surface the newly-attacked notes instead.
+    s = ChordSmoother(config)
+    silence_chroma = np.zeros(12)
+    old_notes = [note(pc, 2, 100.0 + pc, confidence=0.9) for pc in (0, 2, 4, 5, 7, 9)]
+    feed(s, silence_chroma, silence_chroma, old_notes, config.NOTE_STACK_ATTACK_HOPS + 2)
+
+    new_notes = [note(pc, 6, 1500.0 + pc, confidence=0.9) for pc in (1, 3, 6, 8, 10, 11)]
+    _name, stack = feed(s, silence_chroma, silence_chroma, new_notes, config.NOTE_STACK_ATTACK_HOPS)
+
+    assert len(stack) == config.CHORD_MAX_NOTES
+    assert {e["pitch_class"] for e in stack} == {1, 3, 6, 8, 10, 11}

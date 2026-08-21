@@ -97,8 +97,19 @@ class ChordSmoother:
             for key, state in self.note_states.items()
             if state["active"]
         ]
-        active.sort(key=lambda entry: entry["freq"])
+        # More than max_notes slots can be simultaneously active during a
+        # chord change: outgoing notes stay "active" through their release
+        # hysteresis while incoming notes are already ramping up, so the
+        # overlap can briefly exceed max_notes. Trim by confidence (not
+        # pitch) so the freshest/loudest notes -- almost always the
+        # just-attacked ones, since a releasing note's confidence is a
+        # stale, decaying reading from its last real detection -- win the
+        # slots, instead of always keeping whichever notes happen to sit
+        # lowest in pitch and silently hiding a brand-new chord until the
+        # old one's release window fully times out.
+        active.sort(key=lambda entry: (entry["confidence"], entry["freq"]), reverse=True)
         active = active[: self.max_notes]
+        active.sort(key=lambda entry: entry["freq"])
 
         stack = []
         for i, entry in enumerate(active):
