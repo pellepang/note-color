@@ -37,6 +37,19 @@ CHORD_PEAK_MIN_MAG_RATIO = 0.05  # spectral peak-picking: ignore peaks below thi
 CHORD_HARMONIC_TOLERANCE_CENTS = 35.0   # spectral peak-picking: harmonic-consistency pruning window
 CHORD_MAX_PEAK_CANDIDATES = 20   # spectral peak-picking: cap on candidates considered before pruning
 
+# multipitch.detect()'s live window (WINDOW_SIZE, ~93ms) can't resolve
+# fundamentals of closely-spaced low notes (e.g. C2+E2, ~17Hz apart) --
+# their mainlobes physically overlap and merge into one wrong-frequency
+# peak (issue #63). A longer window resolves them correctly (verified:
+# 2x WINDOW_SIZE is already enough for ordinary low triads), so
+# multipitch.select_window() swaps to MULTIPITCH_LOW_WINDOW_SIZE whenever
+# bass_chroma carries real signal (gated by MULTIPITCH_BASS_GATE_RATIO,
+# same 0.25 confidence-ratio convention chord_templates.match() already
+# uses for slash-chord bass detection) -- paying the extra ~93ms latency
+# only for hops that actually have low content, not every hop.
+MULTIPITCH_LOW_WINDOW_SIZE = 4096
+MULTIPITCH_BASS_GATE_RATIO = 0.25
+
 # --- Color mapping ---
 HUE_OFFSET_DEG = 0
 MIN_OCTAVE = 2
@@ -177,3 +190,11 @@ DEFAULT_TIME_SIGNATURE = (4, 4)  # (numerator, denominator) -- never auto-detect
                                   # rest of the pipeline expects -- see main.py's run_terminal_tab.
 TAB_BARLINE_WIDTH = 1             # terminal characters per barline column -- narrower than a note
                                    # column (TAB_COLUMN_WIDTH), so it reads as a divider, not data
+
+# --- Score writer (issue #65, batch-only MusicXML export via music21) ---
+KEY_GUESS_CONFIDENCE_THRESHOLD = 0.65  # Krumhansl-Schmuckler correlation (-1..1 range, but a genuine
+                                        # tonal recording typically scores 0.6-0.9 against its true key);
+                                        # below this, score_writer.guess_key_signature() returns None and
+                                        # the written score falls back to C major/no key signature rather
+                                        # than a confidently-wrong guess -- provisional starting value,
+                                        # same "retune later" convention as CHORD_MATCH_THRESHOLD.

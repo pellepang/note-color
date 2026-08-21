@@ -1,6 +1,9 @@
 import numpy as np
 
-from multipitch import detect
+import chroma
+import config
+from multipitch import detect, select_window
+from pitch_detect import compute_spectrum
 
 SAMPLE_RATE = 22050
 
@@ -64,3 +67,71 @@ def test_silence_detects_no_notes():
     silence = np.zeros(2048)
     notes = detect(silence, SAMPLE_RATE)
     assert notes == []
+
+
+def test_low_register_triad_garbled_at_real_live_window_size():
+    # issue #63: C2+E2+G2's fundamentals (~65/82/98Hz) are only ~15-17Hz
+    # apart -- closer together than the app's real live window
+    # (config.WINDOW_SIZE, ~93ms) can resolve. Their Hann-window mainlobes
+    # physically overlap and merge into one wrong-frequency peak, unlike
+    # the same chord at test_major_triad_notes_all_detected()'s midrange
+    # octave. This documents the underlying limitation select_window()
+    # works around, not a regression to fix in detect() itself.
+    duration = config.WINDOW_SIZE / SAMPLE_RATE
+    harmonics = (1.0, 0.5, 0.3, 0.15)
+    c = make_tone(freq_for(0, 2), duration=duration, harmonics=harmonics)
+    e = make_tone(freq_for(4, 2), duration=duration, harmonics=harmonics)
+    g = make_tone(freq_for(7, 2), duration=duration, harmonics=harmonics)
+    notes = detect(c + e + g, SAMPLE_RATE)
+    assert as_note_set(notes) != {(0, 2), (4, 2), (7, 2)}
+
+
+def test_select_window_resolves_low_triad_the_short_live_window_cannot():
+    # The same C2+E2+G2 chord, this time run through the real fix
+    # (select_window() swapping to a longer window once bass_chroma shows
+    # real low-frequency content) -- the longer window has enough
+    # resolution to separate the fundamentals correctly.
+    short_duration = config.WINDOW_SIZE / SAMPLE_RATE
+    long_duration = config.MULTIPITCH_LOW_WINDOW_SIZE / SAMPLE_RATE
+    harmonics = (1.0, 0.5, 0.3, 0.15)
+    chord = [(0, 2), (4, 2), (7, 2)]
+
+    short_mix = sum(make_tone(freq_for(pc, oc), duration=short_duration, harmonics=harmonics) for pc, oc in chord)
+    long_mix = sum(make_tone(freq_for(pc, oc), duration=long_duration, harmonics=harmonics) for pc, oc in chord)
+
+    spectrum = compute_spectrum(short_mix)
+    main_chroma = chroma.fold(spectrum, SAMPLE_RATE)
+    bass_chroma = chroma.fold_bass(spectrum, SAMPLE_RATE)
+
+    window = select_window(short_mix, long_mix, main_chroma, bass_chroma, gate_ratio=config.MULTIPITCH_BASS_GATE_RATIO)
+    assert window is long_mix
+
+    notes = detect(window, SAMPLE_RATE)
+    assert as_note_set(notes) == {(0, 2), (4, 2), (7, 2)}
+
+
+def test_select_window_keeps_short_window_when_no_bass_content():
+    # An ordinary midrange chord has no real energy in fold_bass()'s
+    # <~250Hz band, so select_window() must not pay the extra-latency long
+    # window's cost for it.
+    short_duration = config.WINDOW_SIZE / SAMPLE_RATE
+    c = make_tone(freq_for(0, 4), duration=short_duration)
+    e = make_tone(freq_for(4, 4), duration=short_duration)
+    short_mix = c + e
+    long_mix = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE)  # sentinel: must not be picked
+
+    spectrum = compute_spectrum(short_mix)
+    main_chroma = chroma.fold(spectrum, SAMPLE_RATE)
+    bass_chroma = chroma.fold_bass(spectrum, SAMPLE_RATE)
+
+    window = select_window(short_mix, long_mix, main_chroma, bass_chroma, gate_ratio=config.MULTIPITCH_BASS_GATE_RATIO)
+    assert window is short_mix
+
+
+def test_select_window_falls_back_to_short_window_on_silence():
+    short_mix = np.zeros(config.WINDOW_SIZE)
+    long_mix = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE)
+    main_chroma = np.zeros(12)
+    bass_chroma = np.zeros(12)
+    window = select_window(short_mix, long_mix, main_chroma, bass_chroma)
+    assert window is short_mix

@@ -235,6 +235,7 @@ class RenderItem(NamedTuple):
 
 def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
+    low_ring = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
     chord_smoother = ChordSmoother(config)
     mono_duration_tracker = DurationTracker(config)
@@ -251,6 +252,7 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
 
         block = block.astype(np.float64)
         ring = np.concatenate([ring[len(block):], block])
+        low_ring = np.concatenate([low_ring[len(block):], block])
         rms = float(np.sqrt(np.mean(block * block))) if len(block) else 0.0
 
         smoother.set_sensitivity(sensitivity.value)
@@ -290,8 +292,11 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
         mono_finalized = mono_duration_tracker.update(mono_notes, hop_index)
         duration_hops = mono_finalized[0][2] if mono_finalized else None
 
+        multipitch_window = multipitch.select_window(
+            ring, low_ring, main_chroma, bass_chroma, gate_ratio=config.MULTIPITCH_BASS_GATE_RATIO
+        )
         raw_notes = multipitch.detect(
-            ring,
+            multipitch_window,
             config.SAMPLE_RATE,
             max_notes=config.CHORD_MAX_NOTES,
             min_mag_ratio=config.CHORD_PEAK_MIN_MAG_RATIO,

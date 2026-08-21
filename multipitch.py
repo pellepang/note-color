@@ -28,6 +28,7 @@ DEFAULT_MIN_MAG_RATIO = 0.05
 DEFAULT_HARMONIC_TOLERANCE_CENTS = 35.0
 DEFAULT_MAX_PEAK_CANDIDATES = 20
 DEFAULT_MIN_SEPARATION_CENTS = 50.0
+DEFAULT_BASS_GATE_RATIO = 0.25
 
 NoteCandidate = namedtuple("NoteCandidate", ["pitch_class", "octave", "freq", "confidence"])
 
@@ -64,6 +65,32 @@ def _is_near_duplicate(freq, accepted_freq, tolerance_cents):
     if accepted_freq <= 0:
         return False
     return abs(1200 * np.log2(freq / accepted_freq)) <= tolerance_cents
+
+
+def select_window(short_window, long_window, main_chroma, bass_chroma, gate_ratio=DEFAULT_BASS_GATE_RATIO):
+    """Pick which ring buffer detect() should analyze this hop (issue #63).
+
+    `short_window` (the app's real live WINDOW_SIZE) can't resolve two
+    fundamentals as close together as an ordinary low triad's (e.g.
+    C2+E2, ~17Hz apart) -- their Hann-window mainlobes physically overlap
+    and merge into one wrong-frequency peak, no amount of interpolation
+    recovers that. `long_window` (a bigger, equally up-to-date ring buffer
+    the caller maintains alongside the short one) has enough resolution to
+    separate them, at the cost of reflecting slightly older audio.
+
+    Swapping to `long_window` unconditionally would pay that extra latency
+    on every hop, including ordinary mid/treble-register playing that
+    never needed it. Instead this gates on `bass_chroma` (chroma.
+    fold_bass()'s <~250Hz-restricted vector) carrying real signal relative
+    to `main_chroma`'s peak -- the same confidence-ratio convention
+    chord_templates.match() already uses to decide whether a bass note is
+    real or spectral-leakage noise -- so the extra latency is paid only on
+    hops that plausibly have low content to resolve."""
+    main_peak = float(np.max(main_chroma)) if len(main_chroma) else 0.0
+    bass_peak = float(np.max(bass_chroma)) if len(bass_chroma) else 0.0
+    if main_peak > 0 and bass_peak >= gate_ratio * main_peak:
+        return long_window
+    return short_window
 
 
 def detect(

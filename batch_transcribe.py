@@ -65,7 +65,9 @@ NoteEvent = namedtuple(
     "NoteEvent", ["onset_hop", "onset_time", "pitch_class", "octave", "duration_hops", "chord_name"]
 )
 
-TranscriptionResult = namedtuple("TranscriptionResult", ["notes", "mono_notes", "bpm", "hop_seconds"])
+TranscriptionResult = namedtuple(
+    "TranscriptionResult", ["notes", "mono_notes", "bpm", "hop_seconds", "chroma_histogram"]
+)
 
 
 def load_audio(path, sample_rate=None):
@@ -90,6 +92,7 @@ def transcribe(audio, sample_rate, time_signature=config.DEFAULT_TIME_SIGNATURE)
     smoother = NoteSmoother(config)
     chord_smoother = ChordSmoother(config)
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
+    low_ring = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE, dtype=np.float64)
 
     # Per-(pitch_class, octave) key: a full n_hops-length magnitude array
     # (zero where that key isn't sounding) plus the hop indices where a
@@ -101,10 +104,17 @@ def transcribe(audio, sample_rate, time_signature=config.DEFAULT_TIME_SIGNATURE)
     chord_onsets = {}
     chord_name_by_hop = [None] * n_hops
     prev_chord_keys = set()
+    # Whole-recording chroma histogram (summed, not averaged -- only
+    # relative pitch-class weight matters for key-guessing, so an
+    # unnormalized sum avoids a needless divide) -- issue #65's
+    # score_writer.guess_key_signature() input, fed by whichever
+    # pitch-class content sounded across the entire file, mono or chord.
+    chroma_histogram = np.zeros(12)
 
     for hop_index in range(n_hops):
         block = audio[hop_index * config.BLOCK_SIZE: (hop_index + 1) * config.BLOCK_SIZE]
         ring = np.concatenate([ring[len(block):], block])
+        low_ring = np.concatenate([low_ring[len(block):], block])
         rms = float(np.sqrt(np.mean(block * block))) if len(block) else 0.0
 
         spectrum = compute_spectrum(ring)
@@ -124,8 +134,12 @@ def transcribe(audio, sample_rate, time_signature=config.DEFAULT_TIME_SIGNATURE)
 
         main_chroma = chroma.fold(spectrum, sample_rate)
         bass_chroma = chroma.fold_bass(spectrum, sample_rate)
+        chroma_histogram += main_chroma
+        multipitch_window = multipitch.select_window(
+            ring, low_ring, main_chroma, bass_chroma, gate_ratio=config.MULTIPITCH_BASS_GATE_RATIO
+        )
         raw_notes = multipitch.detect(
-            ring,
+            multipitch_window,
             sample_rate,
             max_notes=config.CHORD_MAX_NOTES,
             min_mag_ratio=config.CHORD_PEAK_MIN_MAG_RATIO,
@@ -152,7 +166,9 @@ def transcribe(audio, sample_rate, time_signature=config.DEFAULT_TIME_SIGNATURE)
 
     bpm = _estimate_bpm(audio, sample_rate)
 
-    return TranscriptionResult(notes=notes, mono_notes=mono_notes, bpm=bpm, hop_seconds=hop_seconds)
+    return TranscriptionResult(
+        notes=notes, mono_notes=mono_notes, bpm=bpm, hop_seconds=hop_seconds, chroma_histogram=chroma_histogram
+    )
 
 
 def _finalize_events(magnitude_by_key, onsets_by_key, hop_seconds, chord_name_by_hop):

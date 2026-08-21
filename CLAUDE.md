@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-236 tests), and detection has been confirmed with a real speaker→mic
+245 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch
@@ -42,15 +42,6 @@ run; not yet verified against real (non-synthetic) playing beyond that.
 
 ## Backlog (open problems, not yet fixed)
 
-- `multipitch.detect()` badly garbles ordinary low-register (bass) chords
-  under the app's real live window (`config.WINDOW_SIZE`, 2048 samples):
-  a single low note alone detects perfectly, but e.g. C2+E2+G2 comes back
-  as five wrong/spurious notes at wrong octaves. Distinct from the
-  chord-name issue above -- this is the raw per-note output every chord-
-  mode view draws, not just the chord label. See issue #63 for repro,
-  root-cause hypothesis (FFT bin density too coarse at low absolute
-  frequencies for stable peak interpolation/harmonic pruning), and
-  suggested directions.
 - Live chord-mode duration tracking (`main.py`'s `chord_duration_tracker`)
   is wired to raw, undebounced `multipitch.detect()` output instead of
   `chord_smoother`'s already-debounced note stack, so a single-hop raw
@@ -130,7 +121,7 @@ into an implicit `None` as before — see Key design decisions.
 | `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection (monophonic path): note-change, an RMS jump, or (issue #55) `onset_detect.spectral_flux()` clearing `ONSET_FLUX_THRESHOLD` against the hop-over-hop spectrum. |
 | `chroma.py` | `fold()`/`fold_bass()` — 12-bin chroma vector via a precomputed Gaussian log-frequency weighting matrix summing 1st–4th harmonics per pitch class; `fold_bass()` restricts to <~250Hz for bass/inversion detection. |
 | `chord_templates.py` | ~360-template dictionary (30 qualities × 12 roots) + `match()` — cosine-similarity chord recognition, bass-chroma-gated slash/inversion naming and rotational-tie-breaking. |
-| `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence. |
+| `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence. `select_window()` (issue #63) picks which ring buffer a hop's `detect()` call should analyze — the app's normal live `config.WINDOW_SIZE` window, or a longer `config.MULTIPITCH_LOW_WINDOW_SIZE` one the caller (`main.py`/`batch_transcribe.py`) also maintains, gated on `chroma.fold_bass()` showing real low-frequency content — see Key design decisions for why the short window alone garbles close-together bass notes. |
 | `chord_smoother.py` | `ChordSmoother` — mirrors `NoteSmoother`'s shape for chord mode: chroma rolling-average + chord-name debounce, plus asymmetric attack/release hysteresis per note-stack slot. |
 | `onset_detect.py` | (issue #55) `spectral_flux()`/`chroma_flux()` — pure, `None`-safe half-wave-rectified positive-magnitude-difference novelty measures between two consecutive `pitch_detect.compute_spectrum()`/`chroma.fold()` frames. `spectral_flux()` feeds `note_smoother.py`'s onset gate; `chroma_flux()` feeds `tempo_tracker.py`. |
 | `duration_tracker.py` | (issue #55) `DurationTracker` — mirrors `ChordSmoother.note_states`' dict-of-state shape, but for *measuring* how long a note sounded rather than debouncing its display. `.update()` (live, causal, keyed by `(pitch_class, octave)`, `is_onset`-aware re-attack preemption) and `.finalize_noncausal()` (batch, centered-smoothed envelope, static method) share one off-threshold definition (`DURATION_DECAY_RATIO`). `duration_class_for_beats()`/`DEFAULT_DURATION_CLASS` — nearest-standard-note-value snapping (incl. dotted), used by both live and batch. |
@@ -404,6 +395,16 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   output there is just spectral-leakage noise (empirically ~0.15x the
   main peak) that would otherwise get misread as a slash-chord bass note.
   A genuine sounding bass note measured ~0.35x+.
+- `multipitch.detect()` runs against a second, longer ring buffer
+  (`config.MULTIPITCH_LOW_WINDOW_SIZE`) instead of the normal live window
+  whenever `multipitch.select_window()`'s bass-chroma gate clears (issue
+  #63) — the normal ~93ms window's Hann mainlobe is physically wider than
+  the gap between an ordinary low triad's fundamentals (e.g. C2→E2, only
+  ~17Hz), so their peaks merge into one wrong-frequency peak that no
+  amount of interpolation/pruning tuning can separate; a longer window
+  actually has the resolution to tell them apart. Gated rather than
+  unconditional so the extra ~93ms of latency is paid only on hops with
+  real low content, not every hop.
 - `tab`'s notehead style (`N`), legend visibility (`L`), and freeze-frame
   (`Space`) are pure render-thread-local state in `main.py`, same as `P` —
   `TabDisplay` itself owns no toggle state, just renders whatever
