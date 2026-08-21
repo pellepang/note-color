@@ -1,11 +1,16 @@
-"""Turns noisy per-hop chroma vectors and raw multipitch note candidates
-into a stable displayed chord name and note stack. Mirrors
-note_smoother.NoteSmoother's shape: rolling-average + debounce for the
-chord name (one shared stage for #5), asymmetric attack/release hysteresis
-per note-slot for the note stack (#9) -- a different failure mode than the
-chord-name's symmetric debounce, since the flicker being fixed there is a
-single note briefly dipping below threshold mid-chord, not a categorical
-chord-identity change.
+"""Turns raw multipitch note candidates into a stable displayed chord name
+and note stack. Mirrors note_smoother.NoteSmoother's shape: rolling-average
++ debounce for the chord name (one shared stage for #5), asymmetric
+attack/release hysteresis per note-slot for the note stack (#9) -- a
+different failure mode than the chord-name's symmetric debounce, since the
+flicker being fixed there is a single note briefly dipping below threshold
+mid-chord, not a categorical chord-identity change.
+
+Chord-name matching builds its own main/bass chroma vectors from
+`note_candidates` (multipitch.detect()'s already harmonic-pruned output)
+rather than from the caller's raw `chroma.fold()`/`fold_bass()` vectors --
+see `_update_chord_name`'s docstring/comments (issue #56) for why the raw
+harmonic-summed spectrum systematically over-called extended/slash chords.
 """
 
 from collections import deque
@@ -13,6 +18,7 @@ from collections import deque
 import numpy as np
 
 import chord_templates
+from chroma import DEFAULT_BASS_CUTOFF_HZ
 
 
 class ChordSmoother:
@@ -32,19 +38,72 @@ class ChordSmoother:
 
         self.note_states = {}
 
-    def update(self, main_chroma, bass_chroma, note_candidates):
+    def update(self, _main_chroma, _bass_chroma, note_candidates):
         """One hop update. Returns (chord_name, note_stack).
         `chord_name` is a formatted chord name string, or None (either
         "no match" or not yet debounced into a change). `note_stack` is a
         list of dicts: {pitch_class, octave, confidence, is_bass} for
-        every currently-active note-stack slot, lowest note first."""
-        chord_name = self._update_chord_name(main_chroma, bass_chroma)
+        every currently-active note-stack slot, lowest note first.
+
+        `_main_chroma`/`_bass_chroma` are accepted-but-unused: kept so
+        this stays a drop-in call for main.py/batch_transcribe.py, both
+        of which still need their own `chroma.fold()`/`fold_bass()`
+        result for tempo/onset novelty tracking regardless of what
+        chord-name matching does with it -- see `_update_chord_name` for
+        why chord-name matching itself now ignores both in favor of
+        `note_candidates`."""
+        chord_name = self._update_chord_name(note_candidates)
         stack = self._update_note_stack(note_candidates)
         return chord_name, stack
 
-    def _update_chord_name(self, main_chroma, bass_chroma):
-        self.chroma_history.append(np.asarray(main_chroma, dtype=np.float64))
-        self.bass_chroma_history.append(np.asarray(bass_chroma, dtype=np.float64))
+    def _update_chord_name(self, note_candidates):
+        # Chord-name matching used to run directly against chroma.fold()'s
+        # raw harmonic-summed spectrum energy (the caller's main_chroma).
+        # fold()'s harmonic summing is tuned to recover a single note's
+        # *own* overtones back into its own pitch-class bin, but it has no
+        # way to tell that a *different*, simultaneously-sounding note's
+        # 3rd/4th harmonic landing on a third, unplayed pitch class isn't a
+        # real chord tone -- e.g. in a C major triad, E's 3rd harmonic is a
+        # B and G's 3rd harmonic is a D, so the raw chroma vector reads as
+        # a 5-note chord even though only C-E-G is sounding. That
+        # systematically biased cosine-similarity matching toward larger
+        # extended/slash-chord templates (issue #56: ~45% mismatch across
+        # all 360 templates under realistic harmonic content).
+        #
+        # multipitch.detect() already solves exactly this problem for
+        # individual note identification, via its own Hann-windowed FFT
+        # and harmonic-consistency pruning -- reusing its output here
+        # (one-hot per detected pitch class, weighted by confidence)
+        # avoids re-solving the same problem worse a second time. Measured
+        # after this change: 10/360 genuine mismatches (chords denser than
+        # CHORD_MAX_NOTES, an already-documented separate cap), the rest
+        # were resolved; the remaining ~80 apparent "mismatches" in the
+        # issue #56 sweep turned out to be chords that are genuinely
+        # pitch-class-set-identical to a different valid name (augmented
+        # triads, diminished 7ths, sus2/sus4 pairs) -- the same kind of
+        # inherent, undecidable-from-pitch-classes-alone ambiguity this
+        # file's docs already call out for minor7/major6.
+        main_chroma = np.zeros(12)
+        for nc in note_candidates:
+            main_chroma[nc.pitch_class] = max(main_chroma[nc.pitch_class], nc.confidence)
+
+        # Bass detection has the same raw-energy-sum problem as the main
+        # chroma did (see above): chroma.fold_bass() sums every pitch
+        # class's harmonic energy below DEFAULT_BASS_CUTOFF_HZ with no
+        # per-note pruning, so a close-position chord voiced entirely
+        # under that cutoff (root, third, and fifth all sub-250Hz) blurs
+        # together and its raw peak isn't reliably the actual bass note.
+        # The lowest of multipitch's own already-pruned note candidates
+        # -- if it's genuinely down in the bass register -- is a more
+        # trustworthy single signal than that raw low-passed sum.
+        bass_chroma = np.zeros(12)
+        bass_candidates = [nc for nc in note_candidates if nc.freq < DEFAULT_BASS_CUTOFF_HZ]
+        if bass_candidates:
+            lowest = min(bass_candidates, key=lambda nc: nc.freq)
+            bass_chroma[lowest.pitch_class] = lowest.confidence
+
+        self.chroma_history.append(main_chroma)
+        self.bass_chroma_history.append(bass_chroma)
         avg_chroma = np.mean(self.chroma_history, axis=0)
         avg_bass_chroma = np.mean(self.bass_chroma_history, axis=0)
 

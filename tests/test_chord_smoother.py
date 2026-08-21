@@ -1,23 +1,32 @@
 import numpy as np
 
+import chroma
 import config
+import multipitch
+import pitch_detect
 from chord_smoother import ChordSmoother
 from multipitch import NoteCandidate
+
+SAMPLE_RATE = 22050
 
 PITCH = {name: i for i, name in enumerate(
     ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 )}
 
 
-def chroma_for(*note_names):
-    vec = np.zeros(12)
-    for name in note_names:
-        vec[PITCH[name]] = 1.0
-    return vec
-
-
 def note(pitch_class, octave, freq, confidence=0.9):
     return NoteCandidate(pitch_class=pitch_class, octave=octave, freq=freq, confidence=confidence)
+
+
+def notes_for(*note_names, octave=4, confidence=0.9):
+    """NoteCandidate list standing in for what multipitch.detect() would
+    report for these pitch classes -- chord-name matching is driven by
+    this (see chord_smoother._update_chord_name), not by a raw chroma
+    vector, so this is the fixture that actually exercises it now."""
+    return [
+        NoteCandidate(pitch_class=PITCH[name], octave=octave, freq=100.0 + PITCH[name], confidence=confidence)
+        for name in note_names
+    ]
 
 
 def feed(smoother, chroma, bass_chroma, notes, count):
@@ -29,31 +38,31 @@ def feed(smoother, chroma, bass_chroma, notes, count):
 
 def test_chord_name_locks_in_after_debounce_hops():
     s = ChordSmoother(config)
-    c_major = chroma_for("C", "E", "G")
+    c_major = notes_for("C", "E", "G")
     silent_bass = np.zeros(12)
-    name, _stack = feed(s, c_major, silent_bass, [], config.CHORD_DEBOUNCE_HOPS)
+    name, _stack = feed(s, None, silent_bass, c_major, config.CHORD_DEBOUNCE_HOPS)
     assert name == "C"
 
 
 def test_single_hop_candidate_blip_does_not_flicker_display():
     s = ChordSmoother(config)
-    c_major = chroma_for("C", "E", "G")
-    g_major = chroma_for("G", "B", "D")
+    c_major = notes_for("C", "E", "G")
+    g_major = notes_for("G", "B", "D")
     silent_bass = np.zeros(12)
 
-    feed(s, c_major, silent_bass, [], config.CHORD_DEBOUNCE_HOPS + config.CHORD_MEDIAN_WINDOW)
-    name, _stack = s.update(g_major, silent_bass, [])  # single differing hop
+    feed(s, None, silent_bass, c_major, config.CHORD_DEBOUNCE_HOPS + config.CHORD_MEDIAN_WINDOW)
+    name, _stack = s.update(None, silent_bass, g_major)  # single differing hop
     assert name == "C"
 
-    name, _stack = feed(s, c_major, silent_bass, [], 3)
+    name, _stack = feed(s, None, silent_bass, c_major, 3)
     assert name == "C"
 
 
 def test_no_match_reported_as_none_after_debounce():
     s = ChordSmoother(config)
-    uniform = np.ones(12)  # resembles no chord template
+    cluster = notes_for("C", "C#", "D", "D#", "E", "F")  # resembles no chord template
     silent_bass = np.zeros(12)
-    name, _stack = feed(s, uniform, silent_bass, [], config.CHORD_DEBOUNCE_HOPS)
+    name, _stack = feed(s, None, silent_bass, cluster, config.CHORD_DEBOUNCE_HOPS)
     assert name is None
 
 
@@ -125,3 +134,58 @@ def test_chord_change_overflowing_max_notes_shows_incoming_notes_not_stale_ones(
 
     assert len(stack) == config.CHORD_MAX_NOTES
     assert {e["pitch_class"] for e in stack} == {1, 3, 6, 8, 10, 11}
+
+
+def _freq_for(pitch_class, octave):
+    midi = (octave + 1) * 12 + pitch_class
+    return 440.0 * 2 ** ((midi - 69) / 12)
+
+
+def _make_tone(freq, sample_rate=SAMPLE_RATE, duration=0.4, harmonics=(1.0, 0.5, 0.3, 0.15)):
+    n = int(sample_rate * duration)
+    t = np.arange(n) / sample_rate
+    signal = np.zeros(n)
+    for i, amp in enumerate(harmonics, start=1):
+        signal += amp * np.sin(2 * np.pi * freq * i * t)
+    return signal
+
+
+def _real_pipeline_update(smoother, pitch_classes, octave=3):
+    """Routes real, harmonically-rich (not idealized one-hot) tones
+    through the actual live pipeline -- compute_spectrum -> chroma.fold()/
+    fold_bass() -> multipitch.detect() -- into one ChordSmoother.update()
+    call, the same shape main.py's analysis_loop() and
+    batch_transcribe.transcribe() both use."""
+    mix = sum(_make_tone(_freq_for(pc, octave)) for pc in pitch_classes)
+    window = mix[-2048:]
+    spectrum = pitch_detect.compute_spectrum(window, SAMPLE_RATE)
+    main_chroma = chroma.fold(spectrum, SAMPLE_RATE)
+    bass_chroma = chroma.fold_bass(spectrum, SAMPLE_RATE)
+    raw_notes = multipitch.detect(window, SAMPLE_RATE, max_notes=config.CHORD_MAX_NOTES)
+    return smoother.update(main_chroma, bass_chroma, raw_notes)
+
+
+def test_real_pipeline_identifies_plain_triad_not_an_extended_chord():
+    # Regression for issue #56: chord-name matching used to run directly
+    # against chroma.fold()'s raw harmonic-summed spectrum energy, which
+    # has no way to tell one note's overtone bleeding into a different
+    # pitch class apart from a real chord tone -- a plain C major triad
+    # (C-E-G) with ordinary instrument-like harmonics (not pure sine
+    # tones) misidentified as "G13" before this fix, because E's 3rd
+    # harmonic (a B) and G's 3rd harmonic (a D) inflated the chroma vector
+    # into looking like a much richer chord. Routing chord-name matching
+    # through multipitch.detect()'s already harmonic-pruned note
+    # candidates instead of the raw chroma fixes this.
+    s = ChordSmoother(config)
+    name = None
+    for _ in range(config.CHORD_DEBOUNCE_HOPS + config.CHORD_MEDIAN_WINDOW):
+        name, _stack = _real_pipeline_update(s, [0, 4, 7])  # C major triad
+    assert name == "C"
+
+
+def test_real_pipeline_identifies_dominant_seventh_not_an_extended_chord():
+    s = ChordSmoother(config)
+    name = None
+    for _ in range(config.CHORD_DEBOUNCE_HOPS + config.CHORD_MEDIAN_WINDOW):
+        name, _stack = _real_pipeline_update(s, [0, 4, 7, 10])  # C7
+    assert name == "C7"
