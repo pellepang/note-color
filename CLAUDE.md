@@ -348,6 +348,19 @@ One-liners; full rationale in `docs/DECISIONS.md`.
 
 - Python + NumPy — cheap enough at these buffer sizes, no build toolchain.
 - Hand-rolled YIN, not `aubio`/`librosa` — wheel/dependency risk on Pi.
+- `pitch_detect.detect_pitch()` corrects octave-doubling in the low
+  register (issue #69, real acoustic testing found ~65-123Hz notes
+  frequently locking onto their own 2nd/4th harmonic) with a sub-harmonic
+  sanity check: after the ascending threshold scan finds a candidate
+  `tau`, small integer multiples of it (`config.YIN_SUBHARMONIC_MAX_MULTIPLE`)
+  are checked for a *parabolically-refined* (not raw-grid) CMND value that
+  both clears threshold and beats the candidate by a real margin
+  (`config.YIN_SUBHARMONIC_MARGIN`); skipped whenever the candidate is
+  already very confident (`config.YIN_SUBHARMONIC_SKIP_CMND`), which is
+  what keeps octave 3-5 (and plain sine tones) from regressing — see
+  docs/DECISIONS.md for the full empirical root-cause writeup, including
+  why a naive "just compare raw CMND depth" version of this same idea
+  regressed already-correct detections.
 - Microphone is the default input; `--source loopback` is opt-in and
   Linux-only (PipeWire/PulseAudio monitor), so portability of the default
   path is unaffected.
@@ -606,7 +619,12 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - Octave-error blips (~100ms) can occur during note decay; not worth fixing
   without a concrete complaint.
 - Live pitch-tracking quality varies run-to-run with room/mic conditions —
-  not a regression.
+  not a regression. (One concrete, non-room-dependent low-register
+  instance of this *was* found and fixed, though: issue #69's octave-2
+  YIN octave-doubling — see Key design decisions. "Varies with room/mic
+  conditions" still covers everything else, e.g. C#2/D2/G#2 sometimes
+  going silence-gated in the same acoustic test, which is an amplitude/
+  sensitivity-threshold question, not a YIN algorithm bug.)
 - Target 64-bit Raspberry Pi OS (Bookworm+) — 32-bit is a wheel risk.
 - macOS/Windows gate mic access per-app; a denied prompt gives silent zeros,
   not an error.

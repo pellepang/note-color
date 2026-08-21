@@ -11,6 +11,19 @@ FMIN = 65.0               # ~C2
 FMAX = 1000.0             # ~B5
 YIN_THRESHOLD = 0.12
 
+# Issue #69: octave-doubling correction. In the low register a note's
+# fundamental can be naturally weaker than its overtones, and a strong
+# harmonic then wins YIN's ascending-from-tau_min threshold scan before
+# the true (longer-period) fundamental is ever reached. After the scan
+# finds a candidate, detect_pitch() checks small integer multiples of it
+# (candidate positions for the true fundamental) and adopts the deepest
+# one that's both still sub-threshold and meaningfully deeper than the
+# candidate -- see pitch_detect.detect_pitch()'s docstring/comment and
+# docs/DECISIONS.md for the full empirical rationale.
+YIN_SUBHARMONIC_MAX_MULTIPLE = 4   # matches chroma.HARMONIC_WEIGHTS' harmonics 1-4
+YIN_SUBHARMONIC_MARGIN = 0.5       # a multiple must beat the candidate's CMND by at least this factor
+YIN_SUBHARMONIC_SKIP_CMND = 0.01   # skip the check when the candidate is already this confident
+
 # --- Note smoothing ---
 # RMS_SILENCE_THRESHOLD and CONFIDENCE_THRESHOLD are the base values at
 # sensitivity=1.0. Both scale down (more permissive) as sensitivity rises;

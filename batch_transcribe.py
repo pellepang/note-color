@@ -119,7 +119,8 @@ def transcribe(audio, sample_rate, time_signature=config.DEFAULT_TIME_SIGNATURE)
 
         spectrum = compute_spectrum(ring)
         freq, confidence = detect_pitch(
-            ring, sample_rate, spectrum, config.FMIN, config.FMAX, config.YIN_THRESHOLD
+            ring, sample_rate, spectrum, config.FMIN, config.FMAX, config.YIN_THRESHOLD,
+            config.YIN_SUBHARMONIC_MAX_MULTIPLE, config.YIN_SUBHARMONIC_MARGIN, config.YIN_SUBHARMONIC_SKIP_CMND,
         )
         pitch_class, octave, is_onset = smoother.update(freq, confidence, rms, spectrum)
 

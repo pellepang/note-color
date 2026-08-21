@@ -46,6 +46,23 @@ def test_tone_with_harmonics_detected():
     assert abs(cents_off) < 10
 
 
+@pytest.mark.parametrize("freq", [110.0, 65.4, 69.3, 73.4, 92.5, 103.8])
+def test_octave2_harmonic_rich_tone_not_octave_doubled(freq):
+    """Issue #69: A2/C2/C#2/D2/F#2/G#2, synthesized with real harmonic
+    content (harmonics 1-4, weighted like chroma.HARMONIC_WEIGHTS), used
+    to lock onto the note's own 2nd or 4th harmonic instead of the true
+    fundamental -- a strong-harmonic-relative-to-fundamental low tone lets
+    YIN's ascending threshold scan find a confident sub-threshold dip at
+    an exact submultiple of the true period before ever reaching the true
+    (longer) fundamental lag. Confirm detect_pitch() lands on the true
+    fundamental, not a harmonic multiple of it."""
+    tone = make_tone(freq, duration=2048 / SAMPLE_RATE, harmonics=(1.0, 0.5, 1.0 / 3, 0.25))
+    detected, confidence = detect_pitch(tone, SAMPLE_RATE, compute_spectrum(tone))
+    assert detected is not None
+    cents_off = 1200 * np.log2(detected / freq)
+    assert abs(cents_off) < 100, f"expected ~{freq}Hz, got {detected}Hz ({cents_off:.0f} cents off)"
+
+
 def test_silence_returns_none():
     silence = np.zeros(2048)
     detected, confidence = detect_pitch(silence, SAMPLE_RATE, compute_spectrum(silence))
