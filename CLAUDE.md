@@ -405,6 +405,32 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   actually has the resolution to tell them apart. Gated rather than
   unconditional so the extra ~93ms of latency is paid only on hops with
   real low content, not every hop.
+- `multipitch.detect()`'s harmonic-consistency pruning walks candidate
+  peaks ascending by frequency, not descending by magnitude (issue #67)
+  — the magnitude-first order let a note's own higher harmonic jump the
+  queue ahead of its fundamental whenever the FFT happened to weight
+  that harmonic louder that hop (routine under real acoustic capture:
+  mic/speaker frequency response, room-reflection comb filtering can
+  both null a fundamental's bin and boost an overtone's), and
+  `_is_harmonic_of()` has no reverse-direction check for "is this
+  already-accepted candidate itself a harmonic of a not-yet-accepted
+  lower note" — so once the harmonic was accepted first, the true
+  fundamental arriving later (not itself a harmonic of anything higher)
+  got accepted too, alongside the phantom. Walking low-to-high instead
+  means a real fundamental always gets first claim on a slot, so its own
+  harmonics reliably prune against it regardless of which partial
+  carried more raw magnitude that hop — confirmed against a synthesized
+  note whose 3rd harmonic outmagnitudes its own fundamental, and does
+  *not* need any widening of `harmonic_tolerance_cents` (a synthetic
+  sweep up to 30 cents of pure frequency detuning, fundamental still
+  loudest, never broke the existing 35-cent tolerance — the real-world
+  failure was evaluation order, not tolerance width). This fix does not
+  resolve every note-density recall gap issue #68 also reported — see
+  Known limitations for the residual, inherent harmonic-collision
+  ambiguity in some chord voicings, and `docs/DECISIONS.md` for the
+  full investigation (including why a magnitude-consistency check was
+  tried and rejected for the residual gap: it would reopen this exact
+  fix).
 - `tab`'s notehead style (`N`), legend visibility (`L`), and freeze-frame
   (`Space`) are pure render-thread-local state in `main.py`, same as `P` —
   `TabDisplay` itself owns no toggle state, just renders whatever
@@ -619,6 +645,31 @@ One-liners; full detail in `docs/DECISIONS.md`.
   disambiguate the root, `chord_templates.match()` deterministically picks
   the lower root-index template; this is correct behavior, not a wrong
   answer, when no bass is actually present.
+- A chord voiced so that one note's frequency nearly coincides with
+  another note's own harmonic (e.g. a root and a fifth an octave+fifth
+  above it, a 3:1 ratio — 12-TET's fifth+octave lands only ~2 cents from
+  the true 3rd harmonic) can still lose the higher note in
+  `multipitch.detect()`'s harmonic-consistency pruning, even after issue
+  #67's evaluation-order fix (below) — investigated for issue #68.
+  Confirmed by direct experiment: no combination of pruning order or
+  magnitude-based reasoning can distinguish "this peak is note X's own
+  3rd harmonic" from "this peak is a real, independent note that happens
+  to sit within a couple of cents of note X's 3rd harmonic" from a single
+  hop's magnitude spectrum alone — the two cases are spectrally
+  identical. A magnitude-consistency check (only prune a harmonic
+  candidate if it's quieter than its accepted fundamental, scaled by
+  typical overtone decay) was tried and rejected: it reopens issue #67
+  (whose real acoustic failure was a genuine overtone measuring *louder*
+  than its own fundamental, via mic/speaker frequency response) exactly
+  as often as it would fix #68. Narrowing `harmonic_tolerance_cents`
+  doesn't help either — the coincidence itself is only ~2 cents in exact
+  math, well inside any tolerance wide enough to still catch real
+  acoustic jitter. Resolving this fully would need information beyond a
+  single hop's magnitude spectrum (e.g. per-pitch-class onset/persistence
+  tracked across hops) — out of scope for #67/#68's pruning-logic tuning.
+  Chord voicings without such coincidental intervals are unaffected (see
+  `tests/test_multipitch.py`'s dense-chord test, deliberately built with
+  a >=60-cent safety margin from any small-integer frequency ratio).
 - Low bass notes with no harmonic content (a pure sine, no overtones) can
   be a semitone off in `chroma.fold_bass()`'s bass-note detection — real
   bass instruments' overtones resolve this fine (see the harmonic-summing
