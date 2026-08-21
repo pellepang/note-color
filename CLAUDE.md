@@ -50,6 +50,26 @@ run; not yet verified against real (non-synthetic) playing beyond that.
   the chord-name label only. See issue #56 for repro, root-cause
   hypothesis, and suggested directions (harmonic-bleed compensation,
   re-tuning against a harmonically-rich test corpus).
+- `multipitch.detect()` badly garbles ordinary low-register (bass) chords
+  under the app's real live window (`config.WINDOW_SIZE`, 2048 samples):
+  a single low note alone detects perfectly, but e.g. C2+E2+G2 comes back
+  as five wrong/spurious notes at wrong octaves. Distinct from the
+  chord-name issue above -- this is the raw per-note output every chord-
+  mode view draws, not just the chord label. See issue #63 for repro,
+  root-cause hypothesis (FFT bin density too coarse at low absolute
+  frequencies for stable peak interpolation/harmonic pruning), and
+  suggested directions.
+- Live chord-mode duration tracking (`main.py`'s `chord_duration_tracker`)
+  is wired to raw, undebounced `multipitch.detect()` output instead of
+  `chord_smoother`'s already-debounced note stack, so a single-hop raw
+  detection flicker on an otherwise continuously-sustained/displayed note
+  fragments it into two short, individually-wrong duration events in
+  `tab`'s rhythm notation. `batch_transcribe.py`'s offline path already
+  does this correctly (derives duration tracking from the debounced
+  stack) -- the live path is the one out of sync. See issue #64; the fix
+  itself looks small (reorder `analysis_loop()` and feed the debounced
+  stack instead) but wasn't made directly since it touches `main.py`,
+  which had unrelated in-flight changes at investigation time.
 
 ## Architecture
 
