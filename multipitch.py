@@ -131,18 +131,48 @@ def detect(
     raw_candidates.sort(key=lambda c: c[1], reverse=True)
     raw_candidates = raw_candidates[:max_peak_candidates]
 
-    accepted = []
-    for freq, mag in raw_candidates:
-        if any(_is_near_duplicate(freq, acc_freq, min_separation_cents) for acc_freq, _ in accepted):
+    # Harmonic-consistency pruning walks candidates ascending by FREQUENCY,
+    # not by magnitude (issue #67). `_is_harmonic_of(freq, acc_freq, ...)`
+    # only prunes a candidate that's a harmonic *of* an already-accepted
+    # one -- it has no reverse check for "is this already-accepted
+    # candidate itself a harmonic of a not-yet-accepted, lower note".
+    # Walking in magnitude order let a note's own higher harmonic jump the
+    # queue ahead of its fundamental whenever the FFT happened to weight
+    # that harmonic louder that hop -- routine under real acoustic capture
+    # (mic/speaker frequency response, room-reflection comb filtering can
+    # both null out a fundamental's bin and boost an overtone's), even
+    # with zero frequency-estimate jitter: once the harmonic was accepted
+    # first, the true fundamental arriving later isn't a harmonic of
+    # anything higher in frequency, so it got accepted too, alongside the
+    # phantom. Walking low-to-high instead means a real fundamental always
+    # gets first crack at a slot, so its own harmonics reliably prune
+    # against it afterward regardless of which partial carried more raw
+    # magnitude that hop. Confirmed empirically: a synthesized E4 whose 3rd
+    # harmonic (partial amplitude 1.4 vs. fundamental's 1.0) out-magnitudes
+    # its own fundamental reproduces exactly this issue's B5-ghost-note
+    # symptom under the old magnitude-first ordering, and is fixed by this
+    # reordering alone -- no tolerance widening needed (a synthetic sweep
+    # up to 30 cents of pure frequency detuning, fundamental still
+    # loudest, never broke the existing 35-cent tolerance; the reported
+    # real-world failures are this ordering bug, not an undersized
+    # tolerance).
+    freq_ordered = sorted(raw_candidates, key=lambda c: c[0])
+    pruned = []
+    for freq, mag in freq_ordered:
+        if any(_is_near_duplicate(freq, acc_freq, min_separation_cents) for acc_freq, _ in pruned):
             continue
-        if any(_is_harmonic_of(freq, acc_freq, harmonic_tolerance_cents) for acc_freq, _ in accepted):
+        if any(_is_harmonic_of(freq, acc_freq, harmonic_tolerance_cents) for acc_freq, _ in pruned):
             continue
-        accepted.append((freq, mag))
-        if len(accepted) >= max_notes:
-            break
+        pruned.append((freq, mag))
 
-    if not accepted:
+    if not pruned:
         return []
+
+    # Cap to max_notes by magnitude now that harmonics are pruned -- keep
+    # whichever surviving fundamentals are strongest, not just whichever
+    # happen to sit lowest in frequency.
+    pruned.sort(key=lambda c: c[1], reverse=True)
+    accepted = pruned[:max_notes]
 
     top_mag = accepted[0][1]
     notes = []

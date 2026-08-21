@@ -189,3 +189,51 @@ def test_real_pipeline_identifies_dominant_seventh_not_an_extended_chord():
     for _ in range(config.CHORD_DEBOUNCE_HOPS + config.CHORD_MEDIAN_WINDOW):
         name, _stack = _real_pipeline_update(s, [0, 4, 7, 10])  # C7
     assert name == "C7"
+
+
+def test_real_pipeline_retains_all_six_notes_of_a_dense_non_colliding_chord():
+    # issue #68: note_stack's effective size plateaued around ~4.2-4.3
+    # under real acoustic capture regardless of whether 3-6 real notes
+    # were sounding. Confirms which layer(s) still lose notes after
+    # #67's ordering fix, using the SAME real wiring
+    # (compute_spectrum -> chroma.fold()/fold_bass() ->
+    # multipitch.detect() -> ChordSmoother.update()) main.py's
+    # analysis_loop() and batch_transcribe.transcribe() both use --
+    # a single-octave 6-note cluster (all pitch classes within one
+    # octave, so no pair is close to a harmonic-collision ratio; see
+    # test_multipitch.test_dense_six_note_chord_all_survive_when_not_
+    # harmonically_colliding for why that distinction matters) must
+    # survive both multipitch.detect()'s pruning and ChordSmoother's
+    # max_notes trim intact.
+    s = ChordSmoother(config)
+    pcs = [0, 1, 3, 6, 8, 10]
+    stack = []
+    for _ in range(config.NOTE_STACK_ATTACK_HOPS + 3):
+        _name, stack = _real_pipeline_update(s, pcs)
+    assert {e["pitch_class"] for e in stack} == set(pcs)
+    assert len(stack) == 6
+
+
+def test_note_stack_trimming_converges_to_new_chord_after_a_few_hops():
+    # Second hypothesis from issue #68: that ChordSmoother._update_note_
+    # stack()'s confidence-based trimming to CHORD_MAX_NOTES could itself
+    # be evicting real, currently-sounding notes in favor of stale/
+    # decaying ones once more than a few notes compete for slots. A
+    # worst-case transient (a full CHORD_MAX_NOTES-note chord change,
+    # 6 outgoing + 6 incoming = 12 candidates briefly competing for 6
+    # slots) is exercised directly here (bypassing multipitch.detect()
+    # entirely, so this isolates the trimming logic on its own): the
+    # stack should fully settle onto the new chord's 6 notes within a
+    # handful of hops, not get stuck showing a mix of stale and fresh
+    # notes indefinitely.
+    s = ChordSmoother(config)
+    silence_chroma = np.zeros(12)
+    old_notes = [note(pc, 2, 100.0 + pc, confidence=0.9) for pc in (0, 2, 4, 5, 7, 9)]
+    feed(s, silence_chroma, silence_chroma, old_notes, config.NOTE_STACK_ATTACK_HOPS + 2)
+
+    new_notes = [note(pc, 5, 800.0 + pc, confidence=0.9) for pc in (1, 3, 6, 8, 10, 11)]
+    stack = []
+    for _ in range(config.NOTE_STACK_ATTACK_HOPS + config.NOTE_STACK_RELEASE_HOPS):
+        _name, stack = s.update(silence_chroma, silence_chroma, new_notes)
+    assert {e["pitch_class"] for e in stack} == {1, 3, 6, 8, 10, 11}
+    assert len(stack) == 6
