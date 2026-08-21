@@ -307,21 +307,42 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
             max_peak_candidates=config.CHORD_MAX_PEAK_CANDIDATES,
         )
 
-        # Chord-mode duration tracking. is_onset is hardcoded False here
-        # deliberately: multipitch.detect() has no persistent per-note
-        # identity across hops (it's independent spectral peak-picking
-        # every hop), so there's no reliable signal for "this is a genuine
-        # re-attack of an already-sounding pitch" the way NoteSmoother's
-        # monophonic path has one -- the ordinary appear/sustain/disappear
-        # lifecycle still tracks correctly via DurationTracker's
-        # absence-based finalization, it just won't split a same-pitch
-        # re-attack mid-sustain into two separate chord-mode notes. A
-        # deliberate, bounded scope-narrowing versus the mono path.
-        chord_notes = [(nc.pitch_class, nc.octave, nc.confidence, False) for nc in raw_notes]
+        chord_name, raw_stack = chord_smoother.update(main_chroma, bass_chroma, raw_notes)
+
+        # Chord-mode duration tracking (issue #64): fed from chord_smoother's
+        # already-debounced raw_stack, not raw multipitch.detect() output.
+        # multipitch.detect() re-picks spectral peaks independently every
+        # hop, so a single noisy hop can drop a note from raw_notes even
+        # while it's genuinely still sounding; chord_smoother's
+        # NOTE_STACK_ATTACK_HOPS/RELEASE_HOPS hysteresis already absorbs
+        # that kind of blip for display purposes (see its module
+        # docstring). Driving chord_duration_tracker straight from
+        # raw_notes bypassed that hysteresis entirely, so the same 1-hop
+        # dropout that display shrugs off would still finalize the note's
+        # duration early via DurationTracker.update()'s absence-based
+        # path -- fragmenting one continuously-*displayed* note into two
+        # short, individually-wrong duration events. Sourcing from
+        # raw_stack instead means duration tracking only ever sees a note
+        # disappear when the display does too. Mirrors
+        # batch_transcribe.py's already-correct pattern of building its
+        # chord_magnitude/chord_onsets from chord_smoother.update()'s
+        # debounced output rather than raw multipitch.detect().
+        #
+        # is_onset is still hardcoded False here deliberately: neither
+        # multipitch.detect() nor chord_smoother's hysteresis carries a
+        # persistent per-note identity that could distinguish "genuine
+        # re-attack of an already-sounding pitch" from "still the same
+        # note" the way NoteSmoother's monophonic onset gate can -- the
+        # ordinary appear/sustain/disappear lifecycle still tracks
+        # correctly via DurationTracker's absence-based finalization, it
+        # just won't split a same-pitch re-attack mid-sustain into two
+        # separate chord-mode notes. A deliberate, bounded scope-narrowing
+        # versus the mono path, unchanged by this fix.
+        chord_notes = [
+            (entry["pitch_class"], entry["octave"], entry["confidence"], False) for entry in raw_stack
+        ]
         chord_finalized = chord_duration_tracker.update(chord_notes, hop_index)
         chord_finalized_by_key = {(pc, oct_): dur for pc, oct_, dur in chord_finalized}
-
-        chord_name, raw_stack = chord_smoother.update(main_chroma, bass_chroma, raw_notes)
 
         note_stack = []
         for entry in raw_stack:

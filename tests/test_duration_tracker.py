@@ -1,6 +1,10 @@
+import numpy as np
 import pytest
 
+import config
+from chord_smoother import ChordSmoother
 from duration_tracker import DEFAULT_DURATION_CLASS, DurationTracker, duration_class_for_beats
+from multipitch import NoteCandidate
 
 
 class _Cfg:
@@ -101,3 +105,74 @@ def test_finalize_noncausal_smooths_a_single_noisy_dip():
     unsmoothed = DurationTracker.finalize_noncausal(envelope, [0], decay_ratio=0.25, smooth_window=1)
     smoothed = DurationTracker.finalize_noncausal(envelope, [0], decay_ratio=0.25, smooth_window=5)
     assert smoothed[0][1] > unsmoothed[0][1]
+
+
+# --- issue #64: live chord-mode wiring must not desync from the displayed
+# note stack --------------------------------------------------------------
+
+def test_chord_duration_tracker_survives_single_hop_raw_dropout_when_fed_debounced_stack():
+    """Regression for issue #64. This mirrors the issue's own repro (a
+    single-hop dropout in multipitch.detect()'s raw per-hop output, mid-
+    sustain, on an otherwise continuously-held note) but drives
+    DurationTracker.update() from ChordSmoother's already-debounced
+    raw_stack -- the fixed main.py analysis_loop() order (chord_smoother.
+    update() first, then chord_duration_tracker fed from its stack output)
+    -- instead of raw multipitch.detect() output directly. Before the fix,
+    the same dropout fragmented one continuously-sustained/displayed note
+    into two separate finalize events; after it, ChordSmoother's
+    NOTE_STACK_RELEASE_HOPS hysteresis absorbs the dropout before
+    DurationTracker ever sees an absence, so the note stays one
+    continuous duration event start to finish."""
+    dt = DurationTracker(config)
+    cs = ChordSmoother(config)
+    silent_chroma = np.zeros(12)
+
+    finalized_all = []
+    saw_dropout_but_stack_still_active = False
+    for i in range(30):
+        hop = i + 1
+        present = i != 15  # single-hop raw-detection dropout at the 16th hop
+        raw_notes = [NoteCandidate(0, 4, 261.6, 0.9)] if present else []
+
+        chord_name, raw_stack = cs.update(silent_chroma, silent_chroma, raw_notes)
+        # Mirrors main.py's fixed wiring: chord_duration_tracker is fed
+        # from the debounced raw_stack, not raw_notes directly.
+        chord_notes = [
+            (entry["pitch_class"], entry["octave"], entry["confidence"], False) for entry in raw_stack
+        ]
+        finalized = dt.update(chord_notes, hop)
+        finalized_all.extend(finalized)
+
+        stack_active = any(e["pitch_class"] == 0 and e["octave"] == 4 for e in raw_stack)
+        if not present and stack_active:
+            saw_dropout_but_stack_still_active = True
+
+    # The note plays continuously for the full 30 hops (the one dropout
+    # hop is absorbed by ChordSmoother's release hysteresis, same as the
+    # issue's own repro demonstrated for the displayed note_stack) -- no
+    # finalize event should have fired yet, and in particular none should
+    # have fired fragmenting the sustain into a spurious early segment at
+    # the dropout hop.
+    assert saw_dropout_but_stack_still_active
+    assert finalized_all == []
+
+    # Now let the note actually stop for good and run out ChordSmoother's
+    # release hysteresis -- only then should DurationTracker finalize,
+    # and it should do so as exactly ONE event covering the note's whole
+    # real lifetime, not two fragments.
+    for extra in range(config.NOTE_STACK_RELEASE_HOPS + 1):
+        hop = 30 + extra + 1
+        chord_name, raw_stack = cs.update(silent_chroma, silent_chroma, [])
+        chord_notes = [
+            (entry["pitch_class"], entry["octave"], entry["confidence"], False) for entry in raw_stack
+        ]
+        finalized_all.extend(dt.update(chord_notes, hop))
+
+    assert len(finalized_all) == 1
+    pitch_class, octave, duration_hops = finalized_all[0]
+    assert (pitch_class, octave) == (0, 4)
+    # Onset was debounced in by NOTE_STACK_ATTACK_HOPS, so the tracked
+    # span is close to but not exactly the full 30-hop sustain -- the
+    # important assertion is "one event, roughly the whole sustain", not
+    # an exact hop count tied to hysteresis constants.
+    assert duration_hops >= 25
