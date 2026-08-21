@@ -5,11 +5,22 @@ Per this repo's convention, MenuDisplay's selection-state API is covered
 in test_shell.py (unchanged by #51) and the interactive render() loop
 itself is smoke-tested manually, not here."""
 
+import re
+
 import pytest
 
 import config
 import menu_display
-from menu_display import MENU_ITEMS, _layout, _resolve_perf_mode, _text_lines
+from menu_display import MENU_ITEMS, _donation_line, _layout, _resolve_perf_mode, _text_lines
+
+_OSC8_RE = re.compile(r"\x1b\]8;;.*?\x1b\\")
+
+
+def _visible_len(line):
+    """Strips OSC 8 hyperlink escape bytes (zero-width on screen) so the
+    remainder measures what actually occupies terminal columns -- the same
+    distinction _donation_line's own centering math has to make."""
+    return len(_OSC8_RE.sub("", line))
 
 
 @pytest.fixture(autouse=True)
@@ -51,6 +62,25 @@ def test_layout_donut_and_text_pane_never_overlap():
         if donut_cols > 0:
             assert text_col > donut_cols
             assert text_col + text_width - 1 <= cols + 1  # allow OSC8-inflated last col slack
+
+
+# --- _donation_line -----------------------------------------------------
+
+def test_donation_line_never_exceeds_the_pane_width_it_was_given():
+    # "by Pelle -- please support on Patreon: https://patreon.com/notecolor"
+    # (~70 visible chars) is longer than config.MENU_TEXT_PANE_WIDTH (46) --
+    # _donation_line must truncate to fit rather than overflow into the
+    # donut pane (or off the terminal edge in the narrow-fallback layout),
+    # which corrupts the whole screen once the terminal auto-wraps it.
+    for width in (10, 30, 46, config.MENU_TEXT_PANE_WIDTH, 80, 200):
+        assert _visible_len(_donation_line(width)) <= width
+
+
+def test_donation_line_at_the_actual_default_pane_width_fits():
+    # Regression check pinned to this app's real, fixed text-pane width --
+    # this is the width every real menu render actually uses.
+    line = _donation_line(config.MENU_TEXT_PANE_WIDTH)
+    assert _visible_len(line) <= config.MENU_TEXT_PANE_WIDTH
 
 
 # --- _resolve_perf_mode --------------------------------------------------

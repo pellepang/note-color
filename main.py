@@ -115,18 +115,40 @@ class RawKeys:
     _ARROW_BY_FINAL_BYTE = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}
 
     def poll(self):
-        if not self._active or not select.select([sys.stdin], [], [], 0)[0]:
+        # Reads via os.read() on the raw fd, never sys.stdin.read() --
+        # sys.stdin is a buffered TextIOWrapper, and mixing select() (which
+        # only sees data still sitting at the OS level) with a buffered
+        # read() is a classic trap: read(1) can slurp every byte the pty
+        # already delivered into Python's internal buffer while only
+        # handing back the one requested, so the *next* select() call sees
+        # nothing left at the fd and falsely reports "no more input yet" --
+        # even though the rest of an ESC [ <letter> arrow burst was sitting
+        # right there. That's what made Up/Down on the menu screen require
+        # holding the key (repeated OS key-repeat bursts occasionally
+        # landing on a lucky read boundary) instead of registering on a
+        # single tap. os.read() is unbuffered, so select() and read() stay
+        # in sync with the actual fd state.
+        fd = sys.stdin.fileno()
+        if not self._active or not select.select([fd], [], [], 0)[0]:
             return None
-        ch = sys.stdin.read(1)
+        ch = os.read(fd, 1).decode(errors="ignore")
         if ch != "\x1b":
             return ch
-        # Arrow keys send ESC [ <letter> as one burst; if nothing follows
-        # immediately it was a lone Escape keypress, not an arrow key.
-        if not select.select([sys.stdin], [], [], 0)[0]:
+        # Arrow keys send ESC [ <letter> as one burst, but under a
+        # multiplexer (tmux) or a laggy pty the two continuation bytes can
+        # arrive a few ms after ESC itself rather than in the same read --
+        # a 0-timeout select() right here would misread that as a lone
+        # Escape keypress and silently drop the arrow key.
+        # config.ESCAPE_SEQUENCE_TIMEOUT gives the rest of the burst a
+        # brief window to show up; nothing in this app binds a bare
+        # Escape keypress to an action, so the extra wait before falling
+        # back to "not an arrow key" is never user-visible.
+        timeout = config.ESCAPE_SEQUENCE_TIMEOUT
+        if not select.select([fd], [], [], timeout)[0]:
             return None
-        if sys.stdin.read(1) != "[" or not select.select([sys.stdin], [], [], 0)[0]:
+        if os.read(fd, 1).decode(errors="ignore") != "[" or not select.select([fd], [], [], timeout)[0]:
             return None
-        return self._ARROW_BY_FINAL_BYTE.get(sys.stdin.read(1))
+        return self._ARROW_BY_FINAL_BYTE.get(os.read(fd, 1).decode(errors="ignore"))
 
     def restore(self):
         if self._active:

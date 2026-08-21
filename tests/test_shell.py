@@ -98,9 +98,13 @@ def test_donation_line_names_author_and_platform():
 
 def test_donation_line_never_negative_pads_on_narrow_terminals():
     # Shouldn't raise or produce a negative amount of leading whitespace
-    # when the terminal is narrower than the visible text.
+    # when the terminal is narrower than the visible text -- and, since the
+    # full "by <author> -- please support on <platform>: <url>" text (~70
+    # visible chars) is wider than any narrow terminal, it must truncate to
+    # fit rather than overflow the pane width it was given (see
+    # menu_display._donation_line's docstring).
     line = _donation_line(1)
-    assert config.DONATION_URL in line
+    assert len(line) <= 1
 
 
 # --- shell.py: menu key dispatch -------------------------------------------

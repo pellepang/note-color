@@ -63,6 +63,12 @@ WINDOW_SIZE_PX = (800, 600)
 FPS = 30
 TERMINAL_FPS = 20
 WHEEL_FPS = 12
+ESCAPE_SEQUENCE_TIMEOUT = 0.05  # seconds RawKeys.poll() waits for an arrow key's ESC [ <letter>
+                                # continuation bytes before treating ESC as a lone keypress -- covers
+                                # tmux/laggy-pty setups that split the burst across reads. Matches
+                                # vim's common ttimeoutlen fix for the same class of problem; only
+                                # caps the *worst case* wait -- a genuine arrow burst resolves as soon
+                                # as its bytes are ready, almost always well under this
 
 # --- Tab / staff view ---
 DEFAULT_SCROLL_MODE = "onset"  # or "fix"
@@ -162,6 +168,12 @@ TEMPO_MIN_BPM = 40
 TEMPO_MAX_BPM = 240
 TEMPO_UPDATE_INTERVAL_HOPS = 20  # ~0.46s at BLOCK_SIZE=512/SAMPLE_RATE=22050 -- re-estimate tempo
                                   # this often rather than every hop, amortizing the autocorrelation cost
-DEFAULT_TIME_SIGNATURE = "4/4"   # display-only (main.py/virtualnote.py) -- never auto-detected
+DEFAULT_TIME_SIGNATURE = (4, 4)  # (numerator, denominator) -- never auto-detected. A tuple, not a
+                                  # display string: argparse only re-parses a --time-signature default
+                                  # via _parse_time_signature when the default is itself a string, and
+                                  # every non-CLI caller (shell.py's menu path, run_session/
+                                  # run_terminal_tab's own defaults, batch_transcribe.transcribe's)
+                                  # uses this value directly as the pre-validated (int, int) pair the
+                                  # rest of the pipeline expects -- see main.py's run_terminal_tab.
 TAB_BARLINE_WIDTH = 1             # terminal characters per barline column -- narrower than a note
                                    # column (TAB_COLUMN_WIDTH), so it reads as a divider, not data

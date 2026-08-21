@@ -59,9 +59,22 @@ def _donation_line(width):
     """The main menu screen's author + donation callout (issue #44) --
     centered on `width` using the *visible* text's width, since the OSC 8
     escape bytes wrapping the URL would otherwise throw off str.center()'s
-    character count without changing what's actually drawn on screen."""
+    character count without changing what's actually drawn on screen.
+
+    The full "by <author> -- please support on <platform>: <url>" text
+    (~70 visible chars) is wider than `config.MENU_TEXT_PANE_WIDTH` (46) --
+    every real menu render hits this truncation branch, not just narrow
+    terminals. Left un-truncated, the text pane's fixed-width layout
+    (`_layout()`) would write it past the pane's right edge; the terminal
+    then auto-wraps the overflow onto the donut pane or the following
+    screen row, corrupting the whole frame. Truncated text drops the OSC 8
+    wrapping too -- a hyperlink around a chopped-off substring would still
+    technically work, but a clipped, silently-still-clickable URL reads as
+    more broken than plain truncated text."""
     prefix = f"by {config.AUTHOR_NAME}  --  please support on {config.DONATION_PLATFORM}: "
     visible = prefix + config.DONATION_URL
+    if len(visible) > width:
+        return (visible[: width - 1] + "…") if width > 1 else visible[:width]
     pad = max((width - len(visible)) // 2, 0)
     return " " * pad + prefix + osc8_link(config.DONATION_URL, config.DONATION_URL)
 
