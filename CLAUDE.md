@@ -42,7 +42,14 @@ run; not yet verified against real (non-synthetic) playing beyond that.
 
 ## Backlog (open problems, not yet fixed)
 
-None currently open.
+- Chord-*name* recognition (`chord_templates.match()`) over-calls
+  extended/slash chords once the input chroma comes from real,
+  harmonically-rich tones rather than idealized one-hot vectors --
+  ~45% mismatch across all 360 templates in a stress sweep. Individual
+  note detection (`multipitch.detect()`) is unaffected; this is scoped to
+  the chord-name label only. See issue #56 for repro, root-cause
+  hypothesis, and suggested directions (harmonic-bleed compensation,
+  re-tuning against a harmonically-rich test corpus).
 
 ## Architecture
 
