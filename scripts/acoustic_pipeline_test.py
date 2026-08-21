@@ -1,0 +1,649 @@
+"""Extensive speaker->mic acoustic round-trip test suite against note-color's
+REAL, unmodified live pipeline (`main.SessionState` + `main.analysis_loop()`
+-- the exact code every `virtualnote` terminal view runs). Not a pytest
+test: it needs real audio hardware (a speaker and a microphone in the same
+room) and takes several minutes to run, so it's a manual verification tool,
+same convention as the "real speaker->mic acoustic round-trip test" already
+used to validate this pipeline (see CLAUDE.md's Status section) -- this
+script is that test, made repeatable, quantitative, and broader than a
+single ad hoc smoke check.
+
+What it measures, one suite at a time:
+
+- `chromatic`  -- monophonic pitch-detection accuracy and attack-to-display
+                  latency, swept across every pitch class in every octave
+                  this app's YIN range (`config.FMIN`/`FMAX`) covers.
+- `tempo`      -- how fast a legato (no-gap) note sequence can move before
+                  the pipeline starts missing notes or lagging behind --
+                  the concrete "how fast can it go" question.
+- `chords`     -- chord-name accuracy and phantom/missing note-stack pitch
+                  classes across a broad sample of qualities, roots, and
+                  registers (triads, 7ths, sus/add chords, one slash chord).
+- `density`    -- how detection quality (recall/phantom rate) degrades as
+                  the number of simultaneously-sounding notes rises from 1
+                  to `config.CHORD_MAX_NOTES`.
+- `sustain`    -- long (6s) held single notes and chords, to precisely
+                  quantify onset-gate misfire rate (issue #66) and
+                  duration-tracking fragmentation (issues #64/#67) with a
+                  large per-note sample size.
+
+Usage:
+    .venv/bin/python scripts/acoustic_pipeline_test.py                 # run everything
+    .venv/bin/python scripts/acoustic_pipeline_test.py --suites chords,tempo
+    .venv/bin/python scripts/acoustic_pipeline_test.py --report OUTDIR # re-analyze a past run, no audio needed
+
+Run output (raw per-hop JSON logs + a generated report.md) is written under
+`--outdir` (default `acoustic_test_results/<timestamp>/`, gitignored --
+these are machine/room-specific measurements, not something to commit,
+same convention as this repo's `note_history_*.txt` dumps). The script
+itself is the thing worth keeping in version control.
+"""
+
+import argparse
+import itertools
+import json
+import os
+import queue
+import statistics
+import sys
+import time
+from datetime import datetime
+
+import numpy as np
+import sounddevice as sd
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import config
+import main
+from color_map import NOTE_NAMES_FIFTHS
+
+PLAYBACK_SR = 44100
+POLL_INTERVAL_S = 0.005          # busy-poll rate against the single-slot result_queue
+LATENCY_SEARCH_SLOP_S = 0.15     # config's own "comfortably under 150ms" end-to-end latency target
+
+NOTE_INDEX = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
+              "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11}
+
+# Same quality->(offsets, jazz-symbol) definitions as chord_templates.QUALITIES,
+# reproduced independently here (not imported) so this test's "expected"
+# chord names are an independent ground truth, not a self-check against the
+# app's own table -- these are standard jazz-notation chord definitions, not
+# app-specific, so duplicating the handful this suite actually exercises is
+# fine.
+QUALITY_DEFS = {
+    "maj": ({0, 4, 7}, ""),
+    "min": ({0, 3, 7}, "-"),
+    "dim": ({0, 3, 6}, "°"),
+    "aug": ({0, 4, 8}, "+"),
+    "dom7": ({0, 4, 7, 10}, "7"),
+    "maj7": ({0, 4, 7, 11}, "Δ7"),
+    "min7": ({0, 3, 7, 10}, "-7"),
+    "dim7": ({0, 3, 6, 9}, "°7"),
+    "half-dim7": ({0, 3, 6, 10}, "ø7"),
+    "sus2": ({0, 2, 7}, "sus2"),
+    "sus4": ({0, 5, 7}, "sus4"),
+    "add9": ({0, 2, 4, 7}, "add9"),
+}
+
+
+def freq_of(name, octave):
+    pc = NOTE_INDEX[name]
+    midi = (octave + 1) * 12 + pc
+    return 440.0 * 2.0 ** ((midi - 69) / 12.0)
+
+
+def voice_chord(root_name, root_octave, quality):
+    """(offsets, symbol) from QUALITY_DEFS -> a close-position note list
+    [(name, octave), ...] stacked upward from root_octave, plus the
+    expected (pitch_class_set, chord_name) ground truth (root-position;
+    slash-chord ground truth is built by the caller instead, see
+    build_chords())."""
+    offsets, symbol = QUALITY_DEFS[quality]
+    root_pc = NOTE_INDEX[root_name]
+    notes = []
+    pcs = set()
+    for offset in sorted(offsets):
+        pc = (root_pc + offset) % 12
+        octave = root_octave + (root_pc + offset) // 12
+        # freq_of() only needs a NOTE_INDEX-compatible (sharp-spelled) name --
+        # pitch-class math is spelling-independent, so any enharmonic works.
+        notes.append((_fifths_to_sharp(pc), octave))
+        pcs.add(pc)
+    name = NOTE_NAMES_FIFTHS[root_pc] + symbol
+    return notes, pcs, name
+
+
+def _fifths_to_sharp(pc):
+    """voice_chord() needs a NOTE_INDEX-compatible (sharp-spelled) name for
+    freq_of(); NOTE_NAMES_FIFTHS spells some pitch classes with flats
+    (Db/Eb/Ab/Bb), which aren't in NOTE_INDEX. Pitch class math is spelling-
+    independent, so any enharmonic spelling gives the identical frequency --
+    this only exists to satisfy freq_of()'s lookup."""
+    sharp_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    return sharp_names[pc]
+
+
+def synth_notes(notes, duration, sr=PLAYBACK_SR, base_amp=0.30, fade_s=0.02, peak_cap=0.85):
+    """Additive synthesis, harmonics 1-4 weighted like chroma.py's
+    HARMONIC_WEIGHTS (realistic overtone content, not a bare sine -- see
+    the earlier acoustic-test writeup for why that matters to multipitch/
+    chroma). Each note is synthesized at full base_amp independently, then
+    the sum is peak-normalized down (never up) to peak_cap -- this keeps a
+    dense 6-note stack from being drowned out relative to a single note,
+    without ever clipping."""
+    n = max(int(duration * sr), 1)
+    t = np.arange(n) / sr
+    out = np.zeros(n)
+    weights = {1: 1.0, 2: 0.5, 3: 1.0 / 3, 4: 0.25}
+    wsum = sum(weights.values())
+    for name, octave in notes:
+        f0 = freq_of(name, octave)
+        tone = sum(w * np.sin(2 * np.pi * f0 * h * t) for h, w in weights.items()) / wsum
+        out += tone * base_amp
+    peak = float(np.max(np.abs(out))) if n else 0.0
+    if peak > peak_cap:
+        out *= peak_cap / peak
+    fade = int(fade_s * sr)
+    if notes and fade * 2 < n:
+        env = np.ones(n)
+        env[:fade] = np.linspace(0, 1, fade)
+        env[-fade:] = np.linspace(1, 0, fade)
+        out *= env
+    return out.astype(np.float32)
+
+
+# --------------------------------------------------------------------------
+# Playback + recording harness
+# --------------------------------------------------------------------------
+
+def record_session(session, audio, total_runtime_s, warmup_s=1.5):
+    """Plays `audio` (already at PLAYBACK_SR) out the speakers while
+    draining `session.result_queue` (the same single-slot queue every
+    run_terminal_* loop reads) as fast as POLL_INTERVAL_S allows, for
+    `total_runtime_s` seconds measured from when playback actually starts.
+    Returns a list of per-hop dicts, one per RenderItem observed, each
+    tagged with its own wall-clock offset `t` from playback start."""
+    time.sleep(warmup_s)  # let the mic stream settle before the clock below starts
+    sd.play(audio, PLAYBACK_SR, blocking=False)
+    start = time.monotonic()
+    log = []
+    while True:
+        now = time.monotonic() - start
+        if now > total_runtime_s:
+            break
+        try:
+            item = session.result_queue.get_nowait()
+        except queue.Empty:
+            time.sleep(POLL_INTERVAL_S)
+            continue
+        log.append({
+            "t": round(now, 4),
+            "pitch_class": item.pitch_class,
+            "octave": item.octave,
+            "is_onset": item.is_onset,
+            "confidence": item.confidence,
+            "duration_hops": item.duration_hops,
+            "chord_name": item.chord_name,
+            "note_stack": [
+                {"pitch_class": e["pitch_class"], "octave": e["octave"],
+                 "duration_hops": e.get("duration_hops")}
+                for e in item.note_stack
+            ],
+        })
+    sd.stop()
+    return log
+
+
+def build_timed_audio(entries, gap_s, warmup_lead_s=0.0):
+    """entries: list of (notes, duration_s, meta_dict). Concatenates
+    silence-separated segments and returns (audio, timeline) where
+    timeline is entries with 'start'/'end' wall-clock offsets (relative to
+    when playback starts, i.e. matching record_session()'s `t` clock)
+    filled in."""
+    chunks = []
+    if warmup_lead_s > 0:
+        chunks.append(np.zeros(int(warmup_lead_s * PLAYBACK_SR), dtype=np.float32))
+    timeline = []
+    t = warmup_lead_s
+    for notes, duration, meta in entries:
+        chunks.append(synth_notes(notes, duration))
+        entry = dict(meta)
+        entry["notes"] = notes
+        entry["start"] = t
+        entry["end"] = t + duration
+        timeline.append(entry)
+        t += duration
+        chunks.append(np.zeros(int(gap_s * PLAYBACK_SR), dtype=np.float32))
+        t += gap_s
+    return np.concatenate(chunks) if chunks else np.zeros(1, dtype=np.float32), timeline, t
+
+
+# --------------------------------------------------------------------------
+# Suite: chromatic accuracy + latency
+# --------------------------------------------------------------------------
+
+def build_chromatic():
+    sharp_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+    entries = []
+    for octave in (2, 3, 4, 5):
+        for name in sharp_names:
+            entries.append(([(name, octave)], 1.4, {"pitch_class": NOTE_INDEX[name], "octave": octave}))
+    return build_timed_audio(entries, gap_s=0.4, warmup_lead_s=1.5)
+
+
+def analyze_chromatic(log, timeline):
+    rows = []
+    hits = 0
+    latencies = []
+    for seg in timeline:
+        expected = (seg["pitch_class"], seg["octave"])
+        window_end = seg["end"] + LATENCY_SEARCH_SLOP_S
+        match_ts = [h["t"] for h in log
+                    if seg["start"] <= h["t"] <= window_end
+                    and (h["pitch_class"], h["octave"]) == expected]
+        steady = [h for h in log if seg["start"] + 0.3 <= h["t"] <= seg["end"] - 0.1]
+        steady_correct = sum(1 for h in steady if (h["pitch_class"], h["octave"]) == expected)
+        steady_acc = steady_correct / len(steady) if steady else 0.0
+        detected = bool(match_ts)
+        latency_ms = round((match_ts[0] - seg["start"]) * 1000, 1) if detected else None
+        if detected:
+            hits += 1
+            latencies.append(latency_ms)
+        rows.append({
+            "note": f"{sharp_names_display(expected[0])}{expected[1]}",
+            "detected": detected, "latency_ms": latency_ms, "steady_state_accuracy": round(steady_acc, 3),
+        })
+    summary = {
+        "n_notes": len(timeline),
+        "recall": round(hits / len(timeline), 3) if timeline else 0.0,
+        "latency_ms_median": round(statistics.median(latencies), 1) if latencies else None,
+        "latency_ms_p90": round(sorted(latencies)[int(len(latencies) * 0.9)], 1) if len(latencies) >= 10 else None,
+        "mean_steady_state_accuracy": round(statistics.mean(r["steady_state_accuracy"] for r in rows), 3) if rows else 0.0,
+    }
+    misses = [r["note"] for r in rows if not r["detected"]]
+    low_acc = [r["note"] for r in rows if r["detected"] and r["steady_state_accuracy"] < 0.7]
+    return {"summary": summary, "rows": rows, "misses": misses, "low_accuracy": low_acc}
+
+
+def sharp_names_display(pc):
+    return ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"][pc]
+
+
+# --------------------------------------------------------------------------
+# Suite: tempo / speed (legato note runs, no gap between notes)
+# --------------------------------------------------------------------------
+
+SCALE = [("C", 4), ("D", 4), ("E", 4), ("F", 4), ("G", 4), ("A", 4), ("B", 4), ("C", 5)]
+TEMPI_BPM = [90, 140, 200, 280]
+REPS_PER_TEMPO = 3
+
+
+def build_tempo():
+    chunks = [np.zeros(int(1.5 * PLAYBACK_SR), dtype=np.float32)]
+    timeline = []
+    t = 1.5
+    for bpm in TEMPI_BPM:
+        note_dur = 60.0 / bpm / 2.0  # eighth notes
+        for rep in range(REPS_PER_TEMPO):
+            for name, octave in SCALE:
+                chunks.append(synth_notes([(name, octave)], note_dur, fade_s=min(0.01, note_dur / 4)))
+                timeline.append({
+                    "bpm": bpm, "rep": rep, "pitch_class": NOTE_INDEX[name], "octave": octave,
+                    "start": t, "end": t + note_dur, "note_dur": note_dur,
+                })
+                t += note_dur
+            gap = 0.3
+            chunks.append(np.zeros(int(gap * PLAYBACK_SR), dtype=np.float32))
+            t += gap
+        gap = 1.0
+        chunks.append(np.zeros(int(gap * PLAYBACK_SR), dtype=np.float32))
+        t += gap
+    return np.concatenate(chunks), timeline, t
+
+
+def analyze_tempo(log, timeline):
+    by_tempo = {}
+    for seg in timeline:
+        bpm = seg["bpm"]
+        by_tempo.setdefault(bpm, []).append(seg)
+
+    results = {}
+    for bpm, segs in by_tempo.items():
+        hits, latencies = 0, []
+        for seg in segs:
+            expected = (seg["pitch_class"], seg["octave"])
+            window_end = seg["end"] + LATENCY_SEARCH_SLOP_S
+            matches = [h["t"] for h in log
+                       if seg["start"] <= h["t"] <= window_end
+                       and (h["pitch_class"], h["octave"]) == expected]
+            if matches:
+                hits += 1
+                latencies.append((matches[0] - seg["start"]) * 1000)
+        results[bpm] = {
+            "n_notes": len(segs),
+            "recall": round(hits / len(segs), 3) if segs else 0.0,
+            "latency_ms_median": round(statistics.median(latencies), 1) if latencies else None,
+            "note_duration_ms": round(segs[0]["note_dur"] * 1000, 1),
+        }
+    return results
+
+
+# --------------------------------------------------------------------------
+# Suite: chord accuracy + phantom notes
+# --------------------------------------------------------------------------
+
+def build_chords():
+    entries = []
+
+    for quality in ("maj", "min", "dim", "aug"):
+        for root in ("C", "F#", "A"):
+            for octave in (3, 4):
+                notes, pcs, name = voice_chord(root, octave, quality)
+                entries.append((notes, 3.0, {"expected_pcs": sorted(pcs), "expected_name": name,
+                                              "quality": quality, "root": root, "register": octave}))
+
+    for quality in ("dom7", "maj7", "min7", "dim7", "half-dim7"):
+        for root in ("C", "F", "A"):
+            notes, pcs, name = voice_chord(root, 4, quality)
+            entries.append((notes, 3.0, {"expected_pcs": sorted(pcs), "expected_name": name,
+                                          "quality": quality, "root": root, "register": 4}))
+        notes, pcs, name = voice_chord("C", 3, quality)
+        entries.append((notes, 3.0, {"expected_pcs": sorted(pcs), "expected_name": name,
+                                      "quality": quality, "root": "C", "register": 3}))
+
+    for quality in ("sus2", "sus4", "add9"):
+        notes, pcs, name = voice_chord("C", 4, quality)
+        entries.append((notes, 3.0, {"expected_pcs": sorted(pcs), "expected_name": name,
+                                      "quality": quality, "root": "C", "register": 4}))
+
+    # Slash chords: same triad, voiced with a non-root chord tone as the
+    # lowest note -- chord_templates.match() should detect the true bass
+    # via chroma.fold_bass()/multipitch's lowest candidate and name it
+    # "<root><quality>/<bass>".
+    entries.append(([("E", 3), ("C", 4), ("G", 4)], 3.0,
+                     {"expected_pcs": sorted({0, 4, 7}), "expected_name": "C/E",
+                      "quality": "maj/slash", "root": "C", "register": 4}))
+    entries.append(([("B", 3), ("D", 4), ("G", 4)], 3.0,
+                     {"expected_pcs": sorted({7, 11, 2}), "expected_name": "G/B",
+                      "quality": "maj/slash", "root": "G", "register": 4}))
+
+    return build_timed_audio(entries, gap_s=0.7, warmup_lead_s=1.5)
+
+
+def analyze_chords(log, timeline):
+    rows = []
+    for seg in timeline:
+        steady = [h for h in log if seg["start"] + 0.6 <= h["t"] <= seg["end"] - 0.15]
+        if not steady:
+            rows.append({**{k: seg[k] for k in ("quality", "root", "register", "expected_name")},
+                         "name_correct": False, "phantom_rate": None, "missing_rate": None, "n_hops": 0})
+            continue
+        expected_pcs = set(seg["expected_pcs"])
+        name_votes = {}
+        phantom_counts, missing_counts = [], []
+        for h in steady:
+            name_votes[h["chord_name"]] = name_votes.get(h["chord_name"], 0) + 1
+            got_pcs = {n["pitch_class"] for n in h["note_stack"]}
+            phantom_counts.append(len(got_pcs - expected_pcs))
+            missing_counts.append(len(expected_pcs - got_pcs))
+        top_name = max(name_votes.items(), key=lambda kv: kv[1])[0]
+        rows.append({
+            "quality": seg["quality"], "root": seg["root"], "register": seg["register"],
+            "expected_name": seg["expected_name"], "detected_name": top_name,
+            "name_correct": top_name == seg["expected_name"],
+            "phantom_rate": round(statistics.mean(phantom_counts), 2),
+            "missing_rate": round(statistics.mean(missing_counts), 2),
+            "n_hops": len(steady),
+        })
+    n = len(rows)
+    name_correct = sum(1 for r in rows if r["name_correct"])
+    phantom_rates = [r["phantom_rate"] for r in rows if r["phantom_rate"] is not None]
+    summary = {
+        "n_chords": n,
+        "name_accuracy": round(name_correct / n, 3) if n else 0.0,
+        "mean_phantom_pcs_per_hop": round(statistics.mean(phantom_rates), 3) if phantom_rates else None,
+        "mean_missing_pcs_per_hop": round(statistics.mean(r["missing_rate"] for r in rows if r["missing_rate"] is not None), 3) if rows else None,
+        "worst_phantom": sorted(rows, key=lambda r: -(r["phantom_rate"] or 0))[:5],
+    }
+    return {"summary": summary, "rows": rows}
+
+
+# --------------------------------------------------------------------------
+# Suite: polyphonic note-count scaling (density -> phantom/missing rate)
+# --------------------------------------------------------------------------
+
+DENSITY_VOICINGS = {
+    1: [[("C", 4)], [("F#", 3)], [("A", 5)]],
+    2: [[("C", 3), ("F#", 4)], [("D", 4), ("A", 2)], [("G", 5), ("D", 2)]],
+    3: [[("C", 3), ("F#", 4), ("D", 5)], [("A", 2), ("E", 4), ("C", 5)], [("F", 3), ("B", 4), ("G", 2)]],
+    4: [[("C", 2), ("F#", 3), ("D", 4), ("A", 5)], [("E", 2), ("A", 3), ("C", 4), ("F#", 5)],
+        [("G", 2), ("D", 3), ("A", 4), ("E", 5)]],
+    5: [[("C", 2), ("D#", 3), ("F#", 3), ("A", 4), ("D", 5)],
+        [("F", 2), ("A", 2), ("C", 3), ("E", 4), ("G", 5)],
+        [("D", 2), ("F#", 2), ("A", 3), ("C", 4), ("E", 5)]],
+    6: [[("C", 2), ("D#", 2), ("F#", 3), ("A", 3), ("D", 4), ("G", 5)],
+        [("E", 2), ("G", 2), ("B", 3), ("D", 4), ("F#", 4), ("A", 5)],
+        [("F", 2), ("A", 2), ("C", 3), ("D#", 3), ("G", 4), ("B", 5)]],
+}
+
+
+def build_density():
+    entries = []
+    for count in sorted(DENSITY_VOICINGS):
+        for voicing in DENSITY_VOICINGS[count]:
+            pcs = sorted({NOTE_INDEX[n] for n, _o in voicing})
+            entries.append((voicing, 3.0, {"count": count, "expected_pcs": pcs}))
+    return build_timed_audio(entries, gap_s=0.6, warmup_lead_s=1.5)
+
+
+def analyze_density(log, timeline):
+    rows = []
+    for seg in timeline:
+        steady = [h for h in log if seg["start"] + 0.6 <= h["t"] <= seg["end"] - 0.15]
+        expected_pcs = set(seg["expected_pcs"])
+        if not steady:
+            continue
+        phantom, missing, sizes = [], [], []
+        for h in steady:
+            got = {n["pitch_class"] for n in h["note_stack"]}
+            phantom.append(len(got - expected_pcs))
+            missing.append(len(expected_pcs - got))
+            sizes.append(len(got))
+        rows.append({
+            "count": seg["count"], "expected_pcs": seg["expected_pcs"],
+            "mean_phantom": round(statistics.mean(phantom), 2),
+            "mean_missing": round(statistics.mean(missing), 2),
+            "mean_stack_size": round(statistics.mean(sizes), 2),
+        })
+    by_count = {}
+    for r in rows:
+        by_count.setdefault(r["count"], []).append(r)
+    summary = {}
+    for count, rs in sorted(by_count.items()):
+        summary[count] = {
+            "mean_phantom": round(statistics.mean(r["mean_phantom"] for r in rs), 2),
+            "mean_missing": round(statistics.mean(r["mean_missing"] for r in rs), 2),
+            "mean_stack_size_vs_expected": round(statistics.mean(r["mean_stack_size"] for r in rs), 2),
+        }
+    return {"summary": summary, "rows": rows}
+
+
+# --------------------------------------------------------------------------
+# Suite: long sustain -- onset-misfire rate + duration fragmentation
+# --------------------------------------------------------------------------
+
+def build_sustain():
+    mono_entries = [
+        ([("A", 2)], 6.0, {"kind": "mono", "label": "A2"}),
+        ([("C", 4)], 6.0, {"kind": "mono", "label": "C4"}),
+        ([("E", 5)], 6.0, {"kind": "mono", "label": "E5"}),
+    ]
+    chord_entries = [
+        ([("C", 4), ("E", 4), ("G", 4)], 6.0, {"kind": "chord", "label": "Cmaj"}),
+        ([("A", 3), ("C", 4), ("E", 4), ("G", 4)], 6.0, {"kind": "chord", "label": "Am7"}),
+        ([("D", 3), ("F#", 3), ("A", 3), ("C", 4)], 6.0, {"kind": "chord", "label": "D7"}),
+    ]
+    return build_timed_audio(mono_entries + chord_entries, gap_s=1.0, warmup_lead_s=1.5)
+
+
+def analyze_sustain(log, timeline):
+    rows = []
+    for seg in timeline:
+        window = [h for h in log if seg["start"] <= h["t"] <= seg["end"]]
+        if seg["kind"] == "mono":
+            onset_rate = round(statistics.mean(1.0 if h["is_onset"] else 0.0 for h in window), 3) if window else None
+            mono_finalizes = [h for h in window if h["duration_hops"] is not None]
+            rows.append({"kind": "mono", "label": seg["label"], "n_hops": len(window),
+                         "is_onset_rate": onset_rate, "n_duration_finalize_events": len(mono_finalizes)})
+        else:
+            finalize_events = []
+            for h in window:
+                for n in h["note_stack"]:
+                    if n.get("duration_hops") is not None:
+                        finalize_events.append((h["t"], n["pitch_class"], n["octave"], n["duration_hops"]))
+            rows.append({"kind": "chord", "label": seg["label"], "n_hops": len(window),
+                         "n_duration_finalize_events": len(finalize_events),
+                         "finalize_events_sample": finalize_events[:15]})
+    return {"rows": rows}
+
+
+# --------------------------------------------------------------------------
+# Orchestration
+# --------------------------------------------------------------------------
+
+SUITES = {
+    "chromatic": (build_chromatic, analyze_chromatic),
+    "tempo": (build_tempo, analyze_tempo),
+    "chords": (build_chords, analyze_chords),
+    "density": (build_density, analyze_density),
+    "sustain": (build_sustain, analyze_sustain),
+}
+
+
+def run_suites(names, outdir, sensitivity):
+    os.makedirs(outdir, exist_ok=True)
+    session = main.SessionState(color_scheme="chromatic", sensitivity_value=sensitivity, source_value="mic")
+    session.ensure_started()
+    results = {}
+    try:
+        for name in names:
+            build_fn, analyze_fn = SUITES[name]
+            print(f"=== {name}: building audio ===")
+            audio, timeline, total_runtime = build_fn()
+            print(f"=== {name}: playing/recording ({total_runtime:.1f}s) ===")
+            log = record_session(session, audio, total_runtime)
+            with open(os.path.join(outdir, f"{name}_raw.json"), "w") as f:
+                json.dump({"timeline": timeline, "log": log}, f)
+            result = analyze_fn(log, timeline)
+            results[name] = result
+            print(f"=== {name}: done, {len(log)} hops logged ===")
+    finally:
+        session.stop()
+    return results
+
+
+def load_and_analyze(names, outdir):
+    results = {}
+    for name in names:
+        path = os.path.join(outdir, f"{name}_raw.json")
+        if not os.path.exists(path):
+            print(f"(skipping {name}: no {path})")
+            continue
+        with open(path) as f:
+            data = json.load(f)
+        _build_fn, analyze_fn = SUITES[name]
+        results[name] = analyze_fn(data["log"], data["timeline"])
+    return results
+
+
+def write_report(results, outdir):
+    lines = [f"# Acoustic pipeline test report", "", f"Generated: {datetime.now().isoformat(timespec='seconds')}", ""]
+
+    if "chromatic" in results:
+        s = results["chromatic"]["summary"]
+        lines += ["## Chromatic monophonic accuracy + latency", "",
+                   f"- Notes tested: {s['n_notes']}",
+                   f"- Recall (ever correctly detected): {s['recall']*100:.1f}%",
+                   f"- Attack-to-display latency: median {s['latency_ms_median']}ms, p90 {s['latency_ms_p90']}ms",
+                   f"- Mean steady-state accuracy: {s['mean_steady_state_accuracy']*100:.1f}%", ""]
+        if results["chromatic"]["misses"]:
+            lines += [f"- Never detected: {', '.join(results['chromatic']['misses'])}", ""]
+        if results["chromatic"]["low_accuracy"]:
+            lines += [f"- Detected but unstable (<70% steady-state accuracy): {', '.join(results['chromatic']['low_accuracy'])}", ""]
+
+    if "tempo" in results:
+        lines += ["## Tempo / speed (legato scale, no gap between notes)", "",
+                   "| BPM | note dur (ms) | recall | median latency (ms) |", "|---|---|---|---|"]
+        for bpm, r in sorted(results["tempo"].items()):
+            lines.append(f"| {bpm} | {r['note_duration_ms']} | {r['recall']*100:.0f}% | {r['latency_ms_median']} |")
+        lines.append("")
+
+    if "chords" in results:
+        s = results["chords"]["summary"]
+        lines += ["## Chord accuracy + phantom notes", "",
+                   f"- Chords tested: {s['n_chords']}",
+                   f"- Chord-name accuracy: {s['name_accuracy']*100:.1f}%",
+                   f"- Mean phantom pitch classes/hop: {s['mean_phantom_pcs_per_hop']}",
+                   f"- Mean missing pitch classes/hop: {s['mean_missing_pcs_per_hop']}", "",
+                   "Worst phantom-rate chords:", "",
+                   "| quality | root | register | expected | detected | phantom/hop |", "|---|---|---|---|---|---|"]
+        for r in s["worst_phantom"]:
+            lines.append(f"| {r['quality']} | {r['root']} | {r['register']} | {r['expected_name']} | "
+                          f"{r.get('detected_name')} | {r['phantom_rate']} |")
+        lines.append("")
+
+    if "density" in results:
+        lines += ["## Polyphonic density scaling", "",
+                   "| notes played | mean phantom pcs/hop | mean missing pcs/hop | mean stack size |",
+                   "|---|---|---|---|"]
+        for count, r in sorted(results["density"]["summary"].items()):
+            lines.append(f"| {count} | {r['mean_phantom']} | {r['mean_missing']} | {r['mean_stack_size_vs_expected']} |")
+        lines.append("")
+
+    if "sustain" in results:
+        lines += ["## Long-hold onset misfire / duration fragmentation", "",
+                   "| kind | note/chord | hops | is_onset rate (mono only) | duration-finalize events |",
+                   "|---|---|---|---|---|"]
+        for r in results["sustain"]["rows"]:
+            lines.append(f"| {r['kind']} | {r['label']} | {r['n_hops']} | "
+                          f"{r.get('is_onset_rate', '-')} | {r['n_duration_finalize_events']} |")
+        lines.append("")
+
+    report_path = os.path.join(outdir, "report.md")
+    with open(report_path, "w") as f:
+        f.write("\n".join(lines))
+    print(f"\nWrote {report_path}")
+    print("\n".join(lines))
+
+
+def main_cli():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--suites", default=",".join(SUITES), help="comma-separated subset of: " + ",".join(SUITES))
+    parser.add_argument("--outdir", default=None, help="default: acoustic_test_results/<timestamp>/")
+    parser.add_argument("--sensitivity", type=float, default=config.DEFAULT_SENSITIVITY,
+                         help="matches the app's own --sensitivity; default tests out-of-box tuning")
+    parser.add_argument("--report", metavar="OUTDIR", default=None,
+                         help="re-analyze raw JSON logs already in OUTDIR instead of running live audio")
+    args = parser.parse_args()
+
+    names = [n.strip() for n in args.suites.split(",") if n.strip()]
+    for n in names:
+        if n not in SUITES:
+            parser.error(f"unknown suite '{n}' -- choose from {','.join(SUITES)}")
+
+    if args.report:
+        results = load_and_analyze(names, args.report)
+        write_report(results, args.report)
+        return
+
+    outdir = args.outdir or os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "acoustic_test_results", datetime.now().strftime("%Y%m%d_%H%M%S"),
+    )
+    results = run_suites(names, outdir, args.sensitivity)
+    write_report(results, outdir)
+
+
+if __name__ == "__main__":
+    main_cli()
