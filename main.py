@@ -257,7 +257,10 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
 
         smoother.set_sensitivity(sensitivity.value)
         spectrum = compute_spectrum(ring)
-        freq, confidence = detect_pitch(ring, config.SAMPLE_RATE, spectrum, config.FMIN, config.FMAX, config.YIN_THRESHOLD)
+        freq, confidence = detect_pitch(
+            ring, config.SAMPLE_RATE, spectrum, config.FMIN, config.FMAX, config.YIN_THRESHOLD,
+            config.YIN_SUBHARMONIC_MAX_MULTIPLE, config.YIN_SUBHARMONIC_MARGIN, config.YIN_SUBHARMONIC_SKIP_CMND,
+        )
         pitch_class, octave, is_onset = smoother.update(freq, confidence, rms, spectrum)
 
         if pitch_class is None:

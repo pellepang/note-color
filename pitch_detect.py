@@ -40,11 +40,40 @@ def _cmndf(d):
     return cmnd
 
 
-def detect_pitch(window, sample_rate, spectrum, fmin=65.0, fmax=1000.0, threshold=0.12):
+def _parabolic_vertex(cmnd, t):
+    """Sub-sample offset and estimated value of the local minimum at grid
+    index `t`, via 3-point parabolic interpolation. Falls back to the raw
+    grid value (zero offset) if the neighbors don't form a proper local
+    minimum (a non-positive denominator -- e.g. `t` at the very edge of
+    the searched range)."""
+    if 0 < t < len(cmnd) - 1:
+        x0, x1, x2 = cmnd[t - 1], cmnd[t], cmnd[t + 1]
+        denom = x0 - 2 * x1 + x2
+        if denom > 0:
+            shift = 0.5 * (x0 - x2) / denom
+            value = x1 - (x0 - x2) ** 2 / (8 * denom)
+            return shift, max(0.0, value)
+    return 0.0, cmnd[t]
+
+
+def detect_pitch(
+    window,
+    sample_rate,
+    spectrum,
+    fmin=65.0,
+    fmax=1000.0,
+    threshold=0.12,
+    subharmonic_max_multiple=4,
+    subharmonic_margin=0.5,
+    subharmonic_skip_cmnd=0.01,
+):
     """Return (freq_hz, confidence) for the dominant pitch in `window`,
     or (None, 0.0) if no pitch could be confidently detected.
     `spectrum` is `compute_spectrum(window)` (or a caller-shared
-    equivalent), reused for FFT-based autocorrelation."""
+    equivalent), reused for FFT-based autocorrelation.
+
+    `subharmonic_*` tune issue #69's octave-doubling correction below --
+    see the comment at its call site for what it does and why."""
     x = np.asarray(window, dtype=np.float64)
     w = len(x)
 
@@ -74,6 +103,49 @@ def detect_pitch(window, sample_rate, spectrum, fmin=65.0, fmax=1000.0, threshol
         if search[best] >= 0.99:  # nothing periodic in range (silence/noise)
             return None, 0.0
         tau = tau_min + best
+    else:
+        # Issue #69: in the low register, a note's own fundamental can be
+        # naturally weaker than its overtones (bass rolloff in real
+        # speakers/mics, or just a harmonic-rich low tone) -- when it is,
+        # a strong harmonic produces its own confident sub-threshold CMND
+        # dip at an exact submultiple of the true fundamental's period,
+        # and the scan above (ascending from tau_min) locks onto that
+        # *shorter* lag first, reading one or two octaves too high.
+        #
+        # The true fundamental period, being a common multiple of every
+        # harmonic's own period, produces a categorically *deeper* dip
+        # than any lone harmonic's submultiple (confirmed empirically:
+        # ~10x+ deeper in the reported failure cases) -- so check a few
+        # small integer multiples of the found tau (candidate positions
+        # for the true, longer fundamental period) and adopt the deepest
+        # one that both clears the threshold and is meaningfully deeper
+        # than the current candidate.
+        #
+        # Skipped entirely when the original candidate is already very
+        # confident (near-zero CMND): an already-correct detection is
+        # *also* trivially periodic at its own integer multiples (any
+        # period-T signal repeats at 2T, 3T, ...), and integer-sample
+        # rounding can occasionally make one of those multiples look
+        # spuriously deeper than the true dip with no real periodicity
+        # advantage -- gating on the original candidate's own confidence
+        # avoids that regression (verified against octaves 3-5, see
+        # tests/test_pitch_detect.py and docs/DECISIONS.md).
+        _, tau_value = _parabolic_vertex(cmnd, tau)
+        if tau_value > subharmonic_skip_cmnd:
+            best_tau, best_value = tau, tau_value
+            for multiple in range(2, subharmonic_max_multiple + 1):
+                center = tau * multiple
+                if center >= tau_max:
+                    break
+                lo = max(tau_min, center - 2)
+                hi = min(tau_max - 1, center + 2)
+                if lo > hi:
+                    continue
+                cand_tau = lo + int(np.argmin(cmnd[lo:hi + 1]))
+                _, cand_value = _parabolic_vertex(cmnd, cand_tau)
+                if cmnd[cand_tau] < threshold and cand_value < best_value * subharmonic_margin:
+                    best_tau, best_value = cand_tau, cand_value
+            tau = best_tau
 
     if 0 < tau < len(cmnd) - 1:
         x0, x1, x2 = cmnd[tau - 1], cmnd[tau], cmnd[tau + 1]
