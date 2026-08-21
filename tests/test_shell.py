@@ -235,6 +235,21 @@ def test_transcribe_rejects_malformed_time_signature():
         build_parser().parse_args(["transcribe", "somefile.wav", "--time-signature", "nope"])
 
 
+def test_transcribe_write_score_omitted_defaults_to_none():
+    args = build_parser().parse_args(["transcribe", "somefile.wav"])
+    assert args.write_score is None
+
+
+def test_transcribe_write_score_bare_flag_is_empty_string_sentinel():
+    args = build_parser().parse_args(["transcribe", "somefile.wav", "--write-score"])
+    assert args.write_score == ""
+
+
+def test_transcribe_write_score_explicit_path():
+    args = build_parser().parse_args(["transcribe", "somefile.wav", "--write-score", "out.musicxml"])
+    assert args.write_score == "out.musicxml"
+
+
 def test_tab_defaults_time_signature_to_four_four():
     args = build_parser().parse_args(["tab", "onset"])
     assert args.time_signature == (4, 4)

@@ -942,7 +942,7 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
     return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state)
 
 
-def run_batch_transcribe(file_path, time_signature, dump_file):
+def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None):
     """Offline transcription entry point (issue #55, `virtualnote
     transcribe`): loads `file_path`, runs batch_transcribe.transcribe()
     over the whole array, then builds TabDisplay columns from the result
@@ -952,6 +952,19 @@ def run_batch_transcribe(file_path, time_signature, dump_file):
     what's actually needed here; its constructor's stray `\\033[?25l\\033[2J`
     terminal-control escape codes on stdout are harmless and not worth
     suppressing for a one-shot batch run).
+
+    `write_score_path` (issue #65's CLI wiring) is `None` by default --
+    no score is written, and `score_writer` (which imports `music21`) is
+    never even imported, mirroring how `pygame` only gets imported inside
+    `run_gui`. Passed as `""` (virtualnote.py's `--write-score` bare-flag
+    sentinel, its `nargs="?"`/`const=""`) it resolves to a default path
+    next to `main.py`, same `note_history_<timestamp>.txt`-style pattern
+    `resolved_dump_path` below already uses but with a `score_` prefix and
+    `.musicxml` extension; passed any other (truthy) string, that string
+    is used verbatim as the output path. `result` -- the same
+    `batch_transcribe.TranscriptionResult` already computed above for the
+    `TabDisplay` columns -- is reused as-is; `score_writer.write_score()`
+    consumes it directly, no recomputation.
 
     Column-building choice: batch_transcribe.transcribe()'s polyphonic
     `notes` list (each NoteEvent already carries a resolved chord_name at
@@ -1016,6 +1029,19 @@ def run_batch_transcribe(file_path, time_signature, dump_file):
         f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
     )
     display.dump_ansi(resolved_dump_path)
+
+    if write_score_path is not None:
+        # Local import -- keeps music21's import cost (real, one-time, and
+        # of no use to the live/Pi-constrained path) off every `transcribe`
+        # run, paid only when --write-score is actually passed. Mirrors
+        # this file's existing `pygame`-only-inside-`run_gui` convention.
+        import score_writer
+
+        resolved_write_score_path = write_score_path or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            f"score_{time.strftime('%Y%m%d_%H%M%S')}.musicxml",
+        )
+        score_writer.write_score(result, resolved_write_score_path, time_signature=time_signature)
 
 
 def main():
