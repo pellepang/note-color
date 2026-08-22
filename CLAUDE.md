@@ -832,6 +832,29 @@ One-liners; full detail in `docs/DECISIONS.md`.
   exists anywhere in this pipeline (chord/multipitch always runs
   regardless of what's actually playing, see Architecture) — closing this
   residual gap would need one, which is out of this fix's scope.
+- Issue #75 investigated one concrete instance of that residual gap: on a
+  static, unchanging held chord with a basic beat underneath, a snare
+  hit's own realistic ~200Hz tonal "poc" attack component (modeled by
+  `scripts/acoustic_pipeline_test.py`'s `synth_snare()`, not a synthesis
+  quirk -- real snares have this) lands ~35 cents from G3, close enough
+  for `multipitch.detect()` to correctly find it as a real spectral peak
+  and `chord_duration_tracker` to correctly track/finalize it as a
+  short (~45-115ms) phantom duration event -- 8/8 kick-adjacent hits
+  originally blamed on the kick, but root-caused via raw-log timing
+  correlation to the snare instead (the kick's own decay was never
+  actually the cause). Three candidate fixes (a chord-mode minimum-
+  persistence gate, a within-window magnitude decay-shape heuristic in
+  `multipitch.detect()`, tightening harmonic-pruning's tolerance/
+  direction) were each prototyped and empirically rejected: the first has
+  no safety margin against issue #55's own ~107ms fast-note stress case,
+  the second is empirically indistinguishable from a real note's own
+  onset transient (proven by running the same experiment against a real
+  chord's genuine attack), and the third is already known-fragile
+  tolerance-boundary territory (this exact case sits at -34.9 cents,
+  inside the existing 35-cent tolerance by construction). Left open with
+  the full investigation in `docs/DECISIONS.md` rather than forcing an
+  unsafe fix -- closing it for real would need a genuine transient/onset
+  classifier, a materially bigger feature than this issue's scope.
 - Octave-error blips (~100ms) can occur during note decay; not worth fixing
   without a concrete complaint.
 - Live pitch-tracking quality varies run-to-run with room/mic conditions —
