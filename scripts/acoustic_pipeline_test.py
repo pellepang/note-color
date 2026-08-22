@@ -1,12 +1,26 @@
-"""Extensive speaker->mic acoustic round-trip test suite against note-color's
-REAL, unmodified live pipeline (`main.SessionState` + `main.analysis_loop()`
--- the exact code every `virtualnote` terminal view runs). Not a pytest
-test: it needs real audio hardware (a speaker and a microphone in the same
-room) and takes several minutes to run, so it's a manual verification tool,
-same convention as the "real speaker->mic acoustic round-trip test" already
-used to validate this pipeline (see CLAUDE.md's Status section) -- this
-script is that test, made repeatable, quantitative, and broader than a
-single ad hoc smoke check.
+"""Extensive acoustic round-trip test suite against note-color's REAL,
+unmodified live pipeline (`main.SessionState` + `main.analysis_loop()` --
+the exact code every `virtualnote` terminal view runs). Not a pytest test:
+it drives real audio hardware and takes several minutes to run, so it's a
+manual verification tool, same convention as the "real speaker->mic
+acoustic round-trip test" already used to validate this pipeline (see
+CLAUDE.md's Status section) -- this script is that test, made repeatable,
+quantitative, and broader than a single ad hoc smoke check.
+
+`--source loopback` (the default) plays the synthesized test audio through
+the system's default output and captures it back via that output's
+PipeWire/PulseAudio monitor (`audio_capture.resolve_loopback_device()`) --
+a real round trip through the actual audio stack (real playback device,
+real capture device, real resampling, real PortAudio buffering/timing) but
+with no physical air gap, so it needs no speaker/mic in the same room, no
+quiet room, and produces no audible sound: the script mutes the default
+sink for the run (restoring whatever mute state it found afterward) so it
+can run unattended. This does NOT reproduce room acoustics (reflections,
+comb filtering, mic frequency response) that a real speaker->mic round
+trip would -- it's a stronger check than pure synthetic array-slicing
+tests (real hardware/OS audio path, real timing jitter) but a weaker one
+than an actual room test. `--source mic` restores the original physical
+speaker->mic behavior for when that's what's actually wanted.
 
 What it measures, one suite at a time:
 
@@ -40,11 +54,13 @@ itself is the thing worth keeping in version control.
 """
 
 import argparse
+import contextlib
 import itertools
 import json
 import os
 import queue
 import statistics
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -57,6 +73,40 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 import main
 from color_map import NOTE_NAMES_FIFTHS
+
+
+@contextlib.contextmanager
+def muted_default_sink():
+    """Mutes the system's default output sink for the duration of the
+    `with` block, restoring whatever mute state it found (muted or not)
+    on exit -- even on an exception. Used by `--source loopback` so the
+    round trip through the real audio stack produces no audible sound and
+    the script can run unattended. `resolve_loopback_device()`'s own
+    docstring notes this is confirmed safe on PipeWire (the monitor taps
+    upstream of the mute point); if `pactl` is unavailable at all, this
+    silently no-ops rather than failing the whole run -- worst case the
+    test is audible, not broken."""
+    original = None
+    try:
+        out = subprocess.run(
+            ["pactl", "get-sink-mute", "@DEFAULT_SINK@"],
+            capture_output=True, text=True, timeout=2, check=True,
+        ).stdout.strip()
+        original = "yes" in out.lower()
+        subprocess.run(
+            ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1"],
+            capture_output=True, text=True, timeout=2, check=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        original = None
+    try:
+        yield
+    finally:
+        if original is not None:
+            subprocess.run(
+                ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "1" if original else "0"],
+                capture_output=True, text=True, timeout=2,
+            )
 
 PLAYBACK_SR = 44100
 POLL_INTERVAL_S = 0.005          # busy-poll rate against the single-slot result_queue
@@ -521,25 +571,27 @@ SUITES = {
 }
 
 
-def run_suites(names, outdir, sensitivity):
+def run_suites(names, outdir, sensitivity, source="loopback"):
     os.makedirs(outdir, exist_ok=True)
-    session = main.SessionState(color_scheme="chromatic", sensitivity_value=sensitivity, source_value="mic")
-    session.ensure_started()
+    session = main.SessionState(color_scheme="chromatic", sensitivity_value=sensitivity, source_value=source)
+    ctx = muted_default_sink() if source == "loopback" else contextlib.nullcontext()
     results = {}
-    try:
-        for name in names:
-            build_fn, analyze_fn = SUITES[name]
-            print(f"=== {name}: building audio ===")
-            audio, timeline, total_runtime = build_fn()
-            print(f"=== {name}: playing/recording ({total_runtime:.1f}s) ===")
-            log = record_session(session, audio, total_runtime)
-            with open(os.path.join(outdir, f"{name}_raw.json"), "w") as f:
-                json.dump({"timeline": timeline, "log": log}, f)
-            result = analyze_fn(log, timeline)
-            results[name] = result
-            print(f"=== {name}: done, {len(log)} hops logged ===")
-    finally:
-        session.stop()
+    with ctx:
+        session.ensure_started()
+        try:
+            for name in names:
+                build_fn, analyze_fn = SUITES[name]
+                print(f"=== {name}: building audio ===")
+                audio, timeline, total_runtime = build_fn()
+                print(f"=== {name}: playing/recording ({total_runtime:.1f}s) ===")
+                log = record_session(session, audio, total_runtime)
+                with open(os.path.join(outdir, f"{name}_raw.json"), "w") as f:
+                    json.dump({"timeline": timeline, "log": log}, f)
+                result = analyze_fn(log, timeline)
+                results[name] = result
+                print(f"=== {name}: done, {len(log)} hops logged ===")
+        finally:
+            session.stop()
     return results
 
 
@@ -623,6 +675,10 @@ def main_cli():
     parser.add_argument("--outdir", default=None, help="default: acoustic_test_results/<timestamp>/")
     parser.add_argument("--sensitivity", type=float, default=config.DEFAULT_SENSITIVITY,
                          help="matches the app's own --sensitivity; default tests out-of-box tuning")
+    parser.add_argument("--source", choices=("loopback", "mic"), default="loopback",
+                         help="loopback (default): mutes the sink and round-trips via the output "
+                              "monitor, no speaker/mic/quiet-room needed, runs unattended. "
+                              "mic: the original physical speaker->mic round trip.")
     parser.add_argument("--report", metavar="OUTDIR", default=None,
                          help="re-analyze raw JSON logs already in OUTDIR instead of running live audio")
     args = parser.parse_args()
@@ -641,7 +697,7 @@ def main_cli():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "acoustic_test_results", datetime.now().strftime("%Y%m%d_%H%M%S"),
     )
-    results = run_suites(names, outdir, args.sensitivity)
+    results = run_suites(names, outdir, args.sensitivity, args.source)
     write_report(results, outdir)
 
 
