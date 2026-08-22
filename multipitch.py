@@ -29,6 +29,25 @@ DEFAULT_HARMONIC_TOLERANCE_CENTS = 35.0
 DEFAULT_MAX_PEAK_CANDIDATES = 20
 DEFAULT_MIN_SEPARATION_CENTS = 50.0
 DEFAULT_BASS_GATE_RATIO = 0.25
+# Issue #74: detect() converted every surviving spectral peak straight to a
+# MIDI pitch class/octave with no frequency-range bound at all -- unlike the
+# monophonic path (pitch_detect.detect_pitch()), which is explicitly bounded
+# by config.FMIN/FMAX (~C2-B5, this app's whole targeted instrument range).
+# A drum hit's broadband/high-passed noise content (a hi-hat's energy here
+# lives 6-11kHz, ~3-4 octaves above FMAX) has real spectral peaks like any
+# other signal -- peak-picking alone can't distinguish "a real note's
+# fundamental" from "a noise band's local maximum," so without a range check
+# those peaks got reported as phantom notes at nonsensical octaves (8-9),
+# sometimes even forming a spuriously "confident" chord name from pure
+# percussive noise. Reusing FMIN/FMAX (rather than inventing a separate
+# polyphonic-only range) is deliberate: multipitch is still detecting notes
+# from the same real instruments/register this app targets, just more than
+# one at a time -- there's no principled reason a chord's individual notes
+# would plausibly sit outside the range a single melody note already can't.
+# See docs/DECISIONS.md for the full writeup and before/after percussion-
+# suite numbers.
+DEFAULT_MIN_FREQ_HZ = 65.0    # matches config.FMIN (~C2)
+DEFAULT_MAX_FREQ_HZ = 1000.0  # matches config.FMAX (~B5)
 # Issue #68 residual: `_is_harmonic_of()` previously checked ANY integer
 # harmonic_number = round(freq / accepted_freq), with no upper bound. That's
 # fine for the low harmonics real instrument overtones (and this app's own
@@ -118,10 +137,14 @@ def detect(
     max_peak_candidates=DEFAULT_MAX_PEAK_CANDIDATES,
     min_separation_cents=DEFAULT_MIN_SEPARATION_CENTS,
     harmonic_max_number=DEFAULT_HARMONIC_MAX_NUMBER,
+    min_freq_hz=DEFAULT_MIN_FREQ_HZ,
+    max_freq_hz=DEFAULT_MAX_FREQ_HZ,
 ):
     """Up to `max_notes` NoteCandidate entries for the notes sounding in
     `window` (the raw analysis ring buffer), magnitude-peak strongest
-    first."""
+    first. Peaks outside [`min_freq_hz`, `max_freq_hz`] (issue #74) are
+    discarded before any pruning -- see DEFAULT_MIN_FREQ_HZ/DEFAULT_MAX_FREQ_HZ
+    above for why this reuses YIN's own plausible-pitch range."""
     spectrum = _windowed_spectrum(window)
     magnitude = np.abs(spectrum)
     n = len(magnitude)
@@ -143,6 +166,8 @@ def detect(
             continue
         offset = _quadratic_interp_offset(magnitude[i - 1], magnitude[i], magnitude[i + 1])
         freq = (i + offset) * sample_rate / fft_size
+        if freq < min_freq_hz or freq > max_freq_hz:
+            continue
         raw_candidates.append((freq, magnitude[i]))
 
     raw_candidates.sort(key=lambda c: c[1], reverse=True)

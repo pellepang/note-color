@@ -223,6 +223,45 @@ def test_own_low_order_harmonics_still_pruned_after_capping_harmonic_number():
     assert as_note_set(notes) == {(0, 3)}
 
 
+def test_out_of_range_high_frequency_noise_produces_no_phantom_notes():
+    # issue #74: a hi-hat's high-passed broadband noise (6-11kHz in the
+    # acoustic test's synthesis, ~3-4 octaves above config.FMAX/DEFAULT_MAX_FREQ_HZ)
+    # has real spectral peaks like any other signal -- peak-picking alone
+    # can't tell a noise band's local maxima apart from a real note's
+    # fundamental. Before this fix, detect() had no frequency-range bound
+    # at all and reported these peaks as phantom notes at octave 8-9.
+    n = 2048
+    rng = np.random.default_rng(0)
+    noise = rng.normal(0, 1, n)
+    spectrum = np.fft.rfft(noise)
+    freqs = np.fft.rfftfreq(n, 1 / SAMPLE_RATE)
+    spectrum[freqs < 4000] = 0  # keep only content well above DEFAULT_MAX_FREQ_HZ
+    signal = np.fft.irfft(spectrum, n)
+    notes = detect(signal, SAMPLE_RATE)
+    assert notes == []
+
+
+def test_out_of_range_low_frequency_rumble_produces_no_phantom_notes():
+    # Companion low-end case: a kick drum's sub-bass thump can sit below
+    # config.FMIN/DEFAULT_MIN_FREQ_HZ entirely (this app's real low bound is
+    # ~C2, not true sub-bass) -- must be filtered the same way as the
+    # high-frequency case above, not just capped on one side.
+    tone = make_tone(30.0)  # well below DEFAULT_MIN_FREQ_HZ (65Hz)
+    notes = detect(tone, SAMPLE_RATE)
+    assert notes == []
+
+
+def test_frequency_range_bound_does_not_affect_in_range_chords():
+    # The fix must not narrow the app's real target range -- every note in
+    # this suite's existing chord tests (C2 through B5) must keep detecting
+    # exactly as before. Spot-checked here with a chord spanning close to
+    # both edges of the default range.
+    low = make_tone(freq_for(0, 2))  # C2, ~65.4Hz -- just above DEFAULT_MIN_FREQ_HZ
+    high = make_tone(freq_for(11, 5))  # B5, ~987.8Hz -- just below DEFAULT_MAX_FREQ_HZ
+    notes = detect(low + high, SAMPLE_RATE)
+    assert as_note_set(notes) == {(0, 2), (11, 5)}
+
+
 def test_dense_six_note_chord_all_survive_when_not_harmonically_colliding():
     # issue #68: raw peak-picking/pruning must not silently drop real
     # notes as note density increases, for an ordinary, musically

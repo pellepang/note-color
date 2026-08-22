@@ -107,7 +107,7 @@ into an implicit `None` as before — see Key design decisions.
 | `note_smoother.py` | `NoteSmoother` — silence/confidence gate, median filter, debounce, onset detection (monophonic path): note-change, an RMS jump, or (issue #55) `onset_detect.spectral_flux()` clearing `ONSET_FLUX_THRESHOLD` against the hop-over-hop spectrum. `onset_backdate_hops` (issue #70) — 0 normally, `DEBOUNCE_HOPS - 1` on the exact hop a genuine note-change promotion fires (never on an RMS-jump/flux re-attack of an already-current note) — the fixed, known lock-in delay `main.py` backdates `DurationTracker`'s `onset_hop` by so a note's measured duration isn't systematically shortened by the smoother's own debounce buildup. |
 | `chroma.py` | `fold()`/`fold_bass()` — 12-bin chroma vector via a precomputed Gaussian log-frequency weighting matrix summing 1st–4th harmonics per pitch class; `fold_bass()` restricts to <~250Hz for bass/inversion detection. |
 | `chord_templates.py` | ~360-template dictionary (30 qualities × 12 roots) + `match()` — cosine-similarity chord recognition, bass-chroma-gated slash/inversion naming and rotational-tie-breaking. |
-| `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence. `select_window()` (issue #63) picks which ring buffer a hop's `detect()` call should analyze — the app's normal live `config.WINDOW_SIZE` window, or a longer `config.MULTIPITCH_LOW_WINDOW_SIZE` one the caller (`main.py`/`batch_transcribe.py`) also maintains, gated on `chroma.fold_bass()` showing real low-frequency content — see Key design decisions for why the short window alone garbles close-together bass notes. |
+| `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence, candidate peaks bounded to `min_freq_hz`/`max_freq_hz` (issue #74, default `DEFAULT_MIN_FREQ_HZ`/`DEFAULT_MAX_FREQ_HZ` matching `config.FMIN`/`FMAX` — real callers pass those config values explicitly) so out-of-range broadband/percussive noise content can't be peak-picked into a phantom note. `select_window()` (issue #63) picks which ring buffer a hop's `detect()` call should analyze — the app's normal live `config.WINDOW_SIZE` window, or a longer `config.MULTIPITCH_LOW_WINDOW_SIZE` one the caller (`main.py`/`batch_transcribe.py`) also maintains, gated on `chroma.fold_bass()` showing real low-frequency content — see Key design decisions for why the short window alone garbles close-together bass notes. |
 | `chord_smoother.py` | `ChordSmoother` — mirrors `NoteSmoother`'s shape for chord mode: chroma rolling-average + chord-name debounce, plus asymmetric attack/release hysteresis per note-stack slot. |
 | `onset_detect.py` | (issue #55) `spectral_flux()`/`chroma_flux()` — pure, `None`-safe half-wave-rectified positive-magnitude-difference novelty measures between two consecutive `pitch_detect.compute_spectrum()`/`chroma.fold()` frames. `spectral_flux()` feeds `note_smoother.py`'s onset gate; `chroma_flux()` feeds `tempo_tracker.py`. |
 | `duration_tracker.py` | (issue #55) `DurationTracker` — mirrors `ChordSmoother.note_states`' dict-of-state shape, but for *measuring* how long a note sounded rather than debouncing its display. `.update()` (live, causal, keyed by `(pitch_class, octave)`, `is_onset`-aware re-attack preemption) and `.finalize_noncausal()` (batch, centered-smoothed envelope, static method) share one off-threshold definition (`DURATION_DECAY_RATIO`). `duration_class_for_beats()`/`DEFAULT_DURATION_CLASS` — nearest-standard-note-value snapping (incl. dotted), used by both live and batch. `require_onset_for_new_note` (constructor, issue #70) — mono's tracker sets this `True` so a key with no existing state only opens one when `is_onset` is genuinely `True` for it, since `NoteSmoother` otherwise echoes a just-finalized note's key with `is_onset=False` for a couple more hops (its own silence grace period) that would otherwise misread as a spurious new note; chord mode keeps the default `False` since it has no reliable per-note onset signal at all and relies on appear/absence alone. `.update()`'s `onset_backdate` parameter (issue #70) backdates a freshly-opened state's `onset_hop`, fed from `NoteSmoother.onset_backdate_hops` for mono. |
@@ -529,6 +529,35 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   mic/speaker/room distortion) no longer being silently absorbed — a net
   win on this signal. Does not touch the harmonic_number≤4 near-exact
   collision case below, which is unrelated and still open.
+- `multipitch.detect()` bounds every candidate peak's frequency to
+  `min_freq_hz`/`max_freq_hz` (default `DEFAULT_MIN_FREQ_HZ`/
+  `DEFAULT_MAX_FREQ_HZ`, 65-1000Hz — issue #74) before any pruning — until
+  this fix, `detect()` had no frequency-range bound at all, unlike the
+  monophonic path (`pitch_detect.detect_pitch()`, bounded by
+  `config.FMIN`/`FMAX`). A new acoustic-test suite (`percussion`,
+  `scripts/acoustic_pipeline_test.py`) found a hi-hat's high-passed
+  broadband noise (6-11kHz, ~3-4 octaves above `FMAX`) peak-picked as
+  phantom notes at octave 8-9, occasionally even forming a spuriously
+  "confident" chord name from pure percussive noise with zero pitched
+  content playing. Reuses `config.FMIN`/`FMAX` directly rather than a
+  separate polyphonic-only range — multipitch detects notes from the same
+  real instrument register the monophonic path already targets, just more
+  than one at a time, so there's no principled reason a chord's individual
+  notes would plausibly sit outside YIN's own already-established range;
+  confirmed by a direct sweep of this app's own chord-mode tests (up to
+  B5, the 6-note dense-chord and harmonic-near-miss tests among them) that
+  none get excluded by it. `main.py`/`batch_transcribe.py`'s real call
+  sites pass `config.FMIN`/`config.FMAX` explicitly, same convention as
+  every other `config.CHORD_*` constant already passed at those call
+  sites. Measured on the `--source loopback` percussion suite: false-chord
+  rate on a sustained beat-only drum pattern (kick/snare/hi-hat, no
+  pitched content) dropped from 13.1-13.8% to 0%, non-empty false
+  note-stack rate from 67-68% to ~30% (the residual ~30% is kick/snare's
+  own genuine broadband energy still falling *inside* the valid pitch
+  range — a separate, still-open gap this fix doesn't claim to close; see
+  Known limitations). The `chords`/`density` suites' legitimate-chord
+  accuracy was unaffected (100%/0 phantom, same as the pre-existing
+  baseline) — see docs/DECISIONS.md for the full before/after numbers.
 - `chord_templates._resolve_tie()` falls back to `lowest_pc` — the pitch
   class of whichever detected note is lowest in frequency this hop, no
   bass-register requirement — before falling back further to an arbitrary
@@ -793,6 +822,16 @@ One-liners; full rationale in `docs/DECISIONS.md`.
 
 One-liners; full detail in `docs/DECISIONS.md`.
 
+- Issue #74's frequency-range fix (see Key design decisions) only stops
+  peaks *outside* `config.FMIN`/`FMAX` from being peak-picked as phantom
+  notes — a kick or snare hit's own broadband energy that happens to fall
+  *inside* that range (real low-frequency thump/body resonance, not an
+  out-of-range artifact) still produces a non-empty, spurious note-stack
+  on the percussion acoustic suite's `beat_only` tier (~30% of hops,
+  down from ~67-68% pre-fix). No percussion/pitch-plausibility classifier
+  exists anywhere in this pipeline (chord/multipitch always runs
+  regardless of what's actually playing, see Architecture) — closing this
+  residual gap would need one, which is out of this fix's scope.
 - Octave-error blips (~100ms) can occur during note decay; not worth fixing
   without a concrete complaint.
 - Live pitch-tracking quality varies run-to-run with room/mic conditions —
