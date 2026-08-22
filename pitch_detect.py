@@ -96,13 +96,29 @@ def detect_pitch(
         t += 1
 
     if tau is None:
-        search = cmnd[tau_min:tau_max]
-        if len(search) == 0:
-            return None, 0.0
-        best = int(np.argmin(search))
-        if search[best] >= 0.99:  # nothing periodic in range (silence/noise)
-            return None, 0.0
-        tau = tau_min + best
+        # No tau anywhere in [tau_min, tau_max) cleared `threshold` -- the
+        # loop above already checked every one individually, so there is no
+        # principled looser fallback to fall back to; the frame just isn't
+        # periodic enough to call a pitch. (An earlier version of this
+        # function fell back here to the single global argmin, accepted
+        # whenever it beat a near-1.0 cutoff, and reported confidence as
+        # `1 - cmnd[tau]` with no regard for *why* that argmin was low.
+        # That path is what a noise-adversarial test suite (see
+        # docs/DECISIONS.md) caught confidently misfiring: broadband noise
+        # degrades the true (short-tau) period's own CMND dip faster than
+        # it degrades one of that same period's own longer-lag integer
+        # multiples -- 2x/5x/7x the true tau, confirmed empirically -- and
+        # CMND is *also* systematically biased lower near tau_max on pure
+        # noise alone (the difference function's window shrinks as tau
+        # grows, so fewer samples back each estimate there). Together those
+        # two effects can make a multiple-of-the-true-period tau near
+        # tau_max look deep enough to beat the loose 0.99 cutoff and get
+        # reported at 0.6-0.9 confidence -- entirely unrelated to the note
+        # actually playing, and well above CONFIDENCE_THRESHOLD. Since the
+        # primary scan already rules out every tau clearing the *real*
+        # threshold, the only sound behavior when it finds none is to
+        # report no pitch, exactly like classic YIN's "unvoiced frame."
+        return None, 0.0
     else:
         # Issue #69: in the low register, a note's own fundamental can be
         # naturally weaker than its overtones (bass rolloff in real

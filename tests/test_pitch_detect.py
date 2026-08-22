@@ -166,3 +166,64 @@ def test_white_noise_low_confidence_or_none():
     noise = rng.normal(0, 1, 2048)
     detected, confidence = detect_pitch(noise, SAMPLE_RATE, compute_spectrum(noise))
     assert detected is None or confidence < 0.5
+
+
+def _make_noisy_tone(freq, noise_amp, sample_rate=SAMPLE_RATE, n=2048,
+                      harmonics=(1.0, 0.5, 1.0 / 3, 0.25), tone_amp=0.30, seed=0):
+    """A dominant-fundamental tone (chroma.HARMONIC_WEIGHTS-shaped, same
+    profile as the acoustic `noise` suite's chromatic/chord sweep) plus
+    plain additive broadband white noise -- no mains-hum component, unlike
+    `_make_hum_noise_tone` above (that one models real-mic coloration for
+    issue #69's regression; this one isolates the newer, separate bug
+    below, which reproduces from broadband noise alone)."""
+    t = np.arange(n) / sample_rate
+    wsum = sum(harmonics)
+    tone = sum(a * np.sin(2 * np.pi * freq * h * t) for h, a in enumerate(harmonics, start=1)) / wsum
+    tone *= tone_amp
+    rng = np.random.default_rng(seed)
+    return (tone + rng.standard_normal(n) * noise_amp).astype(np.float64)
+
+
+@pytest.mark.parametrize("freq", [185.00, 440.00, 622.40])  # F#3, A4, D#5
+@pytest.mark.parametrize("noise_amp", [0.05, 0.10, 0.15])
+def test_broadband_noise_never_confidently_wrong(freq, noise_amp):
+    """Regression test for a bug found via `scripts/acoustic_pipeline_test.py`'s
+    `noise` suite: at moderate broadband noise, detect_pitch() used to LOCK
+    onto a pitch near tau_max (close to FMIN) at 0.6-0.9 confidence --
+    comfortably above config.CONFIDENCE_THRESHOLD=0.5 -- that had nothing to
+    do with the note actually playing (root-caused as an exact integer
+    multiple, e.g. 2x/5x/7x, of the true tau: broadband noise degrades the
+    true, short-tau period's own CMND dip while a longer-lag multiple of
+    that same period, aided by CMND's own systematic near-tau_max
+    normalization bias, occasionally looks deeper). The real bug wasn't
+    "loses confidence under noise" -- confidently wrong is worse than no
+    detection at all. This asserts the actual contract: whenever
+    detect_pitch() reports confidence above the app's own gating threshold,
+    it must be at least approximately right; otherwise it must report low
+    confidence or no detection. Every (freq, noise_amp) pair here
+    reproduced the bug pre-fix (0.6-0.9 confidence, 700+ cents off)."""
+    for seed in range(8):
+        tone = _make_noisy_tone(freq, noise_amp, seed=seed)
+        detected, confidence = detect_pitch(tone, SAMPLE_RATE, compute_spectrum(tone))
+        if confidence > 0.5:
+            assert detected is not None
+            cents_off = 1200 * np.log2(detected / freq)
+            assert abs(cents_off) < 50, (
+                f"freq={freq} noise={noise_amp} seed={seed}: confidently (conf={confidence:.3f}) "
+                f"detected {detected:.1f}Hz, {cents_off:.0f} cents off -- confidently wrong"
+            )
+
+
+def test_no_subthreshold_tau_anywhere_returns_none_not_loose_fallback():
+    """Unit-level regression for the actual code path removed by the fix
+    above: when the primary ascending threshold scan finds no tau in
+    [tau_min, tau_max) with cmnd(tau) < threshold, detect_pitch() must
+    report no pitch -- not fall back to whatever tau happens to have the
+    global-minimum CMND value in the whole search range (the removed
+    behavior accepted anything short of a near-1.0 cutoff, regardless of
+    whether it reflected real periodicity). A directly reproducing case
+    from the acoustic `noise` suite's A4 test point."""
+    tone = _make_noisy_tone(440.0, noise_amp=0.05, seed=0)
+    detected, confidence = detect_pitch(tone, SAMPLE_RATE, compute_spectrum(tone))
+    assert detected is None
+    assert confidence == 0.0

@@ -359,6 +359,29 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   on both sides — see docs/DECISIONS.md's follow-up entry. Only confirmed
   synthetically; a real-mic re-verification is still pending (see Known
   limitations).
+- `pitch_detect.detect_pitch()` no longer falls back to the global-argmin
+  CMND candidate when its ascending threshold scan finds no `tau` clearing
+  `YIN_THRESHOLD` (issue #71) — that fallback, present since the initial
+  commit, accepted almost anything short of a near-1.0 CMND cutoff and
+  reported confidence as `1 - cmnd[tau]` regardless of *why* the value was
+  low. A noise-adversarial acoustic test (a new `noise` suite in
+  `scripts/acoustic_pipeline_test.py`) found it confidently (0.6-0.9)
+  locking onto a pitch near `FMIN` for any note under moderate broadband
+  noise, unrelated to what was actually playing — root-caused to an
+  integer multiple (2x/5x/7x, confirmed empirically) of the true,
+  noise-degraded period looking deeper than the true dip itself, aided by
+  a real, confirmed-on-pure-noise-alone bias: CMND trends systematically
+  lower near `tau_max` because the difference function's window shrinks as
+  `tau` grows. Since the ascending scan already checks every `tau` for the
+  real threshold, finding none means no fallback is principled — it now
+  returns `(None, 0.0)`, the same "unvoiced frame" classic YIN specifies.
+  A `YIN_THRESHOLD` recalibration was investigated and rejected (evidenced,
+  not skipped): a 0.12-0.30 sweep found zero recoverable margin at this
+  app's own `moderate` noise level and would have reopened issue #69's
+  low-octave subharmonic-check regression at `light` noise for no measured
+  benefit. See docs/DECISIONS.md for the full root-cause writeup and
+  before/after real-loopback-hop-log numbers (moderate-noise
+  wrong-confident rate: 72.8% → 0%).
 - Microphone is the default input; `--source loopback` is opt-in and
   Linux-only (PipeWire/PulseAudio monitor), so portability of the default
   path is unaffected.
@@ -693,6 +716,22 @@ One-liners; full detail in `docs/DECISIONS.md`.
   the same kind that caught the regression the first time — has not yet
   been done for this round; treat the current constants as provisionally
   fixed, not field-confirmed, until that happens.
+- Under sustained broadband noise around the acoustic test suite's
+  `moderate` level (issue #71), monophonic detection genuinely goes silent
+  rather than reporting a note — a single ~93ms analysis window's
+  periodicity evidence is too degraded at that noise level for any
+  per-hop threshold to recover (confirmed via a 0.12-0.30 threshold
+  sweep finding zero recoverable margin), an honest statistical limit, not
+  a bug to chase further without new evidence (e.g. cross-hop periodicity
+  accumulation, out of scope for this fix). What was fixed is the far
+  worse failure mode this replaced: confidently reporting a *wrong* note
+  near `FMIN` regardless of octave (72.8% of moderate-noise hops,
+  measured on real `--source loopback` audio, pre-fix) — see Key design
+  decisions and docs/DECISIONS.md. Validated via synthetic adversarial
+  testing plus `--source loopback`, not a real physical speaker→mic
+  session — same "synthetic/loopback fixes haven't always survived
+  real-mic testing" caveat as issue #69 above; a real-mic re-check is
+  still advisable.
 - Target 64-bit Raspberry Pi OS (Bookworm+) — 32-bit is a wheel risk.
 - macOS/Windows gate mic access per-app; a denied prompt gives silent zeros,
   not an error.
