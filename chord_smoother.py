@@ -107,7 +107,19 @@ class ChordSmoother:
         avg_chroma = np.mean(self.chroma_history, axis=0)
         avg_bass_chroma = np.mean(self.bass_chroma_history, axis=0)
 
-        result = chord_templates.match(avg_chroma, avg_bass_chroma, threshold=self.match_threshold)
+        # Last-resort tiebreak for rotationally-ambiguous templates (issue
+        # #67): the pitch class of whichever detected note is lowest in
+        # frequency this hop, unconditionally -- unlike bass_chroma above
+        # (gated to genuine sub-DEFAULT_BASS_CUTOFF_HZ content only), this
+        # doesn't need a real "bass register" note, just whichever note
+        # happens to be lowest among however many are sounding. See
+        # chord_templates._resolve_tie's docstring for why this beats the
+        # previous arbitrary lowest-root-index fallback.
+        lowest_pc = None
+        if note_candidates:
+            lowest_pc = min(note_candidates, key=lambda nc: nc.freq).pitch_class
+
+        result = chord_templates.match(avg_chroma, avg_bass_chroma, threshold=self.match_threshold, lowest_pc=lowest_pc)
         candidate = result.name if result is not None else None
 
         if candidate == self.candidate_name:

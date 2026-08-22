@@ -94,7 +94,7 @@ def _detect_bass(bass_chroma, fallback_root):
     return int(np.argmax(bass_chroma))
 
 
-def _resolve_tie(candidates, bass_chroma):
+def _resolve_tie(candidates, bass_chroma, lowest_pc=None):
     if len(candidates) == 1:
         return candidates[0]
     if bass_chroma is not None:
@@ -104,12 +104,37 @@ def _resolve_tie(candidates, bass_chroma):
             for template in candidates:
                 if template.root == detected_bass:
                     return template
+    # No confident sub-bass-cutoff note to disambiguate (issue #67): a
+    # symmetric/rotationally-ambiguous chord (aug, dim7, min7/maj6, etc.)
+    # voiced entirely above the bass register has no genuine "slash chord"
+    # bass signal at all, so the old fallback here (always the lowest
+    # root-index template, a fixed but musically arbitrary tiebreak)
+    # answered wrong whenever the actual lowest note played wasn't that
+    # template's root -- e.g. an F#/A#/D augmented triad, close-voiced
+    # with F# lowest, was named "D+" every time. `lowest_pc` -- the pitch
+    # class of whichever detected note is lowest in frequency this hop,
+    # regardless of register -- is a much better guess for an ambiguous
+    # chord's root than an arbitrary index: root-position voicing (root in
+    # the bass) is the common case this app's own acoustic test fixtures
+    # and ordinary playing both default to, so preferring the template
+    # whose root matches the lowest note actually sounding is right far
+    # more often than picking whichever root happens to sort first.
+    if lowest_pc is not None:
+        for template in candidates:
+            if template.root == lowest_pc:
+                return template
     return min(candidates, key=lambda t: t.root)
 
 
-def match(chroma, bass_chroma=None, threshold=DEFAULT_THRESHOLD, bass_confidence_ratio=DEFAULT_BASS_CONFIDENCE_RATIO):
+def match(chroma, bass_chroma=None, threshold=DEFAULT_THRESHOLD, bass_confidence_ratio=DEFAULT_BASS_CONFIDENCE_RATIO, lowest_pc=None):
     """Return a `ChordMatch` for the best-fitting template against
-    `chroma`, or `None` if nothing clears `threshold` (cosine similarity)."""
+    `chroma`, or `None` if nothing clears `threshold` (cosine similarity).
+
+    `lowest_pc` (optional): pitch class of the lowest-frequency note
+    actually detected this hop, regardless of register/bass-cutoff -- used
+    only as a last-resort tiebreak among rotationally-ambiguous templates
+    when `bass_chroma` doesn't confidently pick a root (see
+    `_resolve_tie`)."""
     chroma = np.asarray(chroma, dtype=np.float64)
     chroma_norm = np.linalg.norm(chroma)
     if chroma_norm == 0:
@@ -136,7 +161,7 @@ def match(chroma, bass_chroma=None, threshold=DEFAULT_THRESHOLD, bass_confidence
     if best_similarity < threshold:
         return None
 
-    template = _resolve_tie(best_candidates, bass_chroma)
+    template = _resolve_tie(best_candidates, bass_chroma, lowest_pc)
     bass = _detect_bass(bass_chroma, fallback_root=template.root)
     name = _format_name(template.root, template.symbol, bass)
     return ChordMatch(name=name, root=template.root, quality=template.quality, bass=bass, similarity=best_similarity)

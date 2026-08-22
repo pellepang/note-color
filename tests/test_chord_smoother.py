@@ -58,6 +58,22 @@ def test_single_hop_candidate_blip_does_not_flicker_display():
     assert name == "C"
 
 
+def test_symmetric_chord_name_uses_lowest_note_candidate_as_tiebreak():
+    # issue #67 residual: ChordSmoother must pass the lowest-frequency
+    # note_candidate's pitch class through to chord_templates.match() as
+    # lowest_pc, not just leave rotationally-ambiguous templates (aug,
+    # dim7, ...) to the old arbitrary lowest-root-index fallback. F#/A#/D
+    # augmented, close-voiced upward from F#4 (none of these three notes
+    # is in the true sub-DEFAULT_BASS_CUTOFF_HZ bass register, so
+    # bass_chroma stays empty) -- must resolve to "F#+", not "D+"
+    # (real acoustic testing found exactly this misnaming).
+    s = ChordSmoother(config)
+    aug = [note(PITCH["F#"], 4, 369.99), note(PITCH["A#"], 4, 466.16), note(PITCH["D"], 5, 587.33)]
+    silent_bass = np.zeros(12)
+    name, _stack = feed(s, None, silent_bass, aug, config.CHORD_DEBOUNCE_HOPS)
+    assert name == "F#+"
+
+
 def test_no_match_reported_as_none_after_debounce():
     s = ChordSmoother(config)
     cluster = notes_for("C", "C#", "D", "D#", "E", "F")  # resembles no chord template
