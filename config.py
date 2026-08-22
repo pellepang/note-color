@@ -148,6 +148,13 @@ FADE_COLUMNS = 16               # issue #22: columns of age to fade a scrolled-p
                                  # held at that floor beyond this age. Reached via three
                                  # rounds of live user reaction (4 -> 8 -> 16) -- not a
                                  # value to second-guess without new live feedback.
+TAB_SCROLLBACK_SECONDS = 300.0   # how far back (in seconds) tab view's freeze-mode
+                                 # Left/Right scrollback can browse -- editable live via
+                                 # the Settings screen's numeric fields (issue #43),
+                                 # default backing config.toml's [preferences]
+                                 # "tab_scrollback_seconds" key. Valid range 30-3600
+                                 # (1 hour), step 30, enforced by settings_display.py's
+                                 # NUMERIC_FIELDS clamp, not by this constant itself.
 
 # --- Config store (issue #41) ---
 # Defaults for every terminal-mode hotkey, keyed by action name -- the
@@ -160,6 +167,7 @@ DEFAULT_KEYBINDS = {
     "notehead_style_toggle": "n",
     "legend_toggle": "l",
     "freeze_toggle": " ",
+    "rhythm_reanalysis": "r",
 }
 
 # --- Credits & donation (issue #44) ---
@@ -243,6 +251,15 @@ TEMPO_UPDATE_INTERVAL_HOPS = 20  # ~0.46s at BLOCK_SIZE=512/SAMPLE_RATE=22050 --
 # non-periodic content, >=0.41 for real periodic content anywhere in the
 # tested data).
 TEMPO_MIN_CONFIDENCE = 0.3
+RHYTHM_REANALYSIS_WINDOW_SECONDS = 60.0  # how many seconds of recent audio/data the tab
+                                  # view's 'R' offline-style rhythm re-analysis reaches
+                                  # back over -- editable live via the Settings screen's
+                                  # numeric fields (issue #43), default backing
+                                  # config.toml's [preferences]
+                                  # "rhythm_reanalysis_window_seconds" key. Valid range
+                                  # 5-1800 (30 min), step 5, enforced by
+                                  # settings_display.py's NUMERIC_FIELDS clamp, not by
+                                  # this constant itself.
 DEFAULT_TIME_SIGNATURE = (4, 4)  # (numerator, denominator) -- never auto-detected. A tuple, not a
                                   # display string: argparse only re-parses a --time-signature default
                                   # via _parse_time_signature when the default is itself a string, and

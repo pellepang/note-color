@@ -28,15 +28,24 @@ Schema (all tables optional):
     "F#" = 45
 
     [preferences]
-    # Free-form booleans/numbers/strings for quality-of-life settings, no
-    # dedicated editor screen (unlike [keybinds]/[colors] -- hand-edit
-    # only). One key is wired up today:
+    # Free-form booleans/numbers/strings for quality-of-life settings.
+    # menu_perf_mode has no dedicated editor screen (hand-edit only); the
+    # two numeric fields below are editable live from the Settings
+    # screen's generic NUMERIC_FIELDS (issue #43 follow-up), same
+    # preference()/set_preference() path, no bespoke accessor needed:
     menu_perf_mode = "auto"
     # "auto" (default) / "full" / "perf" -- issue #51's menu-donut
-    # render-mode override; see menu_display._resolve_perf_mode(). The
-    # rest of the table stays reserved for future settings this ticket
-    # only owns the load/persist mechanics for, not any particular one's
-    # UI (e.g. #40's still-unwired global 'H' keybind-legend on/off
+    # render-mode override; see menu_display._resolve_perf_mode().
+    rhythm_reanalysis_window_seconds = 60.0
+    # How many seconds of recent audio/data the tab view's 'R' offline-
+    # style rhythm re-analysis reaches back over; see
+    # config.RHYTHM_REANALYSIS_WINDOW_SECONDS.
+    tab_scrollback_seconds = 300.0
+    # How far back the tab view's freeze-mode Left/Right scrollback can
+    # browse; see config.TAB_SCROLLBACK_SECONDS.
+    # The rest of the table stays reserved for future settings this
+    # ticket only owns the load/persist mechanics for, not any particular
+    # one's UI (e.g. #40's still-unwired global 'H' keybind-legend on/off
     # state, under key "keybind_legend_on").
 """
 
@@ -63,8 +72,9 @@ class ConfigStore:
     below). Reads (`keybind`/`note_hue_override`/`preference`) are what
     every terminal view's hotkey handling and the analysis loop's color
     lookups hit every hop -- cheap by design, per the module docstring.
-    `set_preference()` (writes) is for a future settings-screen editor
-    (#43); nothing in this app calls it yet."""
+    `set_preference()` (writes) backs the settings-screen editor's (#43)
+    generic numeric fields, alongside the earlier hand-edit-only
+    menu_perf_mode preference."""
 
     def __init__(self, path=None):
         self.path = path or config_path()

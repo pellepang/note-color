@@ -1,8 +1,10 @@
 """virtualnote's interactive Settings screen (issue #43): the editor for
-config_store.py's (#41) keybind remaps and per-note color overrides,
-reachable as its own menu entry (menu_display.MENU_ITEMS) at the same tier
-as any tool -- shell.py special-cases the "settings" selection instead of
-sending it through main.run_session(), since it never touches audio.
+config_store.py's (#41) keybind remaps, per-note color overrides, and
+(added alongside the tab view's 'R'/scrollback plumbing) generic numeric
+preferences, reachable as its own menu entry (menu_display.MENU_ITEMS) at
+the same tier as any tool -- shell.py special-cases the "settings"
+selection instead of sending it through main.run_session(), since it never
+touches audio.
 
 Menu chrome for this screen only, per #37/#39's grilling: `blessed` for
 field-to-field navigation and "press a key to capture this remap" input
@@ -22,6 +24,8 @@ render/edit helpers) is smoke-tested manually, same as every run_terminal_*
 loop in main.py.
 """
 
+from collections import namedtuple
+
 import config
 from color_map import NOTE_NAMES, note_to_hsl, hsl_to_rgb255
 from config_store import store
@@ -32,6 +36,7 @@ KEYBIND_ACTIONS = [
     "notehead_style_toggle",
     "legend_toggle",
     "freeze_toggle",
+    "rhythm_reanalysis",
 ]
 
 _KEYBIND_LABELS = {
@@ -40,13 +45,39 @@ _KEYBIND_LABELS = {
     "notehead_style_toggle": "Notehead style (tab view)",
     "legend_toggle": "Staff legend (tab view)",
     "freeze_toggle": "Freeze view (tab view)",
+    "rhythm_reanalysis": "Rhythm re-analysis (tab view)",
 }
 
+# A generic numeric preference row -- key is the config.toml [preferences]
+# name (read/written via config_store.store.preference()/set_preference(),
+# already fully generic, no per-field wrapper needed the way keybinds/colors
+# have), min/max/step describe the field's valid range for the capture
+# prompt, and default is read from config.py's own constant so there's one
+# source of truth for it.
+NumericFieldSpec = namedtuple("NumericFieldSpec", ["key", "label", "min", "max", "step", "default"])
+
+NUMERIC_FIELDS = [
+    NumericFieldSpec(
+        "rhythm_reanalysis_window_seconds",
+        "Rhythm re-analysis window (seconds)",
+        5, 1800, 5,
+        config.RHYTHM_REANALYSIS_WINDOW_SECONDS,
+    ),
+    NumericFieldSpec(
+        "tab_scrollback_seconds",
+        "Tab scrollback window (seconds)",
+        30, 3600, 30,
+        config.TAB_SCROLLBACK_SECONDS,
+    ),
+]
+
 # One row per keybind action, then one row per note (sharp spelling,
-# pitch-class order 0..11, matching color_map.NOTE_NAMES) -- fixed at
-# import time since neither list's length changes at runtime.
+# pitch-class order 0..11, matching color_map.NOTE_NAMES), then one row per
+# numeric preference -- fixed at import time since none of the three
+# lists' lengths change at runtime.
 FIELDS = [("keybind", action) for action in KEYBIND_ACTIONS] + \
-    [("color", pitch_class) for pitch_class in range(len(NOTE_NAMES))]
+    [("color", pitch_class) for pitch_class in range(len(NOTE_NAMES))] + \
+    [("numeric", spec) for spec in NUMERIC_FIELDS]
 
 
 def _format_key(key):
@@ -85,14 +116,34 @@ def color_swatch_rgb(pitch_class):
     return hsl_to_rgb255(hue, sat, light)
 
 
+def numeric_label(spec):
+    return spec.label
+
+
+def numeric_value(spec):
+    """Formatted as whole seconds -- both of today's numeric fields are
+    time windows in seconds, and their min/max/step are all multiples of
+    5 or more, so there's never a fractional value to show."""
+    value = store.preference(spec.key, spec.default)
+    return f"{value:.0f}s"
+
+
 def field_label(index):
     kind, value = FIELDS[index]
-    return keybind_label(value) if kind == "keybind" else color_label(value)
+    if kind == "keybind":
+        return keybind_label(value)
+    if kind == "color":
+        return color_label(value)
+    return numeric_label(value)
 
 
 def field_value(index):
     kind, value = FIELDS[index]
-    return keybind_value(value) if kind == "keybind" else color_value(value)
+    if kind == "keybind":
+        return keybind_value(value)
+    if kind == "color":
+        return color_value(value)
+    return numeric_value(value)
 
 
 def move(selected, delta):
@@ -132,25 +183,49 @@ def parse_hue_input(text):
     return float(int(text) % 360)
 
 
+def parse_numeric_input(text, min_val, max_val):
+    """Parses a numeric field's typed digit buffer into a value clamped
+    into [min_val, max_val] -- unlike parse_hue_input's circular modulo
+    wrap, a bounded real-world quantity like a time window should clamp at
+    its edges instead of wrapping back around to the opposite end. Empty
+    text returns None (the caller resets the field to its spec default,
+    mirroring parse_hue_input's empty-clears-override convenience, though
+    here there's no 'no override' state -- just a fallback to default).
+    Raises ValueError on anything non-numeric, same as parse_hue_input."""
+    text = text.strip()
+    if text == "":
+        return None
+    value = float(int(text))
+    return max(min_val, min(max_val, value))
+
+
 def apply_field_edit(index, new_value):
     """Persists `new_value` for FIELDS[index] via the config store --
-    `new_value` is a single remap character for a keybind row, or an
-    Optional[float] hue (None clears the override) for a color row."""
+    `new_value` is a single remap character for a keybind row, an
+    Optional[float] hue (None clears the override) for a color row, or a
+    float for a numeric row."""
     kind, value = FIELDS[index]
     if kind == "keybind":
         store.set_keybind(value, new_value)
-    else:
+    elif kind == "color":
         store.set_note_hue_override(value, new_value)
+    else:
+        store.set_preference(value.key, new_value)
 
 
 def clear_field(index):
     """Backspace/Delete outside edit mode on a color row resets it straight
-    to 'default' with no digit entry needed; a no-op on keybind rows --
-    there's no 'unset' state for a keybind, every action always has some
-    key bound, so 'clear' isn't a meaningful action there."""
+    to 'default' with no digit entry needed; on a numeric row it resets
+    straight back to that field's spec default (there's no 'no override'
+    state to clear to the way color has -- a numeric preference always has
+    *some* value). A no-op on keybind rows -- there's no 'unset' state for
+    a keybind, every action always has some key bound, so 'clear' isn't a
+    meaningful action there."""
     kind, value = FIELDS[index]
     if kind == "color":
         store.set_note_hue_override(value, None)
+    elif kind == "numeric":
+        store.set_preference(value.key, value.default)
 
 
 def _highlight(term, text, is_selected):
@@ -160,7 +235,7 @@ def _highlight(term, text, is_selected):
 def _render(term, selected, message):
     lines = [
         term.bold("note-color settings"),
-        "Up/Down move  Enter edit  Backspace/Del clear (colors)  |/Esc back to menu",
+        "Up/Down move  Enter edit  Backspace/Del clear (colors)/reset (numeric)  |/Esc back to menu",
         "",
         term.underline("Keybinds"),
     ]
@@ -173,6 +248,12 @@ def _render(term, selected, message):
         index = len(KEYBIND_ACTIONS) + pitch_class
         dot = term.color_rgb(*color_swatch_rgb(pitch_class))("●") if term.does_styling else "●"
         row = f"  {dot} {color_label(pitch_class):<4s} {color_value(pitch_class)}"
+        lines.append(_highlight(term, row, index == selected))
+    lines.append("")
+    lines.append(term.underline("Numeric settings"))
+    for i, spec in enumerate(NUMERIC_FIELDS):
+        index = len(KEYBIND_ACTIONS) + len(NOTE_NAMES) + i
+        row = f"  {numeric_label(spec):<38s} {numeric_value(spec)}"
         lines.append(_highlight(term, row, index == selected))
     lines.append("")
     lines.append(message)
@@ -216,9 +297,39 @@ def _capture_hue(term, index):
             buffer += str(key)
 
 
+def _capture_numeric(term, index):
+    _, spec = FIELDS[index]
+    buffer = ""
+    while True:
+        prompt = (f"{spec.label} ({spec.min:.0f}-{spec.max:.0f}, step {spec.step:.0f}, "
+                  f"Enter to confirm, Esc cancels, empty Enter resets to default): {buffer}")
+        _render(term, index, prompt)
+        key = term.inkey()
+        if key.name == "KEY_ESCAPE":
+            return "cancelled"
+        if key.name == "KEY_ENTER" or str(key) in ("\r", "\n"):
+            try:
+                value = parse_numeric_input(buffer, spec.min, spec.max)
+            except ValueError:
+                buffer = ""
+                continue
+            if value is None:
+                value = spec.default
+            apply_field_edit(index, value)
+            return f"{spec.label} -> {value:.0f}s"
+        if key.name in ("KEY_BACKSPACE", "KEY_DELETE"):
+            buffer = buffer[:-1]
+        elif str(key).isdigit():
+            buffer += str(key)
+
+
 def _edit_field(term, index):
     kind, _ = FIELDS[index]
-    return _capture_keybind(term, index) if kind == "keybind" else _capture_hue(term, index)
+    if kind == "keybind":
+        return _capture_keybind(term, index)
+    if kind == "color":
+        return _capture_hue(term, index)
+    return _capture_numeric(term, index)
 
 
 def run_settings_screen(term=None):

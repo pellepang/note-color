@@ -120,11 +120,11 @@ into an implicit `None` as before — see Key design decisions.
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
 | `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()` (each note stored as a mutable dict, not a tuple — a `duration_class` field starts `None` and is filled in later by `finalize_duration()`, since a note's duration is only known after it decays, well after the column carrying it was pushed; optional `t=` override lets `main.run_batch_transcribe()` stamp a column with the recording's real onset time instead of wall-clock), `push_barline()` (issue #55: a second, distinct column type — no notes, just a divider glyph spanning the staff height at `TAB_BARLINE_WIDTH`, aged/dimmed the same way note columns are but with no hue), `render()` (takes live `notehead_style`/`legend_on`/`frozen`, age-fades each column's lightness per issue #22, and composes duration glyphs/suffixes onto each note per its `duration_class`), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). |
-| `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()`/`set_keybind()`/`set_note_hue_override()` (persist + write back to the TOML file — the last two back issue #43's settings screen). |
+| `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()`/`set_keybind()`/`set_note_hue_override()` (persist + write back to the TOML file — all three back issue #43's settings screen, `set_preference()`/`preference()` generically covering the numeric `rhythm_reanalysis_window_seconds`/`tab_scrollback_seconds` fields alongside the earlier hand-edit-only `menu_perf_mode`, no bespoke accessor needed for any of the three). |
 | `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape — `duration_hops`/`bpm_estimate` (issue #55) are its newest two fields. `run_terminal_tab()` drives rhythm notation: per-hop `finalize_duration()` calls (mono via the previous hop's `pitch_class`/`octave`, chord via each `note_stack` entry's own `duration_hops`) and a beat-accumulator triggering `push_barline()`. `run_batch_transcribe()` (issue #55, `virtualnote transcribe`) never touches `SessionState`/audio at all — offline, one-shot, builds `TabDisplay` columns from `batch_transcribe.transcribe()`'s output and calls `dump_ansi()` directly, no render loop. `pygame` imported only inside `run_gui`; `librosa` never imported here at all (see `batch_transcribe.py`). |
 | `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); `render()` draws issue #42's decided animated design (built in #51): `menu_animation`'s spinning donut fills a left-hand pane, with the title/donation-callout/tool-list/hints/status text overlaid in a fixed-width right-hand pane (`_layout()`, `_text_lines()`) — narrow terminals drop the donut and fall back to a centered text-only screen, same shape as the original #40 placeholder. `move()`/`move_to()`/`current_view()` selection plumbing is unchanged by any of this. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens: `settings`, `credits`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. `osc8_link()`/`_donation_line()` (issue #44) build the main screen's clickable author/donation callout. `_resolve_perf_mode()` picks full vs. perf donut rendering: an explicit override (virtualnote's `--menu-perf-mode` flag) beats `config.toml`'s `[preferences].menu_perf_mode` beats `menu_animation.detect_perf_mode()`'s real startup probe. |
 | `menu_animation.py` | Animation math for the menu screen's donut (issues #42/#51), ported from the throwaway prototype at `prototype/issue-42-menu-animation/{donut_fifths.py,autodetect.py}`: `render_frame()` — NumPy-vectorized torus point-projection (`_project()`) + a painter's-algorithm z-buffer via ascending-depth-sort fancy-indexing (no per-point Python loop) — re-skinned with the circle-of-fifths palette (`band_color()`/`FIFTHS_LABELS`), full mode shaded/lettered, perf mode flat/letterless/half-raster. `detect_perf_mode()`/`_decide_perf_mode()` — issue #46's auto-detect heuristic (core-count floor, then a real self-timed `render_frame()` probe against the full-mode frame budget), split into a real-timing wrapper and a pure decision function for testability. |
-| `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps and per-note hue overrides live, using `blessed` for field navigation and "press a key to capture this remap" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS`/`move()`/`keybind_value()`/`color_value()`/`is_valid_remap_key()`/`parse_hue_input()`/`apply_field_edit()`/`clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself is smoke-tested manually, same convention as every `run_terminal_*` loop. |
+| `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps, per-note hue overrides, and generic numeric preferences live, using `blessed` for field navigation and "press a key to capture this remap"/"type a clamped number" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS` (three kinds: `"keybind"`/`"color"`/`"numeric"`) / `NUMERIC_FIELDS` (spec list: key, label, min, max, step, default — today covers `rhythm_reanalysis_window_seconds` and `tab_scrollback_seconds`) / `move()` / `keybind_value()`/`color_value()`/`numeric_value()` / `is_valid_remap_key()` / `parse_hue_input()` (wraps modulo 360) / `parse_numeric_input()` (clamps into `[min, max]`, the correct behavior for a bounded quantity unlike hue's circular wrap) / `apply_field_edit()` / `clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself (including `_capture_numeric()`, modeled on `_capture_hue()`) is smoke-tested manually, same convention as every `run_terminal_*` loop. |
 | `credits_display.py` | `run_credits_screen()` — `virtualnote`'s static Credits screen (issue #44): author, Claude/AI-assistance credit, and third-party library attribution (`THIRD_PARTY_LIBRARIES`), raw ANSI (no editable state, so no need for `settings_display`'s `blessed` exception). `credits_lines()` is the pure, unit-tested text builder; the render/wait-for-any-keypress loop itself is smoke-tested manually. |
 | `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. `"settings"`/`"credits"` picks are special-cased via `_NON_SESSION_SCREENS` straight to `settings_display.run_settings_screen()`/`credits_display.run_credits_screen()` instead of `run_session()` (issues #43, #44) — neither touches audio, so both always return straight back to the menu. |
 | `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded; `--menu-perf-mode {auto,full,perf}`, top-level-only, issue #51's CLI override for the menu donut; `tab`'s `--time-signature` and the standalone `transcribe <file> [--dump-file] [--time-signature]` subcommand, issue #55) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly — except `transcribe`, handled and returned before `SessionState` is even constructed, since batch never touches live audio. |
@@ -294,39 +294,59 @@ An optional TOML file at `$XDG_CONFIG_HOME/note-color/config.toml`
 exact behavior. Covers three things today, all hot-reloaded live (edit the
 file while the app is running, no restart needed):
 
-- `[keybinds]` — remap any of the five terminal hotkeys (`source_toggle`,
+- `[keybinds]` — remap any of the six terminal hotkeys (`source_toggle`,
   `chord_mode_toggle`, `notehead_style_toggle`, `legend_toggle`,
-  `freeze_toggle`) to a different single character, e.g.
-  `source_toggle = "x"`. The status line's hotkey hints (`(m)`, `(p)`,
-  etc.) reflect the remap. Editable live from the menu's Settings screen
-  (below), or by hand.
+  `freeze_toggle`, `rhythm_reanalysis`) to a different single character,
+  e.g. `source_toggle = "x"`. `rhythm_reanalysis` (default `"r"`) is the
+  tab view's not-yet-built offline-style rhythm re-analysis trigger — this
+  entry is the settings/config plumbing for it, wired up ahead of the
+  feature itself. The status line's hotkey hints (`(m)`, `(p)`, etc.)
+  reflect the remap. Editable live from the menu's Settings screen (below),
+  or by hand.
 - `[colors]` — override a note's hue (degrees, 0–360) by name, either
   sharp or flat spelling, e.g. `C = 200` or `"F#" = 45`. Saturation and
   octave-driven lightness are untouched by the override. Also editable
   from the Settings screen.
-- `[preferences]` — free-form quality-of-life settings, hand-edit only (no
-  screen owns this table); today's one wired-up key is
+- `[preferences]` — free-form quality-of-life settings; `menu_perf_mode`
+  (hand-edit only, no screen owns it) plus two numeric fields editable
+  live from the Settings screen (below):
   `menu_perf_mode = "auto"/"full"/"perf"` (issue #51's menu-donut override
-  — see `menu_display._resolve_perf_mode()`). The rest of the table is
-  still reserved for future settings (e.g. #40's still-unwired global `H`
+  — see `menu_display._resolve_perf_mode()`);
+  `rhythm_reanalysis_window_seconds` (default `60.0`, valid range 5–1800,
+  step 5) — how many seconds of recent audio/data the tab view's `R`
+  offline-style rhythm re-analysis reaches back over, see
+  `config.RHYTHM_REANALYSIS_WINDOW_SECONDS`; `tab_scrollback_seconds`
+  (default `300.0`, valid range 30–3600, step 30) — how far back the tab
+  view's freeze-mode Left/Right scrollback can browse, see
+  `config.TAB_SCROLLBACK_SECONDS`. Both numeric fields are read/written
+  purely through `config_store.py`'s already-generic
+  `preference()`/`set_preference()`, no bespoke accessor, since neither
+  the re-analysis nor the scrollback feature itself is built yet — this is
+  just their settings/config plumbing. The rest of the table is still
+  reserved for future settings (e.g. #40's still-unwired global `H`
   keybind-legend on/off persistence); see `config_store.py`'s docstring
   for the full schema and `docs/DECISIONS.md` for why the schema stops
   here for now.
 
 **Settings screen (issue #43).** `virtualnote`'s menu has a `Settings`
 entry (same tier as any tool) that opens an interactive editor
-(`settings_display.py`) for exactly the `[keybinds]`/`[colors]` overrides
-above — Up/Down moves between fields, Enter edits the highlighted one
-(captures the very next keypress for a keybind row; opens an inline
-0–360 digit entry for a color row), Backspace/Delete resets a color row
-straight back to "default", and `|`/Esc returns to the menu, same
-always-live convention every other tool uses. Edits write straight through
-`config_store.set_keybind()`/`set_note_hue_override()` and take effect
-immediately via the store's existing hot-reload — no restart, same live-UX
-as `M`/`P`. A remap can't be bound to `|` or `h`/`H` — both are global keys
-every terminal loop checks unconditionally, so binding an action onto
-either would make that key double-fire instead of working as a normal
-remap.
+(`settings_display.py`) for the `[keybinds]`/`[colors]`/numeric-
+`[preferences]` overrides above — Up/Down moves between fields, Enter
+edits the highlighted one (captures the very next keypress for a keybind
+row; opens an inline 0–360 digit entry for a color row; opens an inline
+clamped digit entry, bounded to that field's own min/max, for a numeric
+row), Backspace/Delete resets a color row straight back to "default" or a
+numeric row straight back to its spec default, and `|`/Esc returns to the
+menu, same always-live convention every other tool uses. Edits write
+straight through `config_store.set_keybind()`/`set_note_hue_override()`/
+`set_preference()` and take effect immediately via the store's existing
+hot-reload — no restart, same live-UX as `M`/`P`. A remap can't be bound
+to `|` or `h`/`H` — both are global keys every terminal loop checks
+unconditionally, so binding an action onto either would make that key
+double-fire instead of working as a normal remap. Unlike a color field's
+hue (which wraps modulo 360, a circular quantity), a numeric field's typed
+value is clamped into its `[min, max]` range instead — the correct
+behavior for a bounded real-world quantity like a time window.
 
 ## Key design decisions
 
