@@ -927,6 +927,29 @@ real physical speaker→mic session — this repo has a documented history
 verification, so a real-mic re-check is still advisable before treating
 this as fully closed in the field.
 
+**Follow-up, found by the orchestrating session immediately after
+landing the fix above (not by the fix's own agent, whose regression guard
+only re-checked the `chromatic` suite): removing the argmin fallback also
+cost real recall at the `tempo` suite's fastest tested speed.** 90/140/
+200bpm all stayed 100% (unaffected — plenty of periods per analysis
+window at those speeds), but 280bpm (eighth notes, 107ms/note, already
+this suite's explicit "how fast can it go" stress case, not a normal-use
+guarantee) dropped from a stable 88% (measured twice, both this session's
+#67/#68 work and independently before the #71 fix) to a stable 71%
+(likewise measured twice, immediately after #71 landed, `--source
+loopback --suites tempo`, no other change in between). This is the same
+trade-off as the noise case above, at a different stressor: a fast
+legato transition's analysis window is briefly contaminated by the
+previous/next note bleeding in at the window edges, and the old fallback
+would sometimes guess through that ambiguity by luck (right or wrong,
+unverifiable from the recall number alone, same as the noise case);
+removing it means some of those borderline hops now correctly report no
+detection instead of a lucky guess. Left as-is, not chased further: only
+the most extreme tested tempo is affected, 90-200bpm are untouched, and
+re-introducing any form of "guess when in doubt" would directly undo
+issue #71's whole point. Documented here and in CLAUDE.md's Known
+limitations rather than silently left for the next person to rediscover.
+
 ## Harmonic-pruning evaluation order fixed, not tolerance (issues #67/#68)
 
 Issue #67's own hypothesis — that a fixed `harmonic_tolerance_cents`

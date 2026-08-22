@@ -732,6 +732,15 @@ One-liners; full detail in `docs/DECISIONS.md`.
   session — same "synthetic/loopback fixes haven't always survived
   real-mic testing" caveat as issue #69 above; a real-mic re-check is
   still advisable.
+- Same issue #71 fix also cost recall at the `tempo` suite's fastest
+  tested speed only: 280bpm eighth-note legato (107ms/note, already this
+  suite's explicit stress case, not a normal-use guarantee) dropped from
+  a stable 88% to a stable 71% (each measured twice via `--source
+  loopback --suites tempo`), while 90/140/200bpm stayed 100% throughout.
+  Same trade-off as the noise case above at a different stressor (a fast
+  transition's analysis window briefly straddling two notes used to get
+  rescued by the removed fallback's lucky guess); not chased further for
+  the same reason — see docs/DECISIONS.md's #71 entry.
 - Target 64-bit Raspberry Pi OS (Bookworm+) — 32-bit is a wheel risk.
 - macOS/Windows gate mic access per-app; a denied prompt gives silent zeros,
   not an error.
