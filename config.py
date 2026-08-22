@@ -227,6 +227,22 @@ TEMPO_MIN_BPM = 40
 TEMPO_MAX_BPM = 240
 TEMPO_UPDATE_INTERVAL_HOPS = 20  # ~0.46s at BLOCK_SIZE=512/SAMPLE_RATE=22050 -- re-estimate tempo
                                   # this often rather than every hop, amortizing the autocorrelation cost
+# Issue #70: TempoTracker._estimate()'s autocorrelation peak, normalized
+# against zero-lag energy (acf[0]) -- how much of the novelty history's
+# total energy the best periodic lag actually explains. A real periodic
+# passage (e.g. this suite's own isochronous pulse train) measured
+# ~0.85-0.90 throughout; once that periodic content scrolls out of the
+# rolling TEMPO_HISTORY_SECONDS window and is replaced by non-periodic
+# content (isolated single notes at irregular intervals -- no consistent
+# beat for autocorrelation to find), confidence collapsed to ~0.09-0.19 and
+# the estimate started swinging wildly (99bpm -> 41bpm -> 76bpm -> 49bpm
+# across consecutive re-estimates on real recorded audio). Below this
+# threshold, TempoTracker holds its last estimate rather than re-locking
+# onto what's essentially autocorrelation noise -- see docs/DECISIONS.md
+# for the full empirical calibration (clean margin: <=0.19 for genuinely
+# non-periodic content, >=0.41 for real periodic content anywhere in the
+# tested data).
+TEMPO_MIN_CONFIDENCE = 0.3
 DEFAULT_TIME_SIGNATURE = (4, 4)  # (numerator, denominator) -- never auto-detected. A tuple, not a
                                   # display string: argparse only re-parses a --time-signature default
                                   # via _parse_time_signature when the default is itself a string, and

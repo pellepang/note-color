@@ -24,6 +24,7 @@ class TempoTracker:
         self.min_bpm = cfg.TEMPO_MIN_BPM
         self.max_bpm = cfg.TEMPO_MAX_BPM
         self.update_interval_hops = cfg.TEMPO_UPDATE_INTERVAL_HOPS
+        self.min_confidence = cfg.TEMPO_MIN_CONFIDENCE
         history_len = max(1, int(cfg.TEMPO_HISTORY_SECONDS / hop_seconds))
         self.history = deque(maxlen=history_len)
         self._hops_since_update = 0
@@ -68,5 +69,22 @@ class TempoTracker:
 
         window = acf[lag_min:lag_max + 1]
         best_lag = lag_min + int(np.argmax(window))
+
+        # Issue #70: how much of the novelty history's total energy
+        # (acf[0], the zero-lag autocorrelation) the best candidate lag
+        # actually explains -- a real periodic passage concentrates energy
+        # at its true period's lag (and integer multiples), while
+        # non-periodic content (no consistent beat in this window at all)
+        # spreads it thinly across every lag, so no single candidate ever
+        # stands out. Below min_confidence, re-locking onto whichever lag
+        # happens to be marginally tallest is re-locking onto noise --
+        # hold the last real estimate instead of chasing it. See
+        # config.TEMPO_MIN_CONFIDENCE's comment for the empirical
+        # calibration.
+        peak = float(window[best_lag - lag_min])
+        confidence = peak / acf[0] if acf[0] > 0 else 0.0
+        if confidence < self.min_confidence:
+            return self._last_estimate
+
         bpm = 60.0 / (best_lag * self.hop_seconds)
         return float(min(max(bpm, self.min_bpm), self.max_bpm))
