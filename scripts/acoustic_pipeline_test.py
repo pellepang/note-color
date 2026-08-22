@@ -40,6 +40,20 @@ What it measures, one suite at a time:
                   quantify onset-gate misfire rate (issue #66) and
                   duration-tracking fragmentation (issues #64/#67) with a
                   large per-note sample size.
+- `rhythm`     -- live tempo-tracking convergence (`TempoTracker`) against
+                  an isochronous pulse train of known BPM, and live
+                  duration-class snapping (`duration_class_for_beats()`)
+                  against notes of known standard-value length at that
+                  BPM -- issue #55's rhythm pipeline has so far only been
+                  verified via synthetic array-slicing unit tests and one
+                  `virtualnote transcribe` batch run (see CLAUDE.md's
+                  Status section); this is its first check against the
+                  live per-hop pipeline through a real audio round trip.
+- `noise`      -- a reduced chromatic + chord sweep with additive
+                  broadband noise mixed in at a few SNR levels, to check
+                  onset-gate/sensitivity-threshold robustness beyond the
+                  effectively-silent-room conditions every other suite
+                  tests under.
 
 Usage:
     .venv/bin/python scripts/acoustic_pipeline_test.py                 # run everything
@@ -73,6 +87,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 import main
 from color_map import NOTE_NAMES_FIFTHS
+from duration_tracker import duration_class_for_beats
+
+HOP_SECONDS = config.BLOCK_SIZE / config.SAMPLE_RATE
 
 
 @contextlib.contextmanager
@@ -234,6 +251,7 @@ def record_session(session, audio, total_runtime_s, warmup_s=1.5):
             "is_onset": item.is_onset,
             "confidence": item.confidence,
             "duration_hops": item.duration_hops,
+            "bpm_estimate": item.bpm_estimate,
             "chord_name": item.chord_name,
             "note_stack": [
                 {"pitch_class": e["pitch_class"], "octave": e["octave"],
@@ -559,6 +577,221 @@ def analyze_sustain(log, timeline):
 
 
 # --------------------------------------------------------------------------
+# Suite: rhythm -- live tempo-tracking convergence + duration-class snapping
+# --------------------------------------------------------------------------
+
+RHYTHM_TRUE_BPM = 100.0
+RHYTHM_PULSE_ON_S = 0.30      # active tone per pulse
+RHYTHM_PULSE_GAP_S = 0.30     # silence per pulse -- period = ON+GAP = 0.6s = one quarter note @ 100bpm
+RHYTHM_N_PULSES = 40          # 24s total: several x TEMPO_HISTORY_SECONDS (8s) to reach convergence
+RHYTHM_TEMPO_SETTLE_S = 10.0  # ignore bpm_estimate readings before this point (still converging)
+
+# (beats, class-name) pairs to stress-test duration snapping at
+# RHYTHM_TRUE_BPM -- includes the same standard values duration_tracker.py
+# itself snaps to, down through the shortest (thirtysecond), which is
+# expected to be at or past this pipeline's real hop-resolution limit
+# (~23ms/hop at config.BLOCK_SIZE/SAMPLE_RATE) -- included deliberately as
+# an informational stress point, not an assumed-passable case.
+RHYTHM_DURATION_CLASSES = [
+    (4.0, "whole"), (3.0, "dotted-half"), (2.0, "half"), (1.5, "dotted-quarter"),
+    (1.0, "quarter"), (0.75, "dotted-eighth"), (0.5, "eighth"),
+    (0.375, "dotted-sixteenth"), (0.25, "sixteenth"), (0.125, "thirtysecond"),
+]
+RHYTHM_DURATION_GAP_S = 0.35
+
+
+def build_rhythm():
+    beat_s = 60.0 / RHYTHM_TRUE_BPM
+
+    # Part 1: isochronous single-pitch pulse train (clean periodic onsets,
+    # no pitch changes) -- tests TempoTracker.update()'s convergence in
+    # isolation from any note-identity confound.
+    pulse_entries = []
+    for i in range(RHYTHM_N_PULSES):
+        pulse_entries.append(([("C", 4)], RHYTHM_PULSE_ON_S, {"kind": "tempo_pulse", "pulse_index": i}))
+        pulse_entries.append(([], RHYTHM_PULSE_GAP_S, {"kind": "silence"}))
+    pulse_audio, pulse_timeline, pulse_total = build_timed_audio(pulse_entries, gap_s=0.0, warmup_lead_s=1.5)
+
+    # Part 2: single notes at each standard duration value, same BPM
+    # (tempo_tracker's estimate should already be locked in from part 1,
+    # continuous audio, no reset) -- tests duration_class_for_beats()
+    # snapping against the live per-hop pipeline.
+    dur_entries = []
+    for beats, cls in RHYTHM_DURATION_CLASSES:
+        dur_entries.append(([("C", 4)], beats * beat_s, {"kind": "duration_note", "expected_class": cls, "expected_beats": beats}))
+    dur_audio, dur_timeline, dur_total = build_timed_audio(dur_entries, gap_s=RHYTHM_DURATION_GAP_S, warmup_lead_s=0.0)
+
+    for entry in dur_timeline:
+        entry["start"] += pulse_total
+        entry["end"] += pulse_total
+
+    audio = np.concatenate([pulse_audio, dur_audio])
+    timeline = pulse_timeline + dur_timeline
+    return audio, timeline, pulse_total + dur_total
+
+
+def analyze_rhythm(log, timeline):
+    tempo_segs = [s for s in timeline if s.get("kind") == "tempo_pulse"]
+    dur_segs = [s for s in timeline if s.get("kind") == "duration_note"]
+
+    # --- Tempo convergence ---
+    converged = [h for h in log if h["t"] >= RHYTHM_TEMPO_SETTLE_S
+                 and tempo_segs and h["t"] <= tempo_segs[-1]["end"]
+                 and h["bpm_estimate"] is not None]
+    estimates = [h["bpm_estimate"] for h in converged]
+    if estimates:
+        median_bpm = statistics.median(estimates)
+        error_pct = round(abs(median_bpm - RHYTHM_TRUE_BPM) / RHYTHM_TRUE_BPM * 100, 1)
+        octave_ratio = None
+        for mult, label in ((2.0, "2x"), (0.5, "0.5x")):
+            if abs(median_bpm - RHYTHM_TRUE_BPM * mult) / (RHYTHM_TRUE_BPM * mult) < 0.1:
+                octave_ratio = label
+    else:
+        median_bpm, error_pct, octave_ratio = None, None, None
+    tempo_result = {
+        "true_bpm": RHYTHM_TRUE_BPM, "n_readings": len(estimates),
+        "median_bpm_estimate": round(median_bpm, 1) if median_bpm is not None else None,
+        "error_pct": error_pct, "octave_error": octave_ratio,
+    }
+
+    # --- Duration-class snapping ---
+    # A mono duration_hops finalize event at log[i] belongs to the PREVIOUS
+    # hop's (pitch_class, octave) -- main.py's own convention (see its
+    # run_terminal_tab finalize handling) -- since the CURRENT hop has
+    # already moved on (new note, or silence).
+    finalize_events = []
+    for i in range(1, len(log)):
+        h = log[i]
+        if h["duration_hops"] is None:
+            continue
+        prev = log[i - 1]
+        if prev["pitch_class"] is None:
+            continue
+        beats = (h["duration_hops"] * HOP_SECONDS * h["bpm_estimate"] / 60.0) if h["bpm_estimate"] else None
+        detected_class = duration_class_for_beats(beats)
+        finalize_events.append({
+            "t": h["t"], "pitch_class": prev["pitch_class"], "octave": prev["octave"],
+            "beats": round(beats, 3) if beats is not None else None, "detected_class": detected_class,
+        })
+
+    dur_rows = []
+    for seg in dur_segs:
+        window_end = seg["end"] + LATENCY_SEARCH_SLOP_S + 0.2
+        candidates = [e for e in finalize_events if seg["start"] < e["t"] <= window_end and e["pitch_class"] == 0]
+        if candidates:
+            ev = min(candidates, key=lambda e: abs(e["t"] - seg["end"]))
+            dur_rows.append({
+                "expected_class": seg["expected_class"], "expected_beats": seg["expected_beats"],
+                "detected_class": ev["detected_class"], "detected_beats": ev["beats"],
+                "correct": ev["detected_class"] == seg["expected_class"], "finalized": True,
+            })
+        else:
+            dur_rows.append({
+                "expected_class": seg["expected_class"], "expected_beats": seg["expected_beats"],
+                "detected_class": None, "detected_beats": None, "correct": False, "finalized": False,
+            })
+
+    n = len(dur_rows)
+    correct = sum(1 for r in dur_rows if r["correct"])
+    finalized = sum(1 for r in dur_rows if r["finalized"])
+    duration_result = {
+        "n_classes": n,
+        "finalize_rate": round(finalized / n, 3) if n else 0.0,
+        "class_accuracy": round(correct / n, 3) if n else 0.0,
+        "rows": dur_rows,
+    }
+
+    return {"tempo": tempo_result, "duration": duration_result}
+
+
+# --------------------------------------------------------------------------
+# Suite: noise robustness -- chromatic + chord sweep under additive noise
+# --------------------------------------------------------------------------
+
+NOISE_SNR_LEVELS = [("clean", 0.0), ("light", 0.05), ("moderate", 0.15)]  # noise amplitude relative to base_amp
+NOISE_TEST_NOTES = [("C", 2), ("F#", 3), ("A", 4), ("D#", 5)]  # spot-check across the octave range, not exhaustive
+NOISE_TEST_CHORDS = [(("C", 4), "maj"), (("A", 3), "min7")]
+
+
+def _add_noise(audio, amplitude, seed, peak_cap=0.9):
+    """Additive Gaussian noise at `amplitude` relative to the clean
+    signal's own base_amp, then a final peak-renormalize (down only) to
+    peak_cap -- synth_notes() already peak-caps the clean signal on its
+    own, but stacking noise on top can still push instantaneous peaks
+    past 1.0, which would clip on playback and confound "noise
+    robustness" with "digital clipping distortion", a different and
+    uncontrolled artifact. Renormalizing preserves the noise:signal
+    ratio (both scaled together) while staying safely below clipping."""
+    if amplitude <= 0:
+        return audio
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal(len(audio)).astype(np.float32) * amplitude
+    out = audio + noise
+    peak = float(np.max(np.abs(out))) if len(out) else 0.0
+    if peak > peak_cap:
+        out *= peak_cap / peak
+    return out
+
+
+def build_noise():
+    entries_by_level = {}
+    for level_name, amp in NOISE_SNR_LEVELS:
+        entries = []
+        for name, octave in NOISE_TEST_NOTES:
+            entries.append(([(name, octave)], 1.4, {"kind": "note", "level": level_name,
+                                                       "pitch_class": NOTE_INDEX[name], "octave": octave}))
+        for root_octave, quality in NOISE_TEST_CHORDS:
+            root_name, octave = root_octave
+            notes, pcs, name = voice_chord(root_name, octave, quality)
+            entries.append((notes, 1.8, {"kind": "chord", "level": level_name,
+                                          "expected_pcs": sorted(pcs), "expected_name": name}))
+        entries_by_level[level_name] = entries
+
+    all_audio, all_timeline, t = [], [], 0.0
+    warmup = 1.5
+    for level_name, amp in NOISE_SNR_LEVELS:
+        seg_audio, seg_timeline, seg_total = build_timed_audio(
+            entries_by_level[level_name], gap_s=0.4, warmup_lead_s=(warmup if not all_audio else 0.5))
+        seg_audio = _add_noise(seg_audio, amp, seed=hash(level_name) % (2**31))
+        for entry in seg_timeline:
+            entry["start"] += t
+            entry["end"] += t
+        all_audio.append(seg_audio)
+        all_timeline.extend(seg_timeline)
+        t += seg_total
+    return np.concatenate(all_audio), all_timeline, t
+
+
+def analyze_noise(log, timeline):
+    by_level = {}
+    for seg in timeline:
+        level = seg["level"]
+        by_level.setdefault(level, {"notes": [], "chords": []})
+        if seg["kind"] == "note":
+            expected = (seg["pitch_class"], seg["octave"])
+            steady = [h for h in log if seg["start"] + 0.3 <= h["t"] <= seg["end"] - 0.1]
+            correct = sum(1 for h in steady if (h["pitch_class"], h["octave"]) == expected)
+            acc = correct / len(steady) if steady else 0.0
+            by_level[level]["notes"].append(acc)
+        else:
+            steady = [h for h in log if seg["start"] + 0.5 <= h["t"] <= seg["end"] - 0.15]
+            expected_pcs = set(seg["expected_pcs"])
+            name_votes = {}
+            for h in steady:
+                name_votes[h["chord_name"]] = name_votes.get(h["chord_name"], 0) + 1
+            top_name = max(name_votes.items(), key=lambda kv: kv[1])[0] if name_votes else None
+            by_level[level]["chords"].append(1.0 if top_name == seg["expected_name"] else 0.0)
+
+    summary = {}
+    for level, data in by_level.items():
+        summary[level] = {
+            "mean_note_accuracy": round(statistics.mean(data["notes"]), 3) if data["notes"] else None,
+            "chord_name_accuracy": round(statistics.mean(data["chords"]), 3) if data["chords"] else None,
+        }
+    return {"summary": summary}
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
 
@@ -568,6 +801,8 @@ SUITES = {
     "chords": (build_chords, analyze_chords),
     "density": (build_density, analyze_density),
     "sustain": (build_sustain, analyze_sustain),
+    "rhythm": (build_rhythm, analyze_rhythm),
+    "noise": (build_noise, analyze_noise),
 }
 
 
@@ -660,6 +895,29 @@ def write_report(results, outdir):
         for r in results["sustain"]["rows"]:
             lines.append(f"| {r['kind']} | {r['label']} | {r['n_hops']} | "
                           f"{r.get('is_onset_rate', '-')} | {r['n_duration_finalize_events']} |")
+        lines.append("")
+
+    if "rhythm" in results:
+        t = results["rhythm"]["tempo"]
+        d = results["rhythm"]["duration"]
+        lines += ["## Rhythm: live tempo convergence + duration-class snapping", "",
+                   f"- True BPM: {t['true_bpm']}, converged median estimate: {t['median_bpm_estimate']} "
+                   f"({t['n_readings']} readings after settle time)",
+                   f"- Tempo error: {t['error_pct']}%" + (f" (looks like {t['octave_error']} the true tempo)" if t['octave_error'] else ""),
+                   f"- Duration-class finalize rate: {d['finalize_rate']*100:.1f}%, "
+                   f"accuracy (of finalized): {d['class_accuracy']*100:.1f}%", "",
+                   "| expected class | expected beats | finalized | detected class | detected beats | correct |",
+                   "|---|---|---|---|---|---|"]
+        for r in d["rows"]:
+            lines.append(f"| {r['expected_class']} | {r['expected_beats']} | {r['finalized']} | "
+                          f"{r['detected_class']} | {r['detected_beats']} | {r['correct']} |")
+        lines.append("")
+
+    if "noise" in results:
+        lines += ["## Noise robustness (additive broadband noise)", "",
+                   "| level | mean note accuracy | chord-name accuracy |", "|---|---|---|"]
+        for level, r in results["noise"]["summary"].items():
+            lines.append(f"| {level} | {r['mean_note_accuracy']} | {r['chord_name_accuracy']} |")
         lines.append("")
 
     report_path = os.path.join(outdir, "report.md")
