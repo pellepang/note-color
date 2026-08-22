@@ -275,7 +275,7 @@ def build_timed_audio(entries, gap_s, warmup_lead_s=0.0):
     timeline = []
     t = warmup_lead_s
     for notes, duration, meta in entries:
-        chunks.append(synth_notes(notes, duration))
+        chunks.append(synth_notes(notes, duration, base_amp=meta.get("amp", 0.30)))
         entry = dict(meta)
         entry["notes"] = notes
         entry["start"] = t
@@ -792,6 +792,92 @@ def analyze_noise(log, timeline):
 
 
 # --------------------------------------------------------------------------
+# Suite: dynamics -- loud-to-whisper amplitude sweep (single notes + chords)
+# --------------------------------------------------------------------------
+
+# base_amp values, not dB/SNR -- synth_notes()'s own base_amp default is
+# 0.30 ("normal"); these bracket it on both sides. peak_cap=0.85 (synth_notes'
+# default) still protects "loud" from clipping.
+DYNAMICS_LEVELS = [
+    ("loud", 0.90), ("normal", 0.30), ("moderate_quiet", 0.12),
+    ("quiet", 0.05), ("very_quiet", 0.02), ("whisper", 0.008),
+]
+DYNAMICS_TEST_NOTES = [("C", 2), ("F#", 3), ("A", 4), ("D#", 5)]
+DYNAMICS_TEST_CHORDS = [(("C", 4), "maj"), (("A", 3), "min7")]
+
+
+def build_dynamics():
+    entries_by_level = {}
+    for level_name, amp in DYNAMICS_LEVELS:
+        entries = []
+        for name, octave in DYNAMICS_TEST_NOTES:
+            entries.append(([(name, octave)], 1.4, {"kind": "note", "level": level_name, "amp": amp,
+                                                       "pitch_class": NOTE_INDEX[name], "octave": octave}))
+        for root_octave, quality in DYNAMICS_TEST_CHORDS:
+            root_name, octave = root_octave
+            notes, pcs, name = voice_chord(root_name, octave, quality)
+            entries.append((notes, 1.8, {"kind": "chord", "level": level_name, "amp": amp,
+                                          "expected_pcs": sorted(pcs), "expected_name": name}))
+        entries_by_level[level_name] = entries
+
+    all_audio, all_timeline, t = [], [], 0.0
+    for i, (level_name, amp) in enumerate(DYNAMICS_LEVELS):
+        seg_audio, seg_timeline, seg_total = build_timed_audio(
+            entries_by_level[level_name], gap_s=0.4, warmup_lead_s=(1.5 if i == 0 else 0.5))
+        for entry in seg_timeline:
+            entry["start"] += t
+            entry["end"] += t
+        all_audio.append(seg_audio)
+        all_timeline.extend(seg_timeline)
+        t += seg_total
+    return np.concatenate(all_audio), all_timeline, t
+
+
+def analyze_dynamics(log, timeline):
+    by_level = {}
+    for seg in timeline:
+        level = seg["level"]
+        by_level.setdefault(level, {"notes": [], "note_recall": [], "chords": [],
+                                     "chord_phantom": [], "chord_missing": []})
+        if seg["kind"] == "note":
+            expected = (seg["pitch_class"], seg["octave"])
+            steady = [h for h in log if seg["start"] + 0.3 <= h["t"] <= seg["end"] - 0.1]
+            correct = sum(1 for h in steady if (h["pitch_class"], h["octave"]) == expected)
+            acc = correct / len(steady) if steady else 0.0
+            recall = 1.0 if any((h["pitch_class"], h["octave"]) == expected for h in steady) else 0.0
+            by_level[level]["notes"].append(acc)
+            by_level[level]["note_recall"].append(recall)
+        else:
+            steady = [h for h in log if seg["start"] + 0.5 <= h["t"] <= seg["end"] - 0.15]
+            expected_pcs = set(seg["expected_pcs"])
+            name_votes = {}
+            phantom_counts, missing_counts = [], []
+            for h in steady:
+                name_votes[h["chord_name"]] = name_votes.get(h["chord_name"], 0) + 1
+                got_pcs = {n["pitch_class"] for n in h["note_stack"]}
+                phantom_counts.append(len(got_pcs - expected_pcs))
+                missing_counts.append(len(expected_pcs - got_pcs))
+            top_name = max(name_votes.items(), key=lambda kv: kv[1])[0] if name_votes else None
+            by_level[level]["chords"].append(1.0 if top_name == seg["expected_name"] else 0.0)
+            if phantom_counts:
+                by_level[level]["chord_phantom"].append(statistics.mean(phantom_counts))
+                by_level[level]["chord_missing"].append(statistics.mean(missing_counts))
+
+    summary = {}
+    for level_name, _amp in DYNAMICS_LEVELS:
+        data = by_level.get(level_name, {"notes": [], "note_recall": [], "chords": [],
+                                          "chord_phantom": [], "chord_missing": []})
+        summary[level_name] = {
+            "mean_note_steady_accuracy": round(statistics.mean(data["notes"]), 3) if data["notes"] else None,
+            "note_recall": round(statistics.mean(data["note_recall"]), 3) if data["note_recall"] else None,
+            "chord_name_accuracy": round(statistics.mean(data["chords"]), 3) if data["chords"] else None,
+            "mean_chord_phantom_pcs_per_hop": round(statistics.mean(data["chord_phantom"]), 3) if data["chord_phantom"] else None,
+            "mean_chord_missing_pcs_per_hop": round(statistics.mean(data["chord_missing"]), 3) if data["chord_missing"] else None,
+        }
+    return {"summary": summary}
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
 
@@ -803,6 +889,7 @@ SUITES = {
     "sustain": (build_sustain, analyze_sustain),
     "rhythm": (build_rhythm, analyze_rhythm),
     "noise": (build_noise, analyze_noise),
+    "dynamics": (build_dynamics, analyze_dynamics),
 }
 
 
@@ -918,6 +1005,18 @@ def write_report(results, outdir):
                    "| level | mean note accuracy | chord-name accuracy |", "|---|---|---|"]
         for level, r in results["noise"]["summary"].items():
             lines.append(f"| {level} | {r['mean_note_accuracy']} | {r['chord_name_accuracy']} |")
+        lines.append("")
+
+    if "dynamics" in results:
+        lines += ["## Dynamics (loud-to-whisper amplitude sweep)", "",
+                   "| level | note recall | note steady accuracy | chord-name accuracy | "
+                   "chord phantom pcs/hop | chord missing pcs/hop |",
+                   "|---|---|---|---|---|---|"]
+        for level, _amp in DYNAMICS_LEVELS:
+            r = results["dynamics"]["summary"].get(level, {})
+            lines.append(f"| {level} | {r.get('note_recall')} | {r.get('mean_note_steady_accuracy')} | "
+                          f"{r.get('chord_name_accuracy')} | {r.get('mean_chord_phantom_pcs_per_hop')} | "
+                          f"{r.get('mean_chord_missing_pcs_per_hop')} |")
         lines.append("")
 
     report_path = os.path.join(outdir, "report.md")
