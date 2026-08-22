@@ -430,6 +430,37 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   full investigation (including why a magnitude-consistency check was
   tried and rejected for the residual gap: it would reopen this exact
   fix).
+- `multipitch._is_harmonic_of()` caps the harmonic multiple it will check
+  at `config.CHORD_HARMONIC_MAX_NUMBER` (4, issues #67/#68 round 2) —
+  without a cap, a real, independently-sounding note could get pruned
+  just for accidentally landing near a *large* integer multiple (8x, 9x,
+  12x...) of some other already-accepted note that hop; more such
+  multiples exist to accidentally collide as chord density/pitch spread
+  grows, which is exactly #68's density-recall symptom. 4 matches the one
+  convention this codebase already treats as "the harmonics that matter"
+  (`chroma.HARMONIC_WEIGHTS`, `YIN_SUBHARMONIC_MAX_MULTIPLE`) and is safe
+  against every harmonic content this app's own tests/acoustic-test synth
+  produce (never above the 4th). Measured on the `--source loopback`
+  acoustic density suite: missing pcs/hop dropped from 0.67-1.51 to
+  0-0.73 across 3-6 simultaneous notes, at the cost of a small phantom-
+  rate uptick (0 → 0-0.33/hop) from genuinely high-order overtones (real
+  mic/speaker/room distortion) no longer being silently absorbed — a net
+  win on this signal. Does not touch the harmonic_number≤4 near-exact
+  collision case below, which is unrelated and still open.
+- `chord_templates._resolve_tie()` falls back to `lowest_pc` — the pitch
+  class of whichever detected note is lowest in frequency this hop, no
+  bass-register requirement — before falling back further to an arbitrary
+  lowest-root-index pick (issue #67 round 2). A rotationally-symmetric
+  chord quality (aug, dim7, half-dim7/min6, ...) voiced entirely above
+  `chroma.DEFAULT_BASS_CUTOFF_HZ` has no genuine `bass_chroma` signal at
+  all (that gate is correct for genuine slash-chord naming, but leaves
+  these chords with zero disambiguation) — real acoustic testing found
+  this made an F#-A#-D augmented triad, voiced upward from F#4, name
+  consistently as "D+" instead of "F#+". `lowest_pc` is computed for free
+  from `multipitch.detect()`'s already harmonic-pruned note candidates
+  (the same ones issue #56 already routed chord-name matching through),
+  and only ever fires when multiple templates are genuinely tied on
+  cosine similarity, so it can't override a real, better-scoring match.
 - `tab`'s notehead style (`N`), legend visibility (`L`), and freeze-frame
   (`Space`) are pure render-thread-local state in `main.py`, same as `P` —
   `TabDisplay` itself owns no toggle state, just renders whatever
@@ -673,7 +704,14 @@ One-liners; full detail in `docs/DECISIONS.md`.
   tracked across hops) — out of scope for #67/#68's pruning-logic tuning.
   Chord voicings without such coincidental intervals are unaffected (see
   `tests/test_multipitch.py`'s dense-chord test, deliberately built with
-  a >=60-cent safety margin from any small-integer frequency ratio).
+  a >=60-cent safety margin from any small-integer frequency ratio). Issue
+  #67/#68 round 2's `CHORD_HARMONIC_MAX_NUMBER` cap (above) fixed the
+  higher-order variant of this same collision class (a note landing near
+  some *large* multiple — 6x, 9x, 12x — of another note, not itself a
+  plausible overtone relationship); it deliberately does not touch this
+  harmonic_number≤4 case, since 3 (and 4, 6=2×3, etc. once octave-folded)
+  are exactly the multiples a real instrument's own overtone series
+  legitimately produces, so capping lower would just reopen issue #67.
 - Low bass notes with no harmonic content (a pure sine, no overtones) can
   be a semitone off in `chroma.fold_bass()`'s bass-note detection — real
   bass instruments' overtones resolve this fine (see the harmonic-summing
