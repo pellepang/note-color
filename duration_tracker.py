@@ -44,12 +44,28 @@ def duration_class_for_beats(beats):
 
 
 class DurationTracker:
-    def __init__(self, cfg):
+    def __init__(self, cfg, require_onset_for_new_note=False):
         self.decay_ratio = cfg.DURATION_DECAY_RATIO
+        # Issue #70: mono's caller (NoteSmoother-driven) always carries a
+        # trustworthy is_onset -- a key with no existing state should only
+        # ever start a NEW tracked note when is_onset is True for it.
+        # Without this gate, a key whose state was just finalized (decay
+        # or absence) this same hop, but which the caller still happens to
+        # report present-with-is_onset=False on a LATER hop (mono's
+        # concrete case: NoteSmoother echoing the just-finalized pitch for
+        # SILENCE_HOPS-1 more hops before it actually reports silence, its
+        # own deliberate grace period against display flicker -- see
+        # note_smoother.py), gets misread as a brand-new note attack,
+        # producing a spurious ~1-hop "ghost" note once that echo itself
+        # goes absent. Chord mode has no reliable per-note onset signal
+        # (see main.py's chord_duration_tracker wiring) and intentionally
+        # always passes is_onset=False even for genuinely new notes, so it
+        # must keep this off (default) and rely on appear/absence alone.
+        self.require_onset_for_new_note = require_onset_for_new_note
         # key -> {"onset_hop": int, "peak_magnitude": float, "last_magnitude": float}
         self.states = {}
 
-    def update(self, notes, hop_index):
+    def update(self, notes, hop_index, onset_backdate=0):
         """One hop update. `notes` is an iterable of
         (pitch_class, octave, magnitude, is_onset) for the notes sounding
         THIS hop -- monophonic callers pass at most one entry
@@ -61,6 +77,16 @@ class DurationTracker:
         story 3): a same-key re-onset finalizes the old slot immediately
         (as if it had just decayed) before a brand-new slot starts,
         instead of silently continuing to accumulate the old one.
+
+        `onset_backdate` (issue #70): hops to subtract from `hop_index`
+        when stamping a brand-new state's onset_hop this call -- lets a
+        caller with known, fixed onset-detection latency (mono's
+        NoteSmoother debounce delay -- see note_smoother.py's
+        onset_backdate_hops) correct for it at the source rather than
+        every downstream duration measurement carrying the same
+        systematic undercount. Applies uniformly to every note opened
+        this call; mono only ever opens at most one, so this is a single
+        scalar rather than a per-note field.
 
         Returns a list of (pitch_class, octave, duration_hops) for every
         slot that finalized this hop: its current/peak magnitude ratio
@@ -80,8 +106,10 @@ class DurationTracker:
                 state = None
 
             if state is None:
+                if self.require_onset_for_new_note and not is_onset:
+                    continue
                 self.states[key] = {
-                    "onset_hop": hop_index,
+                    "onset_hop": hop_index - onset_backdate,
                     "peak_magnitude": magnitude,
                     "last_magnitude": magnitude,
                 }

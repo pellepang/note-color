@@ -82,6 +82,82 @@ def test_update_tracks_independent_slots_by_key():
     assert finalized_at_end == [(4, 4, 2)]
 
 
+# --- issue #70: mono duration-class-snapping deficit for short notes -----
+#
+# Two independent, compounding mechanisms found via
+# scripts/acoustic_pipeline_test.py's new `rhythm` suite (a real
+# speaker->mic loopback round trip that first caught this): short notes'
+# measured duration_hops undercounted their true duration badly enough to
+# snap to the wrong standard note value. See docs/DECISIONS.md for the
+# full root-cause writeup.
+
+def test_new_note_ignored_without_onset_when_require_onset_for_new_note():
+    # Without the flag (default, matches chord mode's own no-reliable-
+    # onset-signal reality -- see DurationTracker.__init__'s docstring), a
+    # key with no existing state opens a new one regardless of is_onset --
+    # unaffected, this is chord mode's normal appear/absence lifecycle.
+    tracker = DurationTracker(_Cfg())
+    finalized = tracker.update([(0, 4, 1.0, False)], hop_index=0)
+    assert finalized == []
+    assert (0, 4) in tracker.states
+
+    # With the flag (mono's setting), the exact same call must NOT open a
+    # new state -- there's no real attack signal for it.
+    tracker2 = DurationTracker(_Cfg(), require_onset_for_new_note=True)
+    finalized2 = tracker2.update([(0, 4, 1.0, False)], hop_index=0)
+    assert finalized2 == []
+    assert (0, 4) not in tracker2.states
+
+
+def test_ghost_note_after_decay_suppressed_when_require_onset_for_new_note():
+    """Regression for issue #70's real mechanism: mono's NoteSmoother
+    keeps echoing a just-finalized note's (pitch_class, octave) with
+    is_onset=False for SILENCE_HOPS-1 more hops (its own deliberate grace
+    period against display flicker) before it ever reports silence. Fed
+    straight into DurationTracker without require_onset_for_new_note, that
+    echo re-opens a brand-new state on the very hop the real note's decay
+    just finalized it, which then finalizes AGAIN as a spurious ~1-hop
+    'ghost' note once the echo itself goes absent -- corrupting duration
+    measurement for every mono note that decays into silence (as opposed
+    to being cut off by a new note attack). require_onset_for_new_note
+    suppresses it: the echo hops carry is_onset=False, so no new state
+    ever opens for them."""
+    # hop0: onset. hop1: decays below ratio -> finalizes with is_onset=False
+    # (mirrors main.py: the block that crosses the ratio always reports
+    # is_onset=False -- decay isn't a re-attack). hop2: NoteSmoother's
+    # grace-period echo -- same key, is_onset=False, would-be magnitude 0.
+    # hop3: smoother finally reports silence -- key absent.
+    tracker = DurationTracker(_Cfg(), require_onset_for_new_note=True)
+    tracker.update([(0, 4, 1.0, True)], hop_index=0)
+    finalized_decay = tracker.update([(0, 4, 0.0, False)], hop_index=1)
+    finalized_echo = tracker.update([(0, 4, 0.0, False)], hop_index=2)
+    finalized_absence = tracker.update([], hop_index=3)
+
+    assert finalized_decay == [(0, 4, 1)]
+    assert finalized_echo == []       # no ghost state opened, so nothing to finalize
+    assert finalized_absence == []    # and no leftover ghost state to finalize later either
+
+
+def test_update_backdates_new_note_onset_hop():
+    """Regression for issue #70's second mechanism: NoteSmoother's
+    debounce lock-in delay (see note_smoother.py's onset_backdate_hops)
+    means a note-change onset always fires debounce_hops - 1 hops after
+    the note's TRUE attack -- a fixed, known, correctable amount rather
+    than an unavoidable one. onset_backdate lets the caller compensate at
+    the source."""
+    tracker = DurationTracker(_Cfg())
+    tracker.update([(0, 4, 1.0, True)], hop_index=5, onset_backdate=2)
+    assert tracker.states[(0, 4)]["onset_hop"] == 3
+    finalized = tracker.update([], hop_index=10)
+    assert finalized == [(0, 4, 7)]  # 10 - 3, not 10 - 5
+
+
+def test_update_onset_backdate_defaults_to_zero():
+    tracker = DurationTracker(_Cfg())
+    tracker.update([(0, 4, 1.0, True)], hop_index=5)
+    assert tracker.states[(0, 4)]["onset_hop"] == 5
+
+
 # --- DurationTracker.finalize_noncausal -----------------------------------
 
 def test_finalize_noncausal_basic_decay_span():

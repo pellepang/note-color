@@ -121,6 +121,56 @@ def test_steady_real_size_tone_only_onsets_on_the_initial_attack():
     assert onset_flags[lock_in_hop:] == [False] * (len(onset_flags) - lock_in_hop)
 
 
+# --- issue #70: onset_backdate_hops ---------------------------------------
+
+def test_onset_backdate_hops_set_on_genuine_note_change():
+    """A note-change promotion always lands on the exact hop where
+    candidate_count first reaches debounce_hops -- so the true attack
+    precedes it by exactly debounce_hops - 1 hops. This is what
+    duration_tracker.py's onset_backdate mechanism corrects for.
+
+    Uses a fresh smoother's very first note (empty history, was_silent) --
+    i.e. a note attack out of real silence, exactly issue #70's actual
+    scenario (scripts/acoustic_pipeline_test.py's rhythm suite always
+    separates notes with real silence gaps). A same-key legato transition
+    straight from one already-locked-in note to another without any
+    silence in between pays extra MEDIAN_WINDOW-driven delay on top of
+    debounce (the median history isn't cleared until a hop actually goes
+    silent) -- out of scope here; onset_backdate only ever claims to
+    correct the debounce portion."""
+    s = NoteSmoother(config)
+    for _ in range(config.DEBOUNCE_HOPS - 1):
+        pitch_class, octave, is_onset = s.update(freq_for(0, 5), 0.9, 0.1, DUMMY_SPECTRUM)
+        # was_silent alone can still fire is_onset=True here (the "coming
+        # out of silence" signal, independent of note-change promotion),
+        # but pitch_class stays None until debounce actually promotes a
+        # candidate -- main.py only ever feeds DurationTracker a note once
+        # pitch_class is non-None, so this early is_onset is never acted on.
+        assert pitch_class is None
+        assert s.onset_backdate_hops == 0  # candidate hasn't been promoted yet
+    pitch_class, octave, is_onset = s.update(freq_for(0, 5), 0.9, 0.1, DUMMY_SPECTRUM)
+    assert (pitch_class, octave) == (0, 5)
+    assert is_onset is True
+    assert s.onset_backdate_hops == config.DEBOUNCE_HOPS - 1  # the promotion hop itself
+
+    pitch_class, octave, is_onset = s.update(freq_for(0, 5), 0.9, 0.1, DUMMY_SPECTRUM)
+    assert is_onset is False
+    assert s.onset_backdate_hops == 0  # back to 0 on the very next hop -- no longer a change
+
+
+def test_onset_backdate_hops_zero_for_rms_jump_reattack():
+    # A same-pitch RMS-jump re-attack never has to rebuild candidate_count
+    # (the candidate never changed), so there's no debounce buildup delay
+    # to backdate for.
+    s = NoteSmoother(config)
+    feed(s, 9, 4, config.DEBOUNCE_HOPS + config.MEDIAN_WINDOW, rms=0.05)
+    loud_rms = 0.05 * (10 ** (config.ONSET_RMS_JUMP_DB / 20.0)) * 1.5
+    pitch_class, octave, is_onset = s.update(freq_for(9, 4), 0.9, loud_rms, DUMMY_SPECTRUM)
+    assert (pitch_class, octave) == (9, 4)
+    assert is_onset is True
+    assert s.onset_backdate_hops == 0
+
+
 def test_spectral_flux_triggers_onset_without_note_change_or_rms_jump():
     s = NoteSmoother(config)
     # Lock in a stable note first, with a flat (zero) spectrum every hop so
@@ -140,3 +190,4 @@ def test_spectral_flux_triggers_onset_without_note_change_or_rms_jump():
     pitch_class, octave, is_onset = s.update(freq_for(9, 4), 0.9, 0.1, loud_spectrum)
     assert (pitch_class, octave) == (9, 4)
     assert is_onset is True
+    assert s.onset_backdate_hops == 0  # no candidate change, so no buildup delay to correct for

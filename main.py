@@ -238,7 +238,13 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
     low_ring = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
     chord_smoother = ChordSmoother(config)
-    mono_duration_tracker = DurationTracker(config)
+    # require_onset_for_new_note=True: mono's NoteSmoother always carries a
+    # trustworthy is_onset, so DurationTracker can (and, per issue #70,
+    # must) refuse to open a new tracked note on a hop that isn't a real
+    # attack -- see DurationTracker.__init__'s docstring. Chord mode has
+    # no such signal (chord_notes below hardcodes is_onset=False) so its
+    # tracker keeps the default off.
+    mono_duration_tracker = DurationTracker(config, require_onset_for_new_note=True)
     chord_duration_tracker = DurationTracker(config)
     tempo_tracker = TempoTracker(config, config.BLOCK_SIZE / config.SAMPLE_RATE)
     prev_chroma = None
@@ -292,7 +298,13 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
         # Monophonic duration tracking: at most one note-slot active at a
         # time, so mono_finalized has at most one entry.
         mono_notes = [(pitch_class, octave, rms, is_onset)] if pitch_class is not None else []
-        mono_finalized = mono_duration_tracker.update(mono_notes, hop_index)
+        # Issue #70: backdate a fresh note-change onset's onset_hop by
+        # NoteSmoother's own known debounce lock-in delay -- see
+        # note_smoother.py's onset_backdate_hops and DurationTracker.update()'s
+        # docstring. 0 whenever this hop isn't itself a note-change onset.
+        mono_finalized = mono_duration_tracker.update(
+            mono_notes, hop_index, onset_backdate=smoother.onset_backdate_hops
+        )
         duration_hops = mono_finalized[0][2] if mono_finalized else None
 
         multipitch_window = multipitch.select_window(

@@ -30,6 +30,12 @@ class NoteSmoother:
         self.prev_rms = 0.0
         self.was_silent = True
         self.prev_spectrum = None
+        # Issue #70: hops the just-reported note-change onset's TRUE attack
+        # preceded this call's is_onset=True by -- see update()'s docstring.
+        # Read by main.py right after update() to backdate
+        # DurationTracker's onset_hop; 0 whenever the most recent call
+        # didn't report a fresh note-change onset.
+        self.onset_backdate_hops = 0
 
     def set_sensitivity(self, sensitivity):
         """Higher sensitivity lowers both gates, so quieter/softer playing
@@ -50,6 +56,7 @@ class NoteSmoother:
             self.history.clear()
             self.candidate_note = None
             self.candidate_count = 0
+            self.onset_backdate_hops = 0
             self.silence_count += 1
             self.prev_rms = rms
             self.prev_spectrum = spectrum
@@ -79,6 +86,16 @@ class NoteSmoother:
         if self.candidate_count >= self.debounce_hops and candidate != self.current_note:
             self.current_note = candidate
             note_changed = True
+
+        # A note_changed promotion always lands on the exact hop where
+        # candidate_count first reaches debounce_hops -- meaning this same
+        # candidate has been the consistent read for the last debounce_hops
+        # consecutive hops (this one included), so the true attack precedes
+        # this hop by exactly debounce_hops - 1 hops (issue #70). An
+        # RMS-jump/spectral-flux re-attack of an already-current note has
+        # no such buildup delay (candidate never had to change), so it
+        # stays 0.
+        self.onset_backdate_hops = self.debounce_hops - 1 if note_changed else 0
 
         is_onset = False
         if note_changed or self.was_silent:
