@@ -66,8 +66,43 @@ Rhythm/onset/duration/tempo (issue #55) added two things to this module:
   (`config.TAB_BARLINE_WIDTH`). Barline columns age/dim exactly like note
   columns (same age computation, same `_aged_lightness()` curve) but with
   no hue, via `_barline_rgb()`.
+
+Three more additions support the (separately built) `R`-while-frozen
+non-causal rhythm re-analysis and Left/Right-arrow scrollback features --
+this module owns only the `TabDisplay`-side data/render capability those
+features call into, not the recompute or keybind wiring itself:
+
+- `self.entries` retains history by *timestamp* window
+  (`self.scrollback_seconds`, defaulting to `config.TAB_SCROLLBACK_SECONDS`,
+  overridable via the constructor's `scrollback_seconds=` -- see
+  `_trim_entries()`) rather than the old fixed column count
+  (`TAB_VISIBLE_MAXLEN`, since removed) -- columns arrive at irregular,
+  onset-driven intervals, so only a time window gives scrollback a
+  consistent, predictable reach regardless of how busy the playing was.
+  `self.session_history` is unaffected -- it keeps its own separate,
+  much longer, count-based cap for the on-quit dump, same as before.
+- `render(..., scroll_offset=N)` renders exactly what the live view
+  looked like `N` history entries (note and barline columns alike, not
+  raw terminal character columns) ago, including that historical
+  window's own age-fade gradient from that point in time -- not the
+  current live age-fade, and not freeze's usual "pin everything to full
+  brightness" override either (that override only applies at
+  `scroll_offset=0`; a scrolled-back-to column is expected to show
+  whatever gradient it actually had back then, per the module's
+  Left/Right-arrow design).
+- `correct_duration()`/`erase_barlines()`/`insert_barline()` let an
+  external recompute overwrite results already committed to history:
+  `correct_duration()` retroactively fixes one specific already-finalized
+  note's `duration_class` (disambiguated from repeated notes at the same
+  key by closest column timestamp, since `finalize_duration()` can only
+  ever reach the currently *open* note at a key); `erase_barlines()` +
+  `insert_barline()` replace a stale barline set within a time range with
+  recomputed ones, the latter inserting in sorted position rather than
+  just appending, since a correction's timestamp isn't guaranteed to be
+  the newest.
 """
 
+import bisect
 import shutil
 import sys
 import time
@@ -153,9 +188,19 @@ Column = namedtuple("Column", "kind width row_map ledgers chord_name rgb")
 
 
 class TabDisplay:
-    def __init__(self, fps=20):
+    def __init__(self, fps=20, scrollback_seconds=None):
         self.fps = fps
-        self.entries = deque(maxlen=config.TAB_VISIBLE_MAXLEN)
+        # How far back (in each entry's own `.t` timestamp, not a fixed
+        # column count) self.entries retains history -- the window the
+        # `R`/Left-Right-arrow scrollback feature scrolls within. `None`
+        # (the default) falls back to config.TAB_SCROLLBACK_SECONDS;
+        # callers that want a user's config.toml override pass the
+        # already-resolved value in (e.g.
+        # config_store.store.preference("tab_scrollback_seconds", ...)).
+        self.scrollback_seconds = (
+            config.TAB_SCROLLBACK_SECONDS if scrollback_seconds is None else scrollback_seconds
+        )
+        self.entries = deque()
         self.session_history = []
         # (pitch_class, octave) -> the most recently pushed, not-yet-
         # finalized note dict at that key -- see finalize_duration().
@@ -214,6 +259,25 @@ class TabDisplay:
         self.entries.append(entry)
         if len(self.session_history) < config.TAB_SESSION_HISTORY_MAX:
             self.session_history.append(entry)
+        self._trim_entries()
+
+    def _trim_entries(self):
+        """Scrollback retention: trims `self.entries` from the left using
+        each entry's own `.t` timestamp, not a fixed column count --
+        columns arrive at irregular, onset-driven intervals (mono) or a
+        rate that varies by scroll mode ('fix'), so a count-based cap
+        (the old TAB_VISIBLE_MAXLEN) doesn't correspond to a real time
+        window the way `self.scrollback_seconds` does. Never empties
+        `self.entries` entirely -- the newest entry's own timestamp is
+        always <= itself, so it's never trimmed regardless of window
+        size. Does not touch `self.session_history`, which keeps its own
+        separate, much longer, count-based cap (TAB_SESSION_HISTORY_MAX)
+        for the on-quit dump."""
+        if not self.entries:
+            return
+        cutoff = self.entries[-1].t - self.scrollback_seconds
+        while len(self.entries) > 1 and self.entries[0].t < cutoff:
+            self.entries.popleft()
 
     def finalize_duration(self, pitch_class, octave, duration_class):
         """Set `duration_class` on the most recent still-open note at
@@ -225,8 +289,86 @@ class TabDisplay:
         if note is not None:
             note["duration_class"] = duration_class
 
+    def correct_duration(self, pitch_class, octave, t, duration_class):
+        """Overwrite the `duration_class` of a *specific* note at
+        (pitch_class, octave), for the future `R`-key non-causal
+        recompute: unlike `finalize_duration()` (which only ever reaches
+        the note still currently open at that key), this can reach back
+        and correct a note that already finalized -- and may already have
+        been superseded by a later note at the same key -- many columns
+        ago, once a slower/more-accurate recompute revises its measured
+        duration.
+
+        Disambiguates *which* occurrence at that repeated key by picking
+        whichever one's column timestamp (`TabEntry.t` -- the same
+        timestamp `push()`/`push_notes()`'s `t=` override already
+        records; every note in a column shares its column's onset time,
+        so no separate per-note id is needed) is closest to `t`, rather
+        than requiring an exact match -- a recompute's own reconstructed
+        onset time won't necessarily equal the original hop-granular
+        value bit-for-bit.
+
+        Searches `self.session_history` (a strict superset of
+        `self.entries`, sharing the exact same note dict objects) so a
+        correction lands even on a note that's since scrolled out of the
+        retained `self.entries` window but is still kept for the on-quit
+        dump. Returns True if a note was found and corrected, False if no
+        note at that key exists anywhere in retained history (a no-op,
+        same silent-failure convention as `finalize_duration()`)."""
+        best_note, best_dt = None, None
+        for entry in self.session_history:
+            if not isinstance(entry, TabEntry):
+                continue
+            for note in entry.notes:
+                if note["pitch_class"] != pitch_class or note["octave"] != octave:
+                    continue
+                dt = abs(entry.t - t)
+                if best_dt is None or dt < best_dt:
+                    best_note, best_dt = note, dt
+        if best_note is None:
+            return False
+        best_note["duration_class"] = duration_class
+        return True
+
+    def erase_barlines(self, start_t, end_t=None):
+        """Remove every barline column at or after `start_t` and, if
+        `end_t` is given, strictly before it (a half-open [start_t, end_t)
+        interval; `end_t` omitted/None means unbounded -- erase every
+        barline from `start_t` through the newest entry). Removes from
+        both `self.entries` and `self.session_history`.
+
+        Pairs with `insert_barline()` for the `R`-key non-causal recompute
+        path: a corrected tempo/beat estimate implies different bar
+        boundaries than the live estimate guessed, so the stale barline
+        set within the recomputed range is erased here, then
+        `insert_barline()` places fresh ones at the recomputed times.
+        Returns the number of barline columns removed from
+        `self.entries`."""
+        def _matches(e):
+            return isinstance(e, BarlineEntry) and e.t >= start_t and (end_t is None or e.t < end_t)
+
+        removed = sum(1 for e in self.entries if _matches(e))
+        self.entries = deque(e for e in self.entries if not _matches(e))
+        self.session_history = [e for e in self.session_history if not _matches(e)]
+        return removed
+
+    def insert_barline(self, t):
+        """Insert a corrected barline column at timestamp `t`, keeping
+        `self.entries`/`self.session_history` in timestamp order --
+        unlike `push_barline()` (which always appends at the tail,
+        correct for its live, always-chronological caller, `main.py`'s
+        beat-accumulator), a corrected barline from the `R`-key recompute
+        path isn't guaranteed to land after every existing entry. Pairs
+        with `erase_barlines()`. Respects the same `session_history` cap
+        `push_barline()` does."""
+        entry = BarlineEntry(self._resolve_t(t))
+        _sorted_insert(self.entries, entry)
+        if len(self.session_history) < config.TAB_SESSION_HISTORY_MAX:
+            _sorted_insert(self.session_history, entry)
+        self._trim_entries()
+
     def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False,
-               help_legend=""):
+               help_legend="", scroll_offset=0):
         size = shutil.get_terminal_size(fallback=(80, 24))
         cols, rows = size
 
@@ -270,6 +412,24 @@ class TabDisplay:
         # included even if it alone doesn't fit, same guarantee the old
         # fixed-width `max(..., 1)` gave.
         all_entries = list(self.entries)
+        # Scrollback (Left/Right-arrow feature, frozen-only): `scroll_offset`
+        # is a count of history entries (note *and* barline columns alike,
+        # not raw terminal character columns) to hide off the tail --
+        # slicing them off here, before the width-budget walk below, makes
+        # the remaining tail entry play the role of "the newest visible
+        # column" for every purpose below (width budget, age-from-that-
+        # point-in-time), i.e. this renders exactly what the live view
+        # looked like `scroll_offset` columns ago, not the current live
+        # tail with some cosmetic offset applied on top.
+        scroll_offset = max(scroll_offset, 0)
+        if scroll_offset:
+            all_entries = all_entries[: max(len(all_entries) - scroll_offset, 0)]
+        # Freeze (#23) pins every visible column to age 0 -- but only when
+        # not also scrolled back: a scrolled-back-to column should show the
+        # age-fade gradient it actually had at that point in history (see
+        # the module docstring), not render as if it just arrived the way
+        # plain freeze-with-no-scrolling does.
+        pin_to_newest = frozen and not scroll_offset
         visible_entries = []
         used_width = 0
         for e in reversed(all_entries):
@@ -290,7 +450,7 @@ class TabDisplay:
             # Age is distance from the newest *visible* column (0 = newest);
             # #23's freeze-frame pins every column's age to 0, overriding
             # #22's fade entirely, without this loop needing to know why.
-            age = 0 if frozen else last_index - index
+            age = 0 if pin_to_newest else last_index - index
 
             if isinstance(e, BarlineEntry):
                 columns.append(
@@ -421,6 +581,19 @@ class TabDisplay:
     def quit(self):
         sys.stdout.write("\033[0m\033[2J\033[H\033[?25h")
         sys.stdout.flush()
+
+
+def _sorted_insert(container, entry):
+    """Insert `entry` (a TabEntry/BarlineEntry, both carrying a `.t`
+    timestamp) into `container` (a list or deque) at the position that
+    keeps it sorted by timestamp -- used by `TabDisplay.insert_barline()`
+    for the `R`-key correction path, where a recomputed barline's
+    timestamp isn't guaranteed to land after every existing entry the way
+    a live push always does. `container.insert()` works the same way on
+    both `list` and `collections.deque`."""
+    ts = [e.t for e in container]
+    idx = bisect.bisect_right(ts, entry.t)
+    container.insert(idx, entry)
 
 
 def _note_cell(rgb, label, width):

@@ -341,3 +341,223 @@ def test_unfinalized_note_renders_like_default_duration_class(monkeypatch):
         setup=_setup_single_chord_note(duration_class=DEFAULT_DURATION_CLASS),
     )
     assert out_unfinalized == out_default
+
+
+# --- R-key non-causal recompute / Left-Right scrollback support ---
+
+def test_correct_duration_updates_specific_occurrence_not_others(monkeypatch):
+    # Two separate notes at the same (pitch_class, octave), at different
+    # onset times, each already finalized once (a plausible real scenario
+    # for the R feature: a slower recompute revises one of several past
+    # occurrences of the same note). correct_duration() must locate and
+    # fix only the occurrence whose timestamp is closest to the one given,
+    # leaving the other untouched.
+    display = TabDisplay(fps=20)
+    display.push(0, 4, (200, 50, 50), "C4-first", t=10.0)
+    display.finalize_duration(0, 4, "quarter")
+    display.push(0, 4, (200, 50, 50), "C4-second", t=50.0)
+    display.finalize_duration(0, 4, "half")
+
+    first_note = display.session_history[0].notes[0]
+    second_note = display.session_history[1].notes[0]
+    assert first_note["duration_class"] == "quarter"
+    assert second_note["duration_class"] == "half"
+
+    ok = display.correct_duration(0, 4, t=10.3, duration_class="eighth")
+
+    assert ok is True
+    assert first_note["duration_class"] == "eighth"
+    assert second_note["duration_class"] == "half"  # untouched
+
+
+def test_correct_duration_no_op_for_unknown_key(monkeypatch):
+    display = TabDisplay(fps=20)
+    display.push(0, 4, (200, 50, 50), "C4", t=1.0)
+    display.finalize_duration(0, 4, "quarter")
+
+    ok = display.correct_duration(7, 6, t=1.0, duration_class="whole")
+
+    assert ok is False
+    assert display.session_history[0].notes[0]["duration_class"] == "quarter"
+
+
+def test_correct_duration_reaches_a_note_already_scrolled_out_of_entries(monkeypatch):
+    # A note pushed long enough ago to have been trimmed out of the
+    # scrollback-windowed self.entries (see scrollback tests below) must
+    # still be reachable via self.session_history, since correct_duration()
+    # is meant to reach back arbitrarily far within the retained dump
+    # history, not just the on-screen scrollback window.
+    display = TabDisplay(fps=20, scrollback_seconds=5.0)
+    display.push(0, 4, (200, 50, 50), "C4-old", t=0.0)
+    display.finalize_duration(0, 4, "quarter")
+    display.push(1, 4, (200, 50, 50), "Db4-new", t=100.0)  # far past the window
+
+    assert all(e.t != 0.0 for e in display.entries)  # confirms it scrolled out
+
+    ok = display.correct_duration(0, 4, t=0.0, duration_class="sixteenth")
+
+    assert ok is True
+    assert display.session_history[0].notes[0]["duration_class"] == "sixteenth"
+
+
+def test_erase_barlines_removes_only_within_range(monkeypatch):
+    display = TabDisplay(fps=20)
+    display.push_barline(t=1.0)
+    display.push_barline(t=2.0)
+    display.push_barline(t=3.0)
+
+    removed = display.erase_barlines(1.5, 2.5)
+
+    assert removed == 1
+    remaining_ts = sorted(e.t for e in display.entries if hasattr(e, "t"))
+    assert remaining_ts == [1.0, 3.0]
+
+
+def test_erase_barlines_unbounded_end_removes_through_newest(monkeypatch):
+    display = TabDisplay(fps=20)
+    display.push_barline(t=1.0)
+    display.push_barline(t=2.0)
+    display.push_barline(t=3.0)
+
+    removed = display.erase_barlines(2.0)  # no end_t -> unbounded
+
+    assert removed == 2
+    remaining_ts = [e.t for e in display.entries]
+    assert remaining_ts == [1.0]
+
+
+def test_insert_barline_keeps_history_in_timestamp_order(monkeypatch):
+    display = TabDisplay(fps=20)
+    display.push_barline(t=1.0)
+    display.push_barline(t=3.0)
+    display.erase_barlines(1.5, None)  # drop the stale one at t=3.0
+
+    display.insert_barline(2.0)  # recomputed replacement, between existing entries
+
+    assert [e.t for e in display.entries] == [1.0, 2.0]
+    assert [e.t for e in display.session_history] == [1.0, 2.0]
+
+
+def test_erase_and_reinsert_barlines_round_trip_through_render(monkeypatch):
+    from terminal_tab_display import BARLINE_GLYPH
+
+    def setup(display):
+        display.push_barline(t=1.0)
+        display.push_barline(t=2.0)  # stale -- about to be corrected away
+        display.push_barline(t=3.0)
+        display.erase_barlines(1.5, 2.5)
+        display.insert_barline(2.2)  # recomputed position
+
+    out, display = _render_display(monkeypatch, rows=30, cols=100, setup=setup)
+    assert BARLINE_GLYPH in out
+    assert [e.t for e in display.entries] == [1.0, 2.2, 3.0]
+
+
+# --- scrollback retention ---
+
+def test_scrollback_retains_columns_older_than_the_old_fade_cutoff(monkeypatch):
+    # FADE_COLUMNS (the old render-driven dimming horizon) is much smaller
+    # than a scrollback window measured in seconds -- pushing more columns
+    # than FADE_COLUMNS, but all within scrollback_seconds, must not drop
+    # any of them the way the old count-based TAB_VISIBLE_MAXLEN cap would
+    # eventually have.
+    display = TabDisplay(fps=20, scrollback_seconds=100.0)
+    n = config.FADE_COLUMNS + 10
+    for i in range(n):
+        display.push(i % 12, 4, (200, 50, 50), f"n{i}", t=float(i))
+
+    assert len(display.entries) == n
+
+
+def test_scrollback_trims_columns_older_than_configured_window(monkeypatch):
+    display = TabDisplay(fps=20, scrollback_seconds=5.0)
+    display.push(0, 4, (200, 50, 50), "old", t=0.0)
+    display.push(1, 4, (200, 50, 50), "mid", t=2.0)
+    display.push(2, 4, (200, 50, 50), "new", t=10.0)  # pushes cutoff to 5.0
+
+    remaining_ts = [e.t for e in display.entries]
+
+    assert 0.0 not in remaining_ts  # trimmed -- older than (10.0 - 5.0)
+    assert 10.0 in remaining_ts  # newest always retained
+    # Still present in the untouched, count-based session history dump.
+    assert [e.t for e in display.session_history] == [0.0, 2.0, 10.0]
+
+
+def test_scrollback_never_empties_entries_even_at_zero_window(monkeypatch):
+    display = TabDisplay(fps=20, scrollback_seconds=0.0)
+    display.push(0, 4, (200, 50, 50), "a", t=0.0)
+    display.push(1, 4, (200, 50, 50), "b", t=1.0)
+
+    assert len(display.entries) >= 1
+    assert display.entries[-1].t == 1.0
+
+
+def test_default_scrollback_seconds_matches_config(monkeypatch):
+    display = TabDisplay(fps=20)
+    assert display.scrollback_seconds == config.TAB_SCROLLBACK_SECONDS
+
+
+# --- render(scroll_offset=...) ---
+
+def test_scroll_offset_zero_matches_default_render(monkeypatch):
+    def setup(display):
+        display.push(0, 4, (200, 50, 50), "C4", t=0.0)
+        display.push(2, 4, (200, 50, 50), "D4", t=1.0)
+
+    out_default, _ = _render_display(monkeypatch, rows=30, cols=100, setup=setup)
+    out_explicit_zero, _ = _render_display(monkeypatch, rows=30, cols=100, setup=setup)
+    assert out_default == out_explicit_zero
+
+
+def test_scroll_offset_hides_the_most_recent_columns(monkeypatch):
+    # With scroll_offset=1, the view should render as if the single newest
+    # column (D4) had not been pushed yet -- only C4 visible.
+    def setup(display):
+        display.push(0, 4, (200, 50, 50), "C4", t=0.0)
+        display.push(2, 4, (200, 50, 50), "D4", t=1.0)
+
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=None: (100, 30))
+    display = TabDisplay(fps=20)
+    display._last_size = (100, 30)
+    setup(display)
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    display.render("status", scroll_offset=1)
+    out = buf.getvalue()
+
+    assert NOTEHEAD_GLYPH in out  # C4 still shown
+    luminances = _bg_luminances(out)
+    assert len(luminances) == 1  # only one note column rendered
+
+
+def test_scroll_offset_uses_historical_age_fade_not_pinned_to_newest(monkeypatch):
+    # Three columns pushed; scrolling back by 1 makes the *second* column
+    # play the role of "newest visible" -- even while frozen, it should NOT
+    # be pinned to full brightness the way plain freeze (scroll_offset=0)
+    # would pin every visible column; it should show the same age-relative-
+    # to-that-point-in-time gradient the live view had back then.
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=None: (100, 30))
+    display = TabDisplay(fps=20)
+    display._last_size = (100, 30)
+    display.push(0, 4, (200, 50, 50), "C4", t=0.0)
+    display.push(0, 4, (200, 50, 50), "C4b", t=1.0)
+    display.push(0, 4, (200, 50, 50), "C4c", t=2.0)
+
+    buf = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", buf)
+    display.render("status", frozen=True, scroll_offset=1)
+    out = buf.getvalue()
+
+    luminances = _bg_luminances(out)
+    assert len(luminances) == 2  # first two columns visible, third hidden
+    older, newest = luminances
+    assert newest > older  # not pinned equal, unlike plain frozen scroll_offset=0
+
+
+def test_frozen_with_no_scroll_offset_still_pins_to_full_brightness(monkeypatch):
+    # Regression guard: introducing scroll_offset must not change plain
+    # freeze's existing pin-everything-to-full-brightness behavior.
+    out = _render(monkeypatch, rows=30, cols=100, pushes=[(0, 4, "C4"), (0, 4, "C4")], frozen=True)
+    luminances = _bg_luminances(out)
+    assert len(luminances) == 2
+    assert luminances[0] == luminances[1]

@@ -141,7 +141,21 @@ TAB_LETTER_WIDTH = 2            # right-hand legend sub-column: staff-row note l
                                  # one per row (every line AND space, issue #36)
 TAB_LEGEND_WIDTH = TAB_CLEF_WIDTH + TAB_LETTER_WIDTH  # total width the L toggle
                                                         # reserves from/returns to note columns
-TAB_VISIBLE_MAXLEN = 300        # on-screen deque cap
+TAB_SCROLLBACK_SECONDS = 300.0  # how far back (in the column timestamps pushed via
+                                 # push()/push_notes()/push_barline()'s `t=`, not a
+                                 # fixed column count) TabDisplay retains history for
+                                 # in self.entries -- the live-audio-timed window the
+                                 # `R`/Left-Right-arrow scrollback feature scrolls
+                                 # within. Overridable per-instance via TabDisplay's
+                                 # own `scrollback_seconds=` constructor arg (read from
+                                 # config_store.store.preference("tab_scrollback_seconds", ...)
+                                 # by main.py's caller); this is only the fallback
+                                 # default. Replaces the older, now-removed
+                                 # TAB_VISIBLE_MAXLEN count-based cap -- notes arrive at
+                                 # irregular, onset-driven intervals (mono) or a fixed
+                                 # rate that varies by scroll mode ('fix'), so a count
+                                 # never corresponded to a real time window the way this
+                                 # constant does.
 TAB_SESSION_HISTORY_MAX = 5000  # cap on entries retained for the end-of-session dump
 FADE_COLUMNS = 16               # issue #22: columns of age to fade a scrolled-past column
                                  # linearly from TAB_NOTE_LIGHTNESS down to DIM_LIGHTNESS,
