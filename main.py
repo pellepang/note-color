@@ -318,6 +318,8 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
             harmonic_tolerance_cents=config.CHORD_HARMONIC_TOLERANCE_CENTS,
             max_peak_candidates=config.CHORD_MAX_PEAK_CANDIDATES,
             harmonic_max_number=config.CHORD_HARMONIC_MAX_NUMBER,
+            min_freq_hz=config.FMIN,
+            max_freq_hz=config.FMAX,
         )
 
         chord_name, raw_stack = chord_smoother.update(main_chroma, bass_chroma, raw_notes)
@@ -721,15 +723,28 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                     pass
 
                 if got_new:
+                    # The mono and chord/multipitch trackers both always run
+                    # (this codebase's always-on-pipeline convention) and
+                    # routinely finalize the *same* underlying note in the
+                    # same hop -- e.g. any ordinary single note is tracked by
+                    # both the mono smoother and multipitch's one-note
+                    # "chord". Summing both trackers' beats into
+                    # beats_accumulated double-counted that shared note,
+                    # roughly halving real barline spacing (issue #76).
+                    # `hop_beats` takes the max across every finalization
+                    # this hop instead, mirroring run_batch_transcribe()'s
+                    # per-onset `max()` over simultaneous notes -- the beat
+                    # position should advance once per hop's worth of
+                    # music, not once per tracker that happened to notice it.
+                    hop_beats = 0.0
+
                     # Monophonic duration finalization belongs to the note
                     # displayed *before* this hop's update (see above).
                     if duration_hops is not None and prev_pitch_class is not None:
                         beats = (duration_hops * hop_seconds * bpm_estimate / 60.0) if bpm_estimate else None
                         dclass = duration_class_for_beats(beats)
                         display.finalize_duration(prev_pitch_class, prev_octave, dclass)
-                        beats_accumulated += (
-                            duration_hops * hop_seconds * bpm_estimate / 60.0 if bpm_estimate else 0.0
-                        )
+                        hop_beats = max(hop_beats, beats or 0.0)
 
                     # Chord-mode duration tracking runs every hop regardless
                     # of the current chord_mode display toggle -- same
@@ -743,9 +758,9 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                         ) if bpm_estimate else None
                         dclass = duration_class_for_beats(beats)
                         display.finalize_duration(entry["pitch_class"], entry["octave"], dclass)
-                        beats_accumulated += (
-                            entry["duration_hops"] * hop_seconds * bpm_estimate / 60.0 if bpm_estimate else 0.0
-                        )
+                        hop_beats = max(hop_beats, beats or 0.0)
+
+                    beats_accumulated += hop_beats
 
                     # A while, not an if, so a hop that somehow crosses more
                     # than one bar boundary (e.g. after a long freeze)
