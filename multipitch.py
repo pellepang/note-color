@@ -29,6 +29,22 @@ DEFAULT_HARMONIC_TOLERANCE_CENTS = 35.0
 DEFAULT_MAX_PEAK_CANDIDATES = 20
 DEFAULT_MIN_SEPARATION_CENTS = 50.0
 DEFAULT_BASS_GATE_RATIO = 0.25
+# Issue #68 residual: `_is_harmonic_of()` previously checked ANY integer
+# harmonic_number = round(freq / accepted_freq), with no upper bound. That's
+# fine for the low harmonics real instrument overtones (and this app's own
+# chroma.HARMONIC_WEIGHTS folding) actually care about, but at higher
+# multiples it starts pruning real, independent notes purely because they
+# happen to land within harmonic_tolerance_cents of *some* large integer
+# multiple of an already-accepted note -- with enough integers to try (8,
+# 9, 10, 12...), an accidental near-miss becomes likely as chord density
+# (and pitch spread) grows, which is exactly #68's "recall collapses under
+# density" symptom. Capped at 4 to match the one convention this codebase
+# already treats as "the harmonics that matter" -- chroma.HARMONIC_WEIGHTS
+# (chroma.py) and YIN_SUBHARMONIC_MAX_MULTIPLE (config.py) both stop at the
+# 4th harmonic too. See docs/DECISIONS.md for the empirical repro (a 6-note
+# voicing where a real high note was pruned as another note's 12th
+# harmonic, and a 5-note voicing losing one to a 6th-harmonic near-miss).
+DEFAULT_HARMONIC_MAX_NUMBER = 4
 
 NoteCandidate = namedtuple("NoteCandidate", ["pitch_class", "octave", "freq", "confidence"])
 
@@ -49,11 +65,11 @@ def _quadratic_interp_offset(y_prev, y_curr, y_next):
     return 0.5 * (y_prev - y_next) / denom
 
 
-def _is_harmonic_of(freq, accepted_freq, tolerance_cents):
+def _is_harmonic_of(freq, accepted_freq, tolerance_cents, max_harmonic_number=DEFAULT_HARMONIC_MAX_NUMBER):
     if accepted_freq <= 0:
         return False
     harmonic_number = round(freq / accepted_freq)
-    if harmonic_number < 1:
+    if harmonic_number < 1 or harmonic_number > max_harmonic_number:
         return False
     predicted = accepted_freq * harmonic_number
     if predicted <= 0:
@@ -101,6 +117,7 @@ def detect(
     harmonic_tolerance_cents=DEFAULT_HARMONIC_TOLERANCE_CENTS,
     max_peak_candidates=DEFAULT_MAX_PEAK_CANDIDATES,
     min_separation_cents=DEFAULT_MIN_SEPARATION_CENTS,
+    harmonic_max_number=DEFAULT_HARMONIC_MAX_NUMBER,
 ):
     """Up to `max_notes` NoteCandidate entries for the notes sounding in
     `window` (the raw analysis ring buffer), magnitude-peak strongest
@@ -161,7 +178,7 @@ def detect(
     for freq, mag in freq_ordered:
         if any(_is_near_duplicate(freq, acc_freq, min_separation_cents) for acc_freq, _ in pruned):
             continue
-        if any(_is_harmonic_of(freq, acc_freq, harmonic_tolerance_cents) for acc_freq, _ in pruned):
+        if any(_is_harmonic_of(freq, acc_freq, harmonic_tolerance_cents, harmonic_max_number) for acc_freq, _ in pruned):
             continue
         pruned.append((freq, mag))
 

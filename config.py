@@ -49,6 +49,18 @@ CHORD_MAX_NOTES = 6              # cap on simultaneously-detected notes
 CHORD_PEAK_MIN_MAG_RATIO = 0.05  # spectral peak-picking: ignore peaks below this fraction of the strongest peak
 CHORD_HARMONIC_TOLERANCE_CENTS = 35.0   # spectral peak-picking: harmonic-consistency pruning window
 CHORD_MAX_PEAK_CANDIDATES = 20   # spectral peak-picking: cap on candidates considered before pruning
+# Issue #68 residual: caps how high a harmonic multiple _is_harmonic_of()
+# will check when deciding a candidate peak is "just" an already-accepted
+# note's overtone. Matches chroma.py's HARMONIC_WEIGHTS (harmonics 1-4) and
+# YIN_SUBHARMONIC_MAX_MULTIPLE above -- the one convention this codebase
+# already treats as "the harmonics that matter" for a note's own identity.
+# Without a cap, a real, independently-sounding note in a dense chord could
+# get pruned just for accidentally landing near a large integer multiple
+# (8x, 9x, 12x...) of some other note already accepted that hop -- more
+# such multiples exist to accidentally collide as chord density/pitch
+# spread grows, which is exactly #68's "recall collapses under density"
+# symptom. See docs/DECISIONS.md for the empirical repro.
+CHORD_HARMONIC_MAX_NUMBER = 4
 
 # multipitch.detect()'s live window (WINDOW_SIZE, ~93ms) can't resolve
 # fundamentals of closely-spaced low notes (e.g. C2+E2, ~17Hz apart) --

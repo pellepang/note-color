@@ -146,6 +146,7 @@ def transcribe(audio, sample_rate, time_signature=config.DEFAULT_TIME_SIGNATURE)
             min_mag_ratio=config.CHORD_PEAK_MIN_MAG_RATIO,
             harmonic_tolerance_cents=config.CHORD_HARMONIC_TOLERANCE_CENTS,
             max_peak_candidates=config.CHORD_MAX_PEAK_CANDIDATES,
+            harmonic_max_number=config.CHORD_HARMONIC_MAX_NUMBER,
         )
         chord_name, raw_stack = chord_smoother.update(main_chroma, bass_chroma, raw_notes)
         chord_name_by_hop[hop_index] = chord_name

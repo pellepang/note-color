@@ -191,6 +191,38 @@ def test_moderate_frequency_jitter_on_a_harmonic_does_not_defeat_pruning():
     assert as_note_set(notes) == {(4, 4)}
 
 
+def test_high_order_harmonic_near_miss_does_not_prune_a_real_independent_note():
+    # issue #68 residual: _is_harmonic_of() used to check ANY integer
+    # harmonic_number = round(freq / accepted_freq) with no upper bound.
+    # A2 (110Hz) and B5 (987.77Hz) aren't in any small-integer relationship
+    # a real single instrument's overtone series would plausibly produce
+    # (harmonics 1-4, this app's own established convention -- see
+    # chroma.HARMONIC_WEIGHTS/YIN_SUBHARMONIC_MAX_MULTIPLE) -- B5 just
+    # happens to sit close to A2's 9th harmonic (110*9=990Hz, ~4 cents
+    # away, well inside the 35-cent tolerance). Before capping
+    # harmonic_max_number, that accidental high-order near-miss pruned B5
+    # as "just A2's 9th harmonic" even though it's a real, independently
+    # sounding note -- exactly the false-collision-risk-grows-with-density
+    # pattern #68 reported. Reproduced empirically via
+    # scripts/acoustic_pipeline_test.py's density suite (a 3-note voicing
+    # of A2+E4+C5 additionally lost B5-ish content at high harmonic
+    # numbers before this fix).
+    a2 = make_tone(freq_for(9, 2), harmonics=(1.0, 0.5, 1 / 3, 0.25))
+    b5 = make_tone(freq_for(11, 5))
+    notes = detect(a2 + b5, SAMPLE_RATE)
+    assert as_note_set(notes) == {(9, 2), (11, 5)}
+
+
+def test_own_low_order_harmonics_still_pruned_after_capping_harmonic_number():
+    # Companion to the test above: capping harmonic_max_number must not
+    # weaken pruning for the harmonics that actually matter (1-4) -- a
+    # note's own real overtones there still collapse into one detection,
+    # same as test_own_harmonics_not_double_counted_as_separate_notes.
+    tone = make_tone(freq_for(0, 3), harmonics=(1.0, 0.6, 0.4, 0.2))  # C3 + harmonics 2-4
+    notes = detect(tone, SAMPLE_RATE)
+    assert as_note_set(notes) == {(0, 3)}
+
+
 def test_dense_six_note_chord_all_survive_when_not_harmonically_colliding():
     # issue #68: raw peak-picking/pruning must not silently drop real
     # notes as note density increases, for an ordinary, musically
