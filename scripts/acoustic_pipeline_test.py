@@ -54,6 +54,20 @@ What it measures, one suite at a time:
                   onset-gate/sensitivity-threshold robustness beyond the
                   effectively-silent-room conditions every other suite
                   tests under.
+- `dynamics`   -- a loud-to-whisper amplitude sweep (single notes + chords)
+                  to find where the silence gate/sensitivity threshold
+                  actually cuts off, and whether mono and chord-mode cut
+                  off at different loudness floors (issue #72).
+- `percussion` -- inharmonic/transient percussion (synthesized kick/snare/
+                  hi-hat, no pitch classifier exists anywhere in this
+                  pipeline per CLAUDE.md's architecture) layered against a
+                  difficulty ladder: drums alone (false-note/false-chord
+                  rate), a held chord with vs. without a basic beat
+                  underneath (phantom pcs, chord-name accuracy, spurious
+                  duration-finalize events), a short realistic phrase
+                  (chord progression + syncopated melody + beat), and a
+                  deliberately-too-hard tier (fast tempo, dense/fast chord
+                  changes, busy drum pattern+fill) to find where it breaks.
 
 Usage:
     .venv/bin/python scripts/acoustic_pipeline_test.py                 # run everything
@@ -878,6 +892,479 @@ def analyze_dynamics(log, timeline):
 
 
 # --------------------------------------------------------------------------
+# Suite: percussion -- drum/percussion realism ladder. Every existing suite
+# above plays only clean, harmonic, pitched tones (synth_notes()'s additive
+# synthesis); this suite is the first to add broadband/inharmonic,
+# transient percussion content, to check the concrete worry that a drum hit
+# -- with no percussion classifier anywhere in this pipeline (everything
+# gets run through YIN and chroma/multipitch unconditionally, per
+# CLAUDE.md's architecture) -- could register as a spurious pitched note or
+# a phantom chord tone. Difficulty ladder, easiest to hardest:
+#   1. percussion alone, no pitched content at all (false-note/false-chord
+#      rate should be ~0% for a correct pipeline).
+#   2. a held chord, control (no drums) vs. the same chord + a basic beat
+#      underneath -- isolates the drums' own contribution to phantom pcs/
+#      chord-name accuracy/spurious duration-finalize events.
+#   3. "realistic": a short chord progression + a syncopated, non-uniform-
+#      duration melody line + a basic beat, all at once.
+#   4. "extreme": fast tempo, fast/dense chord changes, a denser syncopated
+#      melody, and a busy drum pattern with a fill -- not expected to pass
+#      cleanly, exists to find where it actually breaks.
+# --------------------------------------------------------------------------
+
+def _silence(duration_s, sr=PLAYBACK_SR):
+    return np.zeros(max(int(duration_s * sr), 1), dtype=np.float32)
+
+
+def _peak_cap(audio, cap=0.92):
+    """Down-only peak renormalization, same convention as _add_noise() --
+    stacking a chord pad + several simultaneous drum hits can push
+    instantaneous peaks past 1.0, which would clip on playback and confound
+    'does percussion get misread' with 'digital clipping distortion'."""
+    peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+    if peak > cap:
+        audio = audio * (cap / peak)
+    return audio.astype(np.float32)
+
+
+def _band_limited_noise(n, sr, low_hz, high_hz, seed):
+    """White noise restricted to [low_hz, high_hz] via hard FFT-bin zeroing
+    + inverse FFT -- a numpy-only band-pass (no scipy filter design needed),
+    same "push the hot loop into an FFT" convention this codebase already
+    uses (pitch_detect.py/chroma.py/multipitch.py)."""
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal(n)
+    if n < 4:
+        return noise.astype(np.float32)
+    spec = np.fft.rfft(noise)
+    freqs = np.fft.rfftfreq(n, 1.0 / sr)
+    spec = spec * ((freqs >= low_hz) & (freqs <= high_hz))
+    out = np.fft.irfft(spec, n)
+    peak = float(np.max(np.abs(out)))
+    return (out / peak).astype(np.float32) if peak > 0 else out.astype(np.float32)
+
+
+def synth_kick(duration=0.13, sr=PLAYBACK_SR, amp=0.9, seed=1):
+    """A real kick drum's own pitch envelope, not a stationary tone: an
+    exponentially-swept sine (150Hz -> 45Hz) plus a brief high-frequency
+    'beater click' transient, both under a fast exponential decay. Locally
+    near-sinusoidal within any single ~23ms analysis hop -- exactly the
+    property that could fool a per-hop pitch detector like YIN into
+    reporting a stable low pitch, which is the concrete risk this suite
+    checks for. Genuinely non-periodic across the hit's ~130ms lifetime."""
+    n = max(int(duration * sr), 1)
+    t = np.arange(n) / sr
+    decay = np.exp(-t / (duration / 5.0))
+    f_start, f_end = 150.0, 45.0
+    freq_env = f_end + (f_start - f_end) * np.exp(-t / (duration / 7.0))
+    phase = 2 * np.pi * np.cumsum(freq_env) / sr
+    tone = np.sin(phase) * decay
+    click_n = min(n, max(int(0.006 * sr), 1))
+    click = np.zeros(n)
+    click[:click_n] = _band_limited_noise(click_n, sr, 1000, 6000, seed) * np.exp(
+        -np.arange(click_n) / max(0.002 * sr, 1))
+    out = tone * 0.85 + click * 0.35
+    peak = float(np.max(np.abs(out)))
+    if peak > 0:
+        out *= amp / peak
+    return out.astype(np.float32)
+
+
+def synth_snare(duration=0.15, sr=PLAYBACK_SR, amp=0.8, seed=2):
+    """Broadband noise 'body' (the rattling snares -- inharmonic, a correct
+    pipeline should not lock onto a stable pitch/chroma for this) plus a
+    brief low-mid tonal 'poc' component (~200Hz, the shell/head resonance)
+    at the attack -- the tonal component is the plausible false-positive
+    vector here, same reasoning as the kick's pitch sweep."""
+    n = max(int(duration * sr), 1)
+    t = np.arange(n) / sr
+    decay = np.exp(-t / (duration / 4.0))
+    body = _band_limited_noise(n, sr, 250, 9000, seed) * decay
+    tone = np.sin(2 * np.pi * 200.0 * t) * np.exp(-t / 0.03)
+    out = body * 0.8 + tone * 0.35
+    peak = float(np.max(np.abs(out)))
+    if peak > 0:
+        out *= amp / peak
+    return out.astype(np.float32)
+
+
+def synth_hihat(duration=0.06, sr=PLAYBACK_SR, amp=0.6, seed=3, open_hat=False):
+    """High-passed noise burst, no tonal content at all -- closed: short
+    (~60ms) decay; open (open_hat=True): longer (~300ms). Expected to be
+    the easiest of the three drum sounds for a correct pipeline to stay
+    silent on (no low-frequency or tonal content to false-positive on)."""
+    if open_hat:
+        duration = max(duration, 0.30)
+    n = max(int(duration * sr), 1)
+    t = np.arange(n) / sr
+    decay = np.exp(-t / (duration / 5.0))
+    out = _band_limited_noise(n, sr, 6000, 11000, seed) * decay
+    peak = float(np.max(np.abs(out)))
+    if peak > 0:
+        out *= amp / peak
+    return out.astype(np.float32)
+
+
+_DRUM_SYNTH = {
+    "kick": synth_kick,
+    "snare": synth_snare,
+    "hihat": synth_hihat,
+    "hihat_open": lambda **kw: synth_hihat(open_hat=True, **kw),
+}
+
+
+def _overlay(base, sub, offset_s, sr=PLAYBACK_SR):
+    """Additively mixes `sub` into `base` (modified in place) starting at
+    offset_s seconds, truncating `sub` if it would run past base's end."""
+    start = int(offset_s * sr)
+    end = min(start + len(sub), len(base))
+    if start < len(base) and end > start:
+        base[start:end] += sub[: end - start]
+
+
+def _place_beat_pattern(audio, pattern, beat_s, n_bars, beats_per_bar, start_t, seed_base):
+    """pattern: dict of drum kind -> list of beat-offsets (0-indexed,
+    fractional for 8th/16th-note positions) within one bar. Overlays every
+    hit into `audio` (in place, additive) and returns a flat, time-sorted
+    list of {'t':, 'kind':} events for analysis."""
+    events = []
+    seed = seed_base
+    for kind, beats in pattern.items():
+        fn = _DRUM_SYNTH[kind]
+        for bar in range(n_bars):
+            for b in beats:
+                hit_t = start_t + (bar * beats_per_bar + b) * beat_s
+                seed += 1
+                _overlay(audio, fn(seed=seed), hit_t)
+                events.append({"t": round(hit_t, 4), "kind": kind})
+    events.sort(key=lambda e: e["t"])
+    return events
+
+
+BASIC_BEAT = {  # straight rock beat, one 4/4 bar
+    "kick": [0.0, 2.0],
+    "snare": [1.0, 3.0],
+    "hihat": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+}
+
+BUSY_BEAT = {  # "way too hard" tier: syncopated kick, ghost/fill snares, 16th hihats
+    "kick": [0.0, 0.75, 1.5, 2.0, 2.5, 3.25],
+    "snare": [1.0, 1.75, 3.0, 3.5, 3.625, 3.75],
+    "hihat": [b * 0.25 for b in range(16)],
+}
+
+
+def _build_isolated_hits_tier(start_pad=0.9, gap=0.9):
+    """Tier 1a: single isolated hits in silence -- the simplest possible
+    false-positive check, no pitched content, no simultaneous hits."""
+    hits = [("kick", synth_kick), ("snare", synth_snare),
+            ("hihat", synth_hihat), ("hihat_open", lambda **kw: synth_hihat(open_hat=True, **kw))]
+    slot = gap
+    total = start_pad + len(hits) * slot
+    audio = _silence(total)
+    events = []
+    hit_t = start_pad
+    for i, (kind, fn) in enumerate(hits):
+        _overlay(audio, fn(seed=17 + i), hit_t)
+        events.append({"t": round(hit_t, 4), "kind": kind})
+        hit_t += slot
+    return _peak_cap(audio), events, total
+
+
+def _build_beat_tier(pattern, bpm, n_bars, lead_s=0.6, trail_s=0.6):
+    """Tier 1b: sustained drum-only pattern, still no pitched content."""
+    beat_s = 60.0 / bpm
+    beats_per_bar = 4
+    dur = n_bars * beats_per_bar * beat_s
+    total = lead_s + dur + trail_s
+    audio = _silence(total)
+    events = _place_beat_pattern(audio, pattern, beat_s, n_bars, beats_per_bar, lead_s, seed_base=100)
+    return _peak_cap(audio), events, total, lead_s, lead_s + dur
+
+
+def _build_chord_tier(root, octave, quality, bpm, n_bars, with_drums, seed_base):
+    """Tier 2: one sustained chord, optionally with a basic beat underneath."""
+    beat_s = 60.0 / bpm
+    beats_per_bar = 4
+    dur = n_bars * beats_per_bar * beat_s
+    lead, trail = 0.6, 0.6
+    total = lead + dur + trail
+    notes, pcs, name = voice_chord(root, octave, quality)
+    audio = _silence(total)
+    _overlay(audio, synth_notes(notes, dur, fade_s=0.03), lead)
+    events = []
+    if with_drums:
+        events = _place_beat_pattern(audio, BASIC_BEAT, beat_s, n_bars, beats_per_bar, lead, seed_base)
+    return _peak_cap(audio), events, total, lead, lead + dur, pcs, name
+
+
+REALISTIC_BPM = 96
+REALISTIC_PROGRESSION = [("C", 3, "maj"), ("A", 3, "min"), ("F", 3, "maj"), ("G", 3, "maj")]
+REALISTIC_MELODY = [  # (start_beat, duration_beats, (note, octave)) -- syncopated, rests included
+    (0.0, 1.0, ("E", 5)), (1.5, 0.5, ("G", 5)), (2.0, 1.5, ("E", 5)),
+    (4.0, 0.75, ("A", 4)), (4.75, 0.25, ("C", 5)), (5.0, 2.0, ("A", 4)),
+    (8.0, 1.0, ("F", 4)), (9.5, 0.5, ("A", 4)), (10.0, 1.5, ("C", 5)),
+    (12.0, 1.0, ("G", 4)), (13.5, 0.5, ("B", 4)), (14.0, 2.0, ("D", 5)),
+]
+
+EXTREME_BPM = 176
+EXTREME_PROGRESSION = [  # one quality change per half-bar -- 8 changes across 4 bars
+    ("C", 3, "dom7"), ("A", 3, "min7"), ("F", 3, "maj7"), ("G", 3, "dom7"),
+    ("D", 3, "min7"), ("G", 3, "dom7"), ("C", 3, "maj7"), ("E", 3, "min7"),
+]
+EXTREME_MELODY = [  # denser, more syncopated, shorter notes than REALISTIC_MELODY
+    (0.0, 0.5, ("E", 5)), (0.5, 0.25, ("G", 5)), (0.75, 0.25, ("A", 5)), (1.25, 0.5, ("E", 5)),
+    (2.0, 0.5, ("C", 5)), (2.75, 0.25, ("D", 5)), (3.0, 0.75, ("A", 4)),
+    (4.5, 0.5, ("F", 4)), (5.0, 0.25, ("A", 4)), (5.5, 0.5, ("C", 5)), (6.25, 0.25, ("D", 5)),
+    (7.0, 1.0, ("G", 4)),
+    (8.5, 0.5, ("D", 5)), (9.0, 0.25, ("F", 5)), (9.5, 0.5, ("A", 4)),
+    (10.5, 0.25, ("B", 4)), (11.0, 1.0, ("C", 5)),
+    (12.5, 0.5, ("C", 5)), (13.0, 0.25, ("E", 5)), (13.5, 0.5, ("G", 4)),
+    (14.5, 0.25, ("B", 4)), (15.0, 1.0, ("E", 5)),
+]
+
+
+def _build_progression_melody_tier(progression, melody, bpm, change_beats, chord_base_amp, melody_base_amp,
+                                    beat_pattern, seed_base):
+    """Shared builder for tiers 3 ('realistic') and 4 ('extreme'): a chord
+    progression (one entry per `change_beats`-beat block) as sustained
+    pads, a melody line layered independently on top (own onset/decay per
+    note, natural varied durations incl. rests -- not locked to the chord
+    grid), and a drum pattern underneath, all mixed additively into one
+    buffer. Returns (audio, chord_segments, melody_segments, drum_events,
+    lead) with all segment times relative to this tier's own start."""
+    beat_s = 60.0 / bpm
+    block_s = change_beats * beat_s
+    n_blocks = len(progression)
+    lead, trail = 0.6, 0.6
+    dur = n_blocks * block_s
+    total = lead + dur + trail
+    audio = _silence(total)
+
+    chord_segments = []
+    for i, (root, octave, quality) in enumerate(progression):
+        notes, pcs, name = voice_chord(root, octave, quality)
+        _overlay(audio, synth_notes(notes, block_s, fade_s=0.02, base_amp=chord_base_amp), lead + i * block_s)
+        chord_segments.append({"start": lead + i * block_s, "end": lead + (i + 1) * block_s,
+                                "expected_pcs": sorted(pcs), "expected_name": name})
+
+    melody_segments = []
+    for start_beat, dur_beats, (name, octave) in melody:
+        note_dur = dur_beats * beat_s * 0.85  # slight gap before the next note -- natural articulation
+        t0 = lead + start_beat * beat_s
+        _overlay(audio, synth_notes([(name, octave)], note_dur, fade_s=0.01, base_amp=melody_base_amp), t0)
+        melody_segments.append({"start": t0, "end": t0 + note_dur,
+                                 "pitch_class": NOTE_INDEX[name], "octave": octave})
+
+    beats_per_bar = 4
+    n_bars = max(int(round(dur / (beats_per_bar * beat_s))), 1)
+    events = _place_beat_pattern(audio, beat_pattern, beat_s, n_bars, beats_per_bar, lead, seed_base)
+
+    return _peak_cap(audio), chord_segments, melody_segments, events, total
+
+
+def build_percussion():
+    chunks = [_silence(1.5)]
+    t = 1.5
+    timeline = []
+
+    def _add(audio_seg, gap=0.7):
+        nonlocal t
+        chunks.append(audio_seg)
+        t += len(audio_seg) / PLAYBACK_SR
+        chunks.append(_silence(gap))
+        t += gap
+
+    # Tier 1a: isolated single hits, no pitched content at all.
+    audio, events, dur = _build_isolated_hits_tier()
+    base = t
+    for e in events:
+        timeline.append({"tier": "isolated_hits", "seg_type": "drum_hit",
+                          "t": base + e["t"], "drum_kind": e["kind"]})
+    timeline.append({"tier": "isolated_hits", "seg_type": "no_pitch_window",
+                      "start": base, "end": base + dur})
+    _add(audio)
+
+    # Tier 1b: sustained basic beat pattern, still no pitched content.
+    audio, events, dur, _lead, _end = _build_beat_tier(BASIC_BEAT, bpm=100, n_bars=4)
+    base = t
+    for e in events:
+        timeline.append({"tier": "beat_only", "seg_type": "drum_hit",
+                          "t": base + e["t"], "drum_kind": e["kind"]})
+    timeline.append({"tier": "beat_only", "seg_type": "no_pitch_window",
+                      "start": base, "end": base + dur})
+    _add(audio)
+
+    # Tier 2: chord alone (control) vs. the same chord + a basic beat --
+    # isolates the drums' own contribution to phantom pcs / chord-name
+    # accuracy / spurious duration-finalize events.
+    for root, octave, quality, label in (("C", 4, "maj", "Cmaj"), ("A", 3, "min7", "Am7")):
+        for with_drums in (False, True):
+            audio, events, _total, seg_start, seg_end, pcs, name = _build_chord_tier(
+                root, octave, quality, bpm=100, n_bars=4, with_drums=with_drums, seed_base=300)
+            base = t
+            tier_name = f"chord_{label}"
+            timeline.append({"tier": tier_name, "seg_type": "chord_window",
+                              "start": base + seg_start, "end": base + seg_end,
+                              "expected_pcs": sorted(pcs), "expected_name": name,
+                              "with_drums": with_drums, "label": label})
+            for e in events:
+                timeline.append({"tier": tier_name, "seg_type": "drum_hit",
+                                  "t": base + e["t"], "drum_kind": e["kind"]})
+            _add(audio)
+
+    # Tier 3: realistic -- chord progression + syncopated melody + basic beat.
+    audio, chord_segs, melody_segs, events, _total = _build_progression_melody_tier(
+        REALISTIC_PROGRESSION, REALISTIC_MELODY, REALISTIC_BPM, change_beats=4,
+        chord_base_amp=0.22, melody_base_amp=0.26, beat_pattern=BASIC_BEAT, seed_base=500)
+    base = t
+    for cs in chord_segs:
+        timeline.append({"tier": "realistic", "seg_type": "chord_window",
+                          "start": base + cs["start"], "end": base + cs["end"],
+                          "expected_pcs": cs["expected_pcs"], "expected_name": cs["expected_name"],
+                          "with_drums": True, "label": cs["expected_name"]})
+    for ms in melody_segs:
+        timeline.append({"tier": "realistic", "seg_type": "melody_note",
+                          "start": base + ms["start"], "end": base + ms["end"],
+                          "pitch_class": ms["pitch_class"], "octave": ms["octave"]})
+    for e in events:
+        timeline.append({"tier": "realistic", "seg_type": "drum_hit",
+                          "t": base + e["t"], "drum_kind": e["kind"]})
+    _add(audio)
+
+    # Tier 4: "way too hard" -- fast tempo, fast/dense chord changes, a
+    # denser syncopated melody, and a busy drum pattern with a fill. Not
+    # expected to pass cleanly -- exists to find where it actually breaks.
+    audio, chord_segs, melody_segs, events, _total = _build_progression_melody_tier(
+        EXTREME_PROGRESSION, EXTREME_MELODY, EXTREME_BPM, change_beats=2,
+        chord_base_amp=0.20, melody_base_amp=0.24, beat_pattern=BUSY_BEAT, seed_base=900)
+    base = t
+    for cs in chord_segs:
+        timeline.append({"tier": "extreme", "seg_type": "chord_window",
+                          "start": base + cs["start"], "end": base + cs["end"],
+                          "expected_pcs": cs["expected_pcs"], "expected_name": cs["expected_name"],
+                          "with_drums": True, "label": cs["expected_name"]})
+    for ms in melody_segs:
+        timeline.append({"tier": "extreme", "seg_type": "melody_note",
+                          "start": base + ms["start"], "end": base + ms["end"],
+                          "pitch_class": ms["pitch_class"], "octave": ms["octave"]})
+    for e in events:
+        timeline.append({"tier": "extreme", "seg_type": "drum_hit",
+                          "t": base + e["t"], "drum_kind": e["kind"]})
+    _add(audio)
+
+    return np.concatenate(chunks).astype(np.float32), timeline, t
+
+
+def _analyze_progression_melody_tier(log, entries):
+    """Shared analysis for tiers 3/4: chord-name accuracy + phantom/missing
+    pcs (a currently-sounding melody note is an allowed extra tone, not a
+    phantom -- computed per-hop from melody_notes' own start/end windows),
+    plus melody-note recall (does each melody note ever show up somewhere
+    in the polyphonic note_stack while it's sounding)."""
+    chord_windows = [e for e in entries if e["seg_type"] == "chord_window"]
+    melody_notes = [e for e in entries if e["seg_type"] == "melody_note"]
+
+    chord_rows = []
+    for w in chord_windows:
+        steady = [h for h in log if w["start"] + 0.15 <= h["t"] <= w["end"] - 0.05]
+        if not steady:
+            continue
+        expected_pcs = set(w["expected_pcs"])
+        name_votes, phantom, missing = {}, [], []
+        for h in steady:
+            allowed = set(expected_pcs)
+            for m in melody_notes:
+                if m["start"] <= h["t"] <= m["end"]:
+                    allowed.add(m["pitch_class"])
+            got = {n["pitch_class"] for n in h["note_stack"]}
+            phantom.append(len(got - allowed))
+            missing.append(len(expected_pcs - got))
+            name_votes[h["chord_name"]] = name_votes.get(h["chord_name"], 0) + 1
+        top_name = max(name_votes.items(), key=lambda kv: kv[1])[0] if name_votes else None
+        chord_rows.append({
+            "expected_name": w["expected_name"], "detected_name": top_name,
+            "name_correct": top_name == w["expected_name"],
+            "mean_phantom": round(statistics.mean(phantom), 3),
+            "mean_missing": round(statistics.mean(missing), 3),
+        })
+
+    melody_rows = []
+    for m in melody_notes:
+        window_end = m["end"] + LATENCY_SEARCH_SLOP_S
+        appeared = any(
+            m["start"] <= h["t"] <= window_end
+            and any(n["pitch_class"] == m["pitch_class"] for n in h["note_stack"])
+            for h in log
+        )
+        melody_rows.append({"pitch_class": m["pitch_class"], "octave": m["octave"], "in_stack_recall": appeared})
+
+    n_chords, n_melody = len(chord_rows), len(melody_rows)
+    return {
+        "n_chord_windows": n_chords,
+        "chord_name_accuracy": round(sum(1 for r in chord_rows if r["name_correct"]) / n_chords, 3) if n_chords else None,
+        "mean_phantom_pcs_per_hop": round(statistics.mean(r["mean_phantom"] for r in chord_rows), 3) if chord_rows else None,
+        "mean_missing_pcs_per_hop": round(statistics.mean(r["mean_missing"] for r in chord_rows), 3) if chord_rows else None,
+        "n_melody_notes": n_melody,
+        "melody_note_in_stack_recall": round(sum(1 for r in melody_rows if r["in_stack_recall"]) / n_melody, 3) if n_melody else None,
+        "chord_rows": chord_rows,
+    }
+
+
+def analyze_percussion(log, timeline):
+    by_tier = {}
+    for e in timeline:
+        by_tier.setdefault(e["tier"], []).append(e)
+
+    tiers_out = {}
+
+    for tier_name in ("isolated_hits", "beat_only"):
+        entries = by_tier.get(tier_name, [])
+        windows = [e for e in entries if e["seg_type"] == "no_pitch_window"]
+        if not windows:
+            continue
+        hops = [h for h in log if any(w["start"] <= h["t"] <= w["end"] for w in windows)]
+        tiers_out[tier_name] = {
+            "n_hops": len(hops),
+            "false_note_rate": round(sum(1 for h in hops if h["pitch_class"] is not None) / len(hops), 4) if hops else None,
+            "false_chord_rate": round(sum(1 for h in hops if h["chord_name"] is not None) / len(hops), 4) if hops else None,
+            "false_note_stack_rate": round(sum(1 for h in hops if h["note_stack"]) / len(hops), 4) if hops else None,
+        }
+
+    for label in ("Cmaj", "Am7"):
+        tier_name = f"chord_{label}"
+        entries = by_tier.get(tier_name, [])
+        windows = [e for e in entries if e["seg_type"] == "chord_window"]
+        rows = {}
+        for w in windows:
+            steady = [h for h in log if w["start"] + 0.4 <= h["t"] <= w["end"] - 0.1]
+            expected_pcs = set(w["expected_pcs"])
+            phantom, missing, name_votes, finalize_events = [], [], {}, 0
+            for h in steady:
+                got = {n["pitch_class"] for n in h["note_stack"]}
+                phantom.append(len(got - expected_pcs))
+                missing.append(len(expected_pcs - got))
+                name_votes[h["chord_name"]] = name_votes.get(h["chord_name"], 0) + 1
+                finalize_events += sum(1 for n in h["note_stack"] if n.get("duration_hops") is not None)
+            top_name = max(name_votes.items(), key=lambda kv: kv[1])[0] if name_votes else None
+            key = "with_drums" if w["with_drums"] else "control"
+            rows[key] = {
+                "expected_name": w["expected_name"], "detected_name": top_name,
+                "name_correct": top_name == w["expected_name"],
+                "mean_phantom": round(statistics.mean(phantom), 3) if phantom else None,
+                "mean_missing": round(statistics.mean(missing), 3) if missing else None,
+                "n_duration_finalize_events": finalize_events,
+                "n_hops": len(steady),
+            }
+        tiers_out[tier_name] = rows
+
+    tiers_out["realistic"] = _analyze_progression_melody_tier(log, by_tier.get("realistic", []))
+    tiers_out["extreme"] = _analyze_progression_melody_tier(log, by_tier.get("extreme", []))
+
+    return {"summary": tiers_out}
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
 
@@ -890,6 +1377,7 @@ SUITES = {
     "rhythm": (build_rhythm, analyze_rhythm),
     "noise": (build_noise, analyze_noise),
     "dynamics": (build_dynamics, analyze_dynamics),
+    "percussion": (build_percussion, analyze_percussion),
 }
 
 
@@ -1017,6 +1505,40 @@ def write_report(results, outdir):
             lines.append(f"| {level} | {r.get('note_recall')} | {r.get('mean_note_steady_accuracy')} | "
                           f"{r.get('chord_name_accuracy')} | {r.get('mean_chord_phantom_pcs_per_hop')} | "
                           f"{r.get('mean_chord_missing_pcs_per_hop')} |")
+        lines.append("")
+
+    if "percussion" in results:
+        s = results["percussion"]["summary"]
+        lines += ["## Percussion / drum realism ladder", "",
+                   "### Tier 1: percussion alone -- false-positive check", "",
+                   "| tier | hops | false-note rate | false-chord rate | false note-stack rate |",
+                   "|---|---|---|---|---|"]
+        for tier in ("isolated_hits", "beat_only"):
+            r = s.get(tier, {})
+            lines.append(f"| {tier} | {r.get('n_hops')} | {r.get('false_note_rate')} | "
+                          f"{r.get('false_chord_rate')} | {r.get('false_note_stack_rate')} |")
+        lines += ["",
+                   "### Tier 2: sustained chord -- control vs. + basic beat", "",
+                   "| chord | condition | detected name | correct | mean phantom pcs/hop | "
+                   "mean missing pcs/hop | duration-finalize events |",
+                   "|---|---|---|---|---|---|---|"]
+        for label in ("Cmaj", "Am7"):
+            rows = s.get(f"chord_{label}", {})
+            for cond in ("control", "with_drums"):
+                r = rows.get(cond)
+                if not r:
+                    continue
+                lines.append(f"| {label} | {cond} | {r['detected_name']} | {r['name_correct']} | "
+                              f"{r['mean_phantom']} | {r['mean_missing']} | {r['n_duration_finalize_events']} |")
+        for tier_key, tier_label in (("realistic", "Tier 3: realistic (chord progression + syncopated melody + basic beat)"),
+                                       ("extreme", "Tier 4: extreme (fast tempo, dense/fast chords, busy drum pattern+fill)")):
+            r = s.get(tier_key, {})
+            lines += ["", f"### {tier_label}", "",
+                       f"- Chord-name accuracy: {r.get('chord_name_accuracy')} ({r.get('n_chord_windows')} chord windows)",
+                       f"- Mean phantom pcs/hop: {r.get('mean_phantom_pcs_per_hop')}",
+                       f"- Mean missing pcs/hop: {r.get('mean_missing_pcs_per_hop')}",
+                       f"- Melody-note-in-stack recall: {r.get('melody_note_in_stack_recall')} "
+                       f"({r.get('n_melody_notes')} notes)"]
         lines.append("")
 
     report_path = os.path.join(outdir, "report.md")
