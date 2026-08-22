@@ -112,23 +112,24 @@ into an implicit `None` as before — see Key design decisions.
 | `onset_detect.py` | (issue #55) `spectral_flux()`/`chroma_flux()` — pure, `None`-safe half-wave-rectified positive-magnitude-difference novelty measures between two consecutive `pitch_detect.compute_spectrum()`/`chroma.fold()` frames. `spectral_flux()` feeds `note_smoother.py`'s onset gate; `chroma_flux()` feeds `tempo_tracker.py`. |
 | `duration_tracker.py` | (issue #55) `DurationTracker` — mirrors `ChordSmoother.note_states`' dict-of-state shape, but for *measuring* how long a note sounded rather than debouncing its display. `.update()` (live, causal, keyed by `(pitch_class, octave)`, `is_onset`-aware re-attack preemption) and `.finalize_noncausal()` (batch, centered-smoothed envelope, static method) share one off-threshold definition (`DURATION_DECAY_RATIO`). `duration_class_for_beats()`/`DEFAULT_DURATION_CLASS` — nearest-standard-note-value snapping (incl. dotted), used by both live and batch. `require_onset_for_new_note` (constructor, issue #70) — mono's tracker sets this `True` so a key with no existing state only opens one when `is_onset` is genuinely `True` for it, since `NoteSmoother` otherwise echoes a just-finalized note's key with `is_onset=False` for a couple more hops (its own silence grace period) that would otherwise misread as a spurious new note; chord mode keeps the default `False` since it has no reliable per-note onset signal at all and relies on appear/absence alone. `.update()`'s `onset_backdate` parameter (issue #70) backdates a freshly-opened state's `onset_hop`, fed from `NoteSmoother.onset_backdate_hops` for mono. |
 | `tempo_tracker.py` | (issue #55) `TempoTracker` — live-only causal BPM estimation via FFT autocorrelation over a rolling `chroma_flux()` novelty-history window (same autocorrelation approach `pitch_detect.py`'s YIN already uses, applied to novelty instead of raw audio); re-estimates every `TEMPO_UPDATE_INTERVAL_HOPS` hops, not every hop. `_estimate()`'s best-lag candidate (issue #70) is gated on a confidence ratio (autocorrelation peak over zero-lag energy, `config.TEMPO_MIN_CONFIDENCE`) — below it, the estimate holds at its last value rather than re-locking onto what's essentially noise once the rolling window's content stops being periodic (e.g. a stretch of isolated, irregularly-spaced notes with no consistent beat). Batch tempo uses `librosa.beat.beat_track()` directly instead (`batch_transcribe.py`) — this module is never imported there. |
-| `batch_transcribe.py` | (issue #55) The only module permitted to import `librosa`. `load_audio()` + `transcribe()` — runs the same per-hop pipeline `analysis_loop()` drives live (mono via `NoteSmoother`, polyphonic via `multipitch.detect()`+`ChordSmoother`), accumulates full-recording-length per-`(pitch_class, octave)` magnitude/onset arrays, then calls `DurationTracker.finalize_noncausal()` per key and `librosa.beat.beat_track()` for tempo. Returns a `TranscriptionResult` (`notes` polyphonic, `mono_notes` monophonic, `bpm`, `hop_seconds`) that `main.run_batch_transcribe()` turns into `TabDisplay` columns. |
+| `batch_transcribe.py` | (issue #55) The only module permitted to import `librosa` for *offline* transcription. `load_audio()` + `transcribe()` — runs the same per-hop pipeline `analysis_loop()` drives live (mono via `NoteSmoother`, polyphonic via `multipitch.detect()`+`ChordSmoother`), accumulates full-recording-length per-`(pitch_class, octave)` magnitude/onset arrays, then calls `DurationTracker.finalize_noncausal()` per key and `librosa.beat.beat_track()` for tempo. Returns a `TranscriptionResult` (`notes` polyphonic, `mono_notes` monophonic, `bpm`, `hop_seconds`) that `main.run_batch_transcribe()` turns into `TabDisplay` columns. |
+| `rhythm_reanalysis.py` | (issue #77) The other module permitted to import `librosa`, for the `tab` view's live `R`-key non-causal rhythm re-analysis — see Key design decisions for why this is an accepted second exception to "librosa lives only in `batch_transcribe.py`", not a reopening of that rule. `HopRecord` (namedtuple: `hop_index`, `mono`, `chord_notes`, `chroma_novelty`) is the buffered-per-hop shape `main.ReanalysisBuffer` accumulates and `recompute()` (the pure, unit-tested engine) consumes — a snapshot list of these, plus `hop_seconds`/`beats_per_bar`, in; a `RecomputeResult` (`corrected_notes`, `barline_times`, `bpm_estimate`, `window_start_time`, `window_end_time`) out, or `None` if the buffer was empty. Reconstructs per-key magnitude/onset arrays from the flat `HopRecord` sequence mirroring `batch_transcribe.transcribe()`'s own per-hop loop almost exactly, then calls the same `DurationTracker.finalize_noncausal()`/`librosa.beat.beat_track()` batch already uses — the one structural difference is mapping local buffer positions back to real hop timestamps via each `HopRecord`'s own `hop_index`, since a rolling window's contents aren't 0-based/contiguous the way batch's whole-recording arrays are. |
 | `color_map.py` | `note_to_hsl()`, `hsl_to_rgb255()`, `fifths_index()`, `hue_for_step()` (the shared 30-degrees-per-step hue formula `note_to_hsl()` and `menu_animation.band_color()` both build on), `NOTE_NAMES`, `NOTE_NAMES_FIFTHS`. |
 | `staff_map.py` | `staff_row()`, `ledger_rows()`, `row_note_name()` (general row→letter, every line/space row) — grand-staff placement, used only by `tab` view. |
 | `animation.py` | `ColorAnimator` — crossfade + onset pulse. Used by GUI, terminal-fill, and (per-note-keyed) chord-mode fill bands. |
 | `display.py` | `Display` — pygame GUI window (fullscreen, debug overlay). Chord mode is out of scope for the GUI (no live-hotkey mechanism). |
 | `terminal_display.py` | `TerminalDisplay` — ANSI truecolor full-terminal fill; `render_bands()` for chord mode's proportional per-note bands. |
 | `terminal_wheel_display.py` | `WheelDisplay` — 12-note fifths ring, always fifths color regardless of `--color-scheme`; `render_chord()` for chord mode's multi-wedge steady-lit display. |
-| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()` (each note stored as a mutable dict, not a tuple — a `duration_class` field starts `None` and is filled in later by `finalize_duration()`, since a note's duration is only known after it decays, well after the column carrying it was pushed; optional `t=` override lets `main.run_batch_transcribe()` stamp a column with the recording's real onset time instead of wall-clock), `push_barline()` (issue #55: a second, distinct column type — no notes, just a divider glyph spanning the staff height at `TAB_BARLINE_WIDTH`, aged/dimmed the same way note columns are but with no hue), `render()` (takes live `notehead_style`/`legend_on`/`frozen`/`scroll_offset`, age-fades each column's lightness per issue #22, and composes duration glyphs/suffixes onto each note per its `duration_class`), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). `self.entries` retains history by timestamp window (`self.scrollback_seconds`, defaulting to `config.TAB_SCROLLBACK_SECONDS`, overridable via the constructor) rather than the old fixed column count, giving the `R`/Left-Right-arrow scrollback feature real reach to scroll within; `render(..., scroll_offset=N)` renders the view as it looked `N` history entries ago, historical age-fade included (freeze's usual pin-to-full-brightness only applies at `scroll_offset=0`). `correct_duration()` retroactively overwrites a specific already-finalized note's `duration_class` (disambiguated from repeat notes at the same key by closest column timestamp — `finalize_duration()` itself can only reach the currently-open note at a key); `erase_barlines()`/`insert_barline()` replace a stale barline set within a time range with recomputed ones (the latter inserts in sorted position rather than just appending). All three are `TabDisplay`-side API for a future non-causal rhythm re-analysis feature; the recompute/keybind wiring that calls them is separate, tracked elsewhere. |
+| `terminal_tab_display.py` | `TabDisplay` — scrolling grand-staff note history rendered as sheet-music noteheads; `push()`/`push_notes()` (each note stored as a mutable dict, not a tuple — a `duration_class` field starts `None` and is filled in later by `finalize_duration()`, since a note's duration is only known after it decays, well after the column carrying it was pushed; optional `t=` override lets `main.run_batch_transcribe()` stamp a column with the recording's real onset time instead of wall-clock), `push_barline()` (issue #55: a second, distinct column type — no notes, just a divider glyph spanning the staff height at `TAB_BARLINE_WIDTH`, aged/dimmed the same way note columns are but with no hue), `render()` (takes live `notehead_style`/`legend_on`/`frozen`/`scroll_offset`, age-fades each column's lightness per issue #22, and composes duration glyphs/suffixes onto each note per its `duration_class`), `dump_ansi()` on quit (always letter+octave, unaffected by any toggle). `self.entries` retains history by timestamp window (`self.scrollback_seconds`, defaulting to `config.TAB_SCROLLBACK_SECONDS`, overridable via the constructor) rather than the old fixed column count, giving the `R`/Left-Right-arrow scrollback feature real reach to scroll within; `render(..., scroll_offset=N)` renders the view as it looked `N` history entries ago, historical age-fade included (freeze's usual pin-to-full-brightness only applies at `scroll_offset=0`). `correct_duration()` retroactively overwrites a specific already-finalized note's `duration_class` (disambiguated from repeat notes at the same key by closest column timestamp — `finalize_duration()` itself can only reach the currently-open note at a key); `erase_barlines()`/`insert_barline()` replace a stale barline set within a time range with recomputed ones (the latter inserts in sorted position rather than just appending). All three are the `TabDisplay`-side API issue #77's `R`-key non-causal rhythm re-analysis calls into (`main.py`'s `_apply_reanalysis_result()`) — this module owns only the data/render capability, not the recompute engine (`rhythm_reanalysis.py`) or keybind wiring (`main.py`). |
 | `config_store.py` | `ConfigStore`/module-level `store` — additive TOML overlay over `config.py` from `$XDG_CONFIG_HOME/note-color/config.toml` (fallback `~/.config/note-color/config.toml`); `keybind()`/`note_hue_override()`/`preference()` (mtime-checked hot-reload), `set_preference()`/`set_keybind()`/`set_note_hue_override()` (persist + write back to the TOML file — all three back issue #43's settings screen, `set_preference()`/`preference()` generically covering the numeric `rhythm_reanalysis_window_seconds`/`tab_scrollback_seconds` fields alongside the earlier hand-edit-only `menu_perf_mode`, no bespoke accessor needed for any of the three). |
-| `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape — `duration_hops`/`bpm_estimate` (issue #55) are its newest two fields. `run_terminal_tab()` drives rhythm notation: per-hop `finalize_duration()` calls (mono via the previous hop's `pitch_class`/`octave`, chord via each `note_stack` entry's own `duration_hops`) and a beat-accumulator triggering `push_barline()`. `run_batch_transcribe()` (issue #55, `virtualnote transcribe`) never touches `SessionState`/audio at all — offline, one-shot, builds `TabDisplay` columns from `batch_transcribe.transcribe()`'s output and calls `dump_ansi()` directly, no render loop. `pygame` imported only inside `run_gui`; `librosa` never imported here at all (see `batch_transcribe.py`). |
+| `main.py` | Wires threads together; `SessionState` (lazy-created capture/analysis-thread/sensitivity/source bundle) + `run_session()` (dispatch-and-return-sentinel, reusable across tool switches, issue #40) sit alongside the original per-view CLI entry point. `RenderItem` NamedTuple is the render-queue shape — `duration_hops`/`bpm_estimate` (issue #55) are its newest two fields. `run_terminal_tab()` drives rhythm notation: per-hop `finalize_duration()` calls (mono via the previous hop's `pitch_class`/`octave`, chord via each `note_stack` entry's own `duration_hops`) and a beat-accumulator triggering `push_barline()`. `run_batch_transcribe()` (issue #55, `virtualnote transcribe`) never touches `SessionState`/audio at all — offline, one-shot, builds `TabDisplay` columns from `batch_transcribe.transcribe()`'s output and calls `dump_ansi()` directly, no render loop. `pygame` imported only inside `run_gui`; `librosa` never imported here directly (only via `rhythm_reanalysis.py`, see that module and `batch_transcribe.py`). Issue #77 additions: `ReanalysisBuffer` (owned by `SessionState`, appended to every hop by `analysis_loop()` with `rhythm_reanalysis.HopRecord`s, bounded/hot-reloaded against `rhythm_reanalysis_window_seconds`) and `ReanalysisState` (a plain `.in_progress` flag shared between the render thread and the throwaway recompute thread `_handle_reanalysis_key()` spawns on `R`). `run_terminal_tab()` polls a second, local single-slot `reanalysis_result_queue` once per iteration and applies a ready result via `_apply_reanalysis_result()`; `_handle_scroll_keys()` maintains `scroll_offset` (reset to 0 on every unfreeze) fed straight to `TabDisplay.render(scroll_offset=...)`. |
 | `menu_display.py` | `MenuDisplay` — `virtualnote`'s tool-picker screen (issue #40); `render()` draws issue #42's decided animated design (built in #51): `menu_animation`'s spinning donut fills a left-hand pane, with the title/donation-callout/tool-list/hints/status text overlaid in a fixed-width right-hand pane (`_layout()`, `_text_lines()`) — narrow terminals drop the donut and fall back to a centered text-only screen, same shape as the original #40 placeholder. `move()`/`move_to()`/`current_view()` selection plumbing is unchanged by any of this. `TOOLS` (the four run_session-launchable views) vs. `MENU_ITEMS` (`TOOLS` plus non-audio screens: `settings`, `credits`) — selection/render operate on `MENU_ITEMS`; `shell.py` special-cases the extra entries instead of sending them through `main.run_session()`. `osc8_link()`/`_donation_line()` (issue #44) build the main screen's clickable author/donation callout. `_resolve_perf_mode()` picks full vs. perf donut rendering: an explicit override (virtualnote's `--menu-perf-mode` flag) beats `config.toml`'s `[preferences].menu_perf_mode` beats `menu_animation.detect_perf_mode()`'s real startup probe. |
 | `menu_animation.py` | Animation math for the menu screen's donut (issues #42/#51), ported from the throwaway prototype at `prototype/issue-42-menu-animation/{donut_fifths.py,autodetect.py}`: `render_frame()` — NumPy-vectorized torus point-projection (`_project()`) + a painter's-algorithm z-buffer via ascending-depth-sort fancy-indexing (no per-point Python loop) — re-skinned with the circle-of-fifths palette (`band_color()`/`FIFTHS_LABELS`), full mode shaded/lettered, perf mode flat/letterless/half-raster. `detect_perf_mode()`/`_decide_perf_mode()` — issue #46's auto-detect heuristic (core-count floor, then a real self-timed `render_frame()` probe against the full-mode frame budget), split into a real-timing wrapper and a pure decision function for testability. |
 | `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps, per-note hue overrides, and generic numeric preferences live, using `blessed` for field navigation and "press a key to capture this remap"/"type a clamped number" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS` (three kinds: `"keybind"`/`"color"`/`"numeric"`) / `NUMERIC_FIELDS` (spec list: key, label, min, max, step, default — today covers `rhythm_reanalysis_window_seconds` and `tab_scrollback_seconds`) / `move()` / `keybind_value()`/`color_value()`/`numeric_value()` / `is_valid_remap_key()` / `parse_hue_input()` (wraps modulo 360) / `parse_numeric_input()` (clamps into `[min, max]`, the correct behavior for a bounded quantity unlike hue's circular wrap) / `apply_field_edit()` / `clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself (including `_capture_numeric()`, modeled on `_capture_hue()`) is smoke-tested manually, same convention as every `run_terminal_*` loop. |
 | `credits_display.py` | `run_credits_screen()` — `virtualnote`'s static Credits screen (issue #44): author, Claude/AI-assistance credit, and third-party library attribution (`THIRD_PARTY_LIBRARIES`), raw ANSI (no editable state, so no need for `settings_display`'s `blessed` exception). `credits_lines()` is the pure, unit-tested text builder; the render/wait-for-any-keypress loop itself is smoke-tested manually. |
 | `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. `"settings"`/`"credits"` picks are special-cased via `_NON_SESSION_SCREENS` straight to `settings_display.run_settings_screen()`/`credits_display.run_credits_screen()` instead of `run_session()` (issues #43, #44) — neither touches audio, so both always return straight back to the menu. |
 | `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded; `--menu-perf-mode {auto,full,perf}`, top-level-only, issue #51's CLI override for the menu donut; `tab`'s `--time-signature` and the standalone `transcribe <file> [--dump-file] [--time-signature]` subcommand, issue #55) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly — except `transcribe`, handled and returned before `SessionState` is even constructed, since batch never touches live audio. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content), `test_menu_animation.py` (projection/shading helpers, `render_frame()` shape/smoke checks, the auto-detect decision function), `test_menu_display.py` (`_layout()`'s donut/text-pane column split, `_resolve_perf_mode()`'s override precedence, `_text_lines()`'s content), `test_onset_detect.py`/`test_duration_tracker.py`/`test_tempo_tracker.py`/`test_batch_transcribe.py` (issue #55: synthetic spectra/chroma/magnitude-envelope/periodic-impulse fixtures, same "synthesize the signal, no binary fixtures" convention `test_chroma.py`'s `make_tone()` set). |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content), `test_menu_animation.py` (projection/shading helpers, `render_frame()` shape/smoke checks, the auto-detect decision function), `test_menu_display.py` (`_layout()`'s donut/text-pane column split, `_resolve_perf_mode()`'s override precedence, `_text_lines()`'s content), `test_onset_detect.py`/`test_duration_tracker.py`/`test_tempo_tracker.py`/`test_batch_transcribe.py` (issue #55: synthetic spectra/chroma/magnitude-envelope/periodic-impulse fixtures, same "synthesize the signal, no binary fixtures" convention `test_chroma.py`'s `make_tone()` set), `test_rhythm_reanalysis.py` (issue #77: synthesized `HopRecord` sequences exercising `rhythm_reanalysis.recompute()` directly — corrected durations, chord-onset-on-reappearance, tempo recovery from a periodic novelty signal, barline placement, the empty-buffer `None` case — same convention, not `main.py`'s threaded `R`-key wiring itself, which is smoke-tested manually per this repo's existing `run_terminal_*` convention). |
 
 ## Running it
 
@@ -185,7 +186,9 @@ chord mode live (needs a real TTY; no-op otherwise, e.g. piped input) —
 starts polyphonic (chord mode on) and `P` opts down to monophonic instead.
 `tab` view only: `N` toggle notehead render style live, `L` toggle the
 clef+note-letter legend column live, `Space` freeze/un-freeze the view
-(see below).
+(see below); while frozen, `R` triggers a non-causal rhythm re-analysis
+and `Left`/`Right` scroll back/forward through retained history (issue
+#77, see below).
 `--sensitivity FLOAT` sets the starting value (default 1.0); raises it to
 register quieter/softer playing more readily. Current value shown in the
 status line (`sens=`).
@@ -274,6 +277,31 @@ pre-recorded audio file instead of live input — no terminal window, no
 mic, just a `dump_ansi()`-format text dump written on completion (same
 convention/default path as `tab`'s own on-quit dump).
 
+**`R`-key non-causal rhythm re-analysis + Left/Right scrollback (issue
+#77), `tab`-view-only, freeze-mode-only.** While frozen (`Space`), `R`
+(remappable, `[keybinds].rhythm_reanalysis`, default `"r"`) re-runs the
+same non-causal machinery `virtualnote transcribe` already uses offline
+(`duration_tracker.DurationTracker.finalize_noncausal()` +
+`librosa.beat.beat_track()`) against a rolling live buffer of the last
+`rhythm_reanalysis_window_seconds` (Settings-screen numeric field,
+default 60s) of already-computed per-hop data — never raw audio, and
+never a redo of pitch/chord detection itself, only the rhythm layer on
+top of it. On press, a throwaway thread snapshots the buffer and
+recomputes off both the render and analysis threads (`rhythm=
+recomputing...` shown in the status line meanwhile); once done, already-
+displayed duration glyphs are corrected in place
+(`TabDisplay.correct_duration()`) and the barline set within the
+recomputed window is replaced (`erase_barlines()`/`insert_barline()`) —
+the corrected tempo estimate also takes over the `tempo=` status field
+until the view is next unfrozen. Independently, `Left`/`Right` scroll
+back/forward through `TabDisplay`'s retained history
+(`tab_scrollback_seconds`, default 300s) via `render(scroll_offset=N)`;
+current offset shown in the status line (`scrollback=-N`) when nonzero.
+Both reset the instant `Space` un-freezes (no catch-up of anything that
+happened while frozen, same convention freeze itself already follows).
+See Key design decisions for the threading approach and Known
+limitations for what's out of scope.
+
 `--source {mic,loopback}` (default `mic`) selects the input: `loopback`
 listens to the computer's own audio output instead of the microphone, via
 the PipeWire/PulseAudio monitor of the default sink (Linux only — errors
@@ -298,11 +326,10 @@ file while the app is running, no restart needed):
   `chord_mode_toggle`, `notehead_style_toggle`, `legend_toggle`,
   `freeze_toggle`, `rhythm_reanalysis`) to a different single character,
   e.g. `source_toggle = "x"`. `rhythm_reanalysis` (default `"r"`) is the
-  tab view's not-yet-built offline-style rhythm re-analysis trigger — this
-  entry is the settings/config plumbing for it, wired up ahead of the
-  feature itself. The status line's hotkey hints (`(m)`, `(p)`, etc.)
-  reflect the remap. Editable live from the menu's Settings screen (below),
-  or by hand.
+  tab view's freeze-mode-only non-causal rhythm re-analysis trigger (issue
+  #77). The status line's hotkey hints (`(m)`, `(p)`, etc.) reflect the
+  remap. Editable live from the menu's Settings screen (below), or by
+  hand.
 - `[colors]` — override a note's hue (degrees, 0–360) by name, either
   sharp or flat spelling, e.g. `C = 200` or `"F#" = 45`. Saturation and
   octave-driven lightness are untouched by the override. Also editable
@@ -314,19 +341,19 @@ file while the app is running, no restart needed):
   — see `menu_display._resolve_perf_mode()`);
   `rhythm_reanalysis_window_seconds` (default `60.0`, valid range 5–1800,
   step 5) — how many seconds of recent audio/data the tab view's `R`
-  offline-style rhythm re-analysis reaches back over, see
+  non-causal rhythm re-analysis (issue #77) reaches back over, re-read
+  live from `main.ReanalysisBuffer` on every hop so a Settings-screen edit
+  takes effect without restarting, see
   `config.RHYTHM_REANALYSIS_WINDOW_SECONDS`; `tab_scrollback_seconds`
   (default `300.0`, valid range 30–3600, step 30) — how far back the tab
   view's freeze-mode Left/Right scrollback can browse, see
   `config.TAB_SCROLLBACK_SECONDS`. Both numeric fields are read/written
   purely through `config_store.py`'s already-generic
-  `preference()`/`set_preference()`, no bespoke accessor, since neither
-  the re-analysis nor the scrollback feature itself is built yet — this is
-  just their settings/config plumbing. The rest of the table is still
-  reserved for future settings (e.g. #40's still-unwired global `H`
-  keybind-legend on/off persistence); see `config_store.py`'s docstring
-  for the full schema and `docs/DECISIONS.md` for why the schema stops
-  here for now.
+  `preference()`/`set_preference()`, no bespoke accessor needed. The rest
+  of the table is still reserved for future settings (e.g. #40's
+  still-unwired global `H` keybind-legend on/off persistence); see
+  `config_store.py`'s docstring for the full schema and
+  `docs/DECISIONS.md` for why the schema stops here for now.
 
 **Settings screen (issue #43).** `virtualnote`'s menu has a `Settings`
 entry (same tier as any tool) that opens an interactive editor
@@ -704,11 +731,63 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   real time regardless of where the notes actually fall in the file —
   without the override, `dump_ansi()`'s `t` column would read ~0.00s for
   an entire transcription.
-- `librosa` is isolated to `batch_transcribe.py` alone, never imported by
-  `main.py` or any live-path module — a dependency chosen purely for
-  offline convenience (`librosa.beat.beat_track()`'s tempo tracker) has no
-  business affecting the live/Pi-constrained path's install footprint or
-  import time.
+- `librosa` is isolated to `batch_transcribe.py` and `rhythm_reanalysis.py`
+  — never imported by `main.py` or `analysis_loop()`'s own per-hop path
+  directly. `rhythm_reanalysis.py` is a deliberate second, narrowly-scoped
+  exception to "librosa only in batch_transcribe.py" (issue #77): its
+  `recompute()` reuses the exact same non-causal machinery
+  (`DurationTracker.finalize_noncausal()` + `librosa.beat.beat_track()`)
+  batch already uses, triggered live by the `R` key but never running on
+  the live per-hop path itself — only on a throwaway thread, at explicit
+  user request, while the view is frozen. Extending batch's own already-
+  accepted offline use of librosa to this one additional on-demand-replay
+  trigger was judged simpler and more consistent than either duplicating
+  `finalize_noncausal()`'s non-librosa half into a third place or routing
+  the live `R` press through `batch_transcribe.py` itself (which assumes
+  a whole preloaded file, not a rolling live buffer — see
+  docs/research/live-noncausal-rhythm-reanalysis.md's Q3).
+- Issue #77's `R`-key recompute runs on a throwaway `threading.Thread`
+  spawned the instant `R` is pressed, not routed through the analysis
+  thread via a request/response queue (the other option
+  docs/research/live-noncausal-rhythm-reanalysis.md's Q5 considered and
+  rejected) — the analysis thread's own per-hop cadence must never stall
+  on a recompute that can take up to ~1.3s at the largest configured
+  window (benchmarked in that research doc), and the render loop has
+  nothing else to do while frozen anyway. The rolling buffer itself
+  (`main.ReanalysisBuffer`) still lives on and is appended to only by the
+  analysis thread, right alongside its other per-hop trackers -- that's
+  the one place that already computes every value the recompute needs
+  (mono/chord magnitude+onset signals, chroma-flux novelty) each hop. The
+  render thread's throwaway thread reads a plain `list(deque)` snapshot of
+  it directly rather than through a second queue -- safe against
+  corruption from a concurrent append under CPython's GIL (deque
+  operations are individually atomic) but not a guaranteed fixed-point-
+  in-time read; acceptable because `R` only ever fires while frozen, so a
+  slightly stale snapshot is a low-stakes imprecision, not a correctness
+  bug.
+- `rhythm_reanalysis.recompute()` is a pure function (`HopRecord`s +
+  `hop_seconds`/`beats_per_bar` in, a `RecomputeResult` or `None` out) with
+  no thread/queue awareness of its own, following this codebase's existing
+  "pure logic unit-tested, real I/O/threading smoke-tested" convention
+  (see `menu_animation.detect_perf_mode()`/`_decide_perf_mode()` for the
+  precedent) -- `main.py`'s `_handle_reanalysis_key()`/
+  `_apply_reanalysis_result()` own all the threading/queue/`TabDisplay`
+  side effects instead.
+- The `R`-key recompute's corrected tempo estimate does take over the
+  `tab` view's `tempo=` status field (not just duration glyphs/barlines)
+  until the next unfreeze -- while frozen, the live `bpm_estimate` isn't
+  advancing anyway (the view has stopped draining `result_queue`), so
+  there's no live value it could be conflicting with or masking.
+- Barline reconciliation (`erase_barlines()`+`insert_barline()`) only
+  happens when the recompute actually produced a `bpm_estimate` -- with
+  none (e.g. a near-silent buffered window), `recompute()` can't place any
+  corrected barlines either, and erasing the window's existing
+  (live-estimated, imperfect but non-empty) barlines with nothing to
+  replace them would be strictly worse than leaving them alone. Corrected
+  note durations apply regardless of whether a bpm estimate came back,
+  since they already fall back to the same `DEFAULT_DURATION_CLASS` the
+  live path uses when no bpm is available -- applying them is never worse
+  than what's already displayed.
 
 ## Known limitations / things learned
 
@@ -850,6 +929,50 @@ One-liners; full detail in `docs/DECISIONS.md`.
   inside a terminal's cell grid, so this is a terminal/font-stack property,
   not something fixable from the app layer — see `docs/DECISIONS.md` for
   the full investigation.
+- Issue #77's `R`-key recompute is scoped strictly to whatever's currently
+  sitting in `main.ReanalysisBuffer` — it never redoes pitch/chord
+  detection itself, only re-runs the rhythm layer (durations/tempo/
+  barlines) against already-detected note events. A wrong pitch/chord
+  detection upstream (e.g. one of this project's already-documented
+  octave-doubling or harmonic-collision limitations above) stays wrong;
+  `R` can only correct *when* a note started/stopped and how the beat grid
+  falls, not *what* note it was.
+- A note still genuinely sounding at the exact moment `R` is pressed has
+  no true decay boundary inside the buffered window and gets truncated to
+  whatever's currently visible — the same class of edge case
+  `duration_tracker.DEFAULT_DURATION_CLASS`'s "still sounding at quit"
+  fallback already documents, not a new failure mode. Mitigated in the
+  common case (freezing usually happens after playing has already paused)
+  but not eliminated (see docs/research/live-noncausal-rhythm-
+  reanalysis.md's Q3).
+- A mono or chord note whose true onset happened *before* the buffered
+  window started (i.e., it's already sounding on the very first buffered
+  hop, with no onset event inside the window at all) can't be corrected —
+  `rhythm_reanalysis.recompute()` has no onset to anchor a duration
+  measurement to for it, so it's silently skipped rather than guessed at.
+  Widening `rhythm_reanalysis_window_seconds` reduces how often this
+  happens but can't eliminate it outright (there's always some true start
+  of the buffer).
+- `chroma_flux()`'s coarse 12-bin chroma-difference novelty signal, fed
+  directly to `librosa.beat.beat_track()` as `onset_envelope=` (rather
+  than librosa's own full mel-spectrogram-based `onset_strength()`, which
+  needs raw audio this feature deliberately never buffers — see
+  docs/research/live-noncausal-rhythm-reanalysis.md's Q1), is a confirmed
+  free win on frame-rate alignment (same `hop_length`/`sr` by
+  construction) but an open empirical question on tempo-tracking
+  *accuracy* specifically — not yet measured against real playing beyond
+  this feature's own synthetic unit tests (`tests/test_rhythm_
+  reanalysis.py`'s periodic-impulse convergence check).
+- No "quality/time-budget" dial beyond `rhythm_reanalysis_window_seconds`
+  itself ships with this feature — investigated and rejected during design
+  (docs/research/live-noncausal-rhythm-reanalysis.md's Q4): neither
+  `DurationTracker.finalize_noncausal()` nor `librosa.beat.beat_track()`
+  has a genuine internal speed/accuracy tradeoff to expose once given a
+  fixed input; window length (already user-facing) is the one real lever
+  confirmed by direct benchmarking. A multi-hypothesis ensemble pass
+  (several `beat_track()` calls at different `start_bpm` priors,
+  reconciled by vote) was identified as a real, affordable future
+  accuracy improvement but isn't built — out of this ticket's scope.
 
 ## Working practices
 

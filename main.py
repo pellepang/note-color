@@ -20,6 +20,10 @@ starting value for 'tab'. 'tab' view only: N toggles the notehead render
 style (symbol glyph <-> bare letter name), L toggles the clef+note-letter
 legend column on/off, Space freezes/un-freezes the view (scrolling and
 per-column dimming pause; the pipeline keeps running in the background).
+'tab' view only, freeze-mode-only (issue #77): R triggers a non-causal
+rhythm re-analysis over a rolling buffer of recent hops, correcting
+duration glyphs/tempo/barlines already on screen in place; Left/Right
+scroll back/forward through retained note-column history.
 Global across every terminal view (issue #40): '|' returns to virtualnote's
 menu (a harmless quit when this module is run standalone via `main.py`,
 which has no menu), H toggles a context-sensitive keybind-legend line
@@ -35,6 +39,7 @@ import select
 import sys
 import threading
 import time
+from collections import deque
 from typing import NamedTuple, Optional
 
 import numpy as np
@@ -43,6 +48,7 @@ import batch_transcribe
 import chroma
 import config
 import multipitch
+import rhythm_reanalysis
 from config_store import store
 from audio_capture import AudioCapture, resolve_loopback_device
 from pitch_detect import compute_spectrum, detect_pitch
@@ -88,6 +94,63 @@ class Sensitivity:
 
     def adjust(self, factor):
         self.value = min(max(self.value * factor, SENSITIVITY_MIN), SENSITIVITY_MAX)
+
+
+class ReanalysisBuffer:
+    """Rolling per-hop history feeding the `tab` view's `R`-key non-causal
+    rhythm re-analysis (issue #77) -- owned and appended to by the
+    analysis thread alongside its other per-hop trackers
+    (mono_duration_tracker/chord_duration_tracker/tempo_tracker, see
+    analysis_loop()), read via `snapshot()` from the render thread's
+    throwaway recompute thread (see `_handle_reanalysis_key()`). Holds
+    `rhythm_reanalysis.HopRecord`s -- cheap derived per-hop values, not raw
+    audio (see docs/research/live-noncausal-rhythm-reanalysis.md's Q1/Q2).
+
+    Bounded by `config_store.store.preference("rhythm_reanalysis_window_seconds",
+    ...)`, re-checked (cheap, mtime-checked, same hot-reload convention as
+    every other preference this codebase reads every hop/frame) on every
+    append so a live Settings-screen edit takes effect on the very next
+    hop with no restart -- widening the window only grows *future*
+    retention; a moment when the window was smaller has already discarded
+    whatever's now outside even that older, smaller bound, so growing the
+    window doesn't retroactively recover history that was never kept.
+
+    `snapshot()` returns a plain list copy of the underlying deque -- safe
+    against corruption from a concurrent append under CPython's GIL, but
+    not a guaranteed fixed-point-in-time read (an append mid-copy could
+    interleave). Acceptable because `R` only ever fires while frozen --
+    see docs/research/live-noncausal-rhythm-reanalysis.md's Q5 for the
+    full reasoning behind this choice over a request/response queue pair
+    into the analysis thread."""
+
+    def __init__(self, hop_seconds):
+        self.hop_seconds = hop_seconds
+        self._window_hops = 1
+        self._deque = deque(maxlen=self._window_hops)
+
+    def append(self, record):
+        window_hops = max(1, int(round(
+            store.preference("rhythm_reanalysis_window_seconds", config.RHYTHM_REANALYSIS_WINDOW_SECONDS)
+            / self.hop_seconds
+        )))
+        if window_hops != self._window_hops:
+            self._deque = deque(self._deque, maxlen=window_hops)
+            self._window_hops = window_hops
+        self._deque.append(record)
+
+    def snapshot(self):
+        return list(self._deque)
+
+
+class ReanalysisState:
+    """Shared between the render thread ('R' spawns the throwaway
+    recompute thread and reads .in_progress every frame for the status
+    line) and that thread itself (clears .in_progress when done) -- plain
+    attribute access is safe under CPython's GIL, same rationale as
+    Sensitivity/SourceState above."""
+
+    def __init__(self):
+        self.in_progress = False
 
 
 class RawKeys:
@@ -233,7 +296,7 @@ class RenderItem(NamedTuple):
     bpm_estimate: Optional[float]  # live tempo estimate, or None before enough history exists
 
 
-def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
+def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, reanalysis_buffer):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
     low_ring = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
@@ -376,6 +439,22 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity):
                 }
             )
 
+        # Issue #77: append this hop's cheap derived values (not raw audio,
+        # see rhythm_reanalysis.py's docstring) to the rolling buffer the
+        # tab view's 'R' non-causal recompute snapshots from. raw_stack --
+        # not note_stack -- for chord_notes, since it's the plain
+        # (pitch_class, octave, confidence) shape rhythm_reanalysis.recompute()
+        # reconstructs magnitude arrays from, mirroring how
+        # chord_duration_tracker above is already fed from the same source.
+        reanalysis_buffer.append(
+            rhythm_reanalysis.HopRecord(
+                hop_index=hop_index,
+                mono=(pitch_class, octave, rms, is_onset) if pitch_class is not None else None,
+                chord_notes=tuple((e["pitch_class"], e["octave"], e["confidence"]) for e in raw_stack),
+                chroma_novelty=chroma_novelty,
+            )
+        )
+
         item = RenderItem(target_rgb, is_onset, label, freq, confidence, rms, fifths_idx, pitch_class, octave,
                            note_stack, chord_name, duration_hops, bpm_estimate)
         hop_index += 1
@@ -477,6 +556,87 @@ def _handle_freeze_key(key, frozen):
     catch-up of anything that happened while frozen."""
     bound = store.keybind("freeze_toggle")
     return not frozen if (key is not None and key.lower() == bound.lower()) else frozen
+
+
+def _handle_scroll_keys(key, frozen, scroll_offset, max_offset):
+    """'tab' view only: Left/Right scroll back/forward through TabDisplay's
+    retained history while frozen (issue #77) -- a no-op outside freeze,
+    since scroll_offset is meaningless against a live-scrolling tail (and
+    run_terminal_tab resets it to 0 the moment freeze is turned back off,
+    same "no catch-up" convention Space itself already follows). `key` is
+    the raw "LEFT"/"RIGHT" token RawKeys.poll() returns. `max_offset`
+    should be `len(display.entries) - 1` -- offset can't hide every
+    retained entry off the tail; at least one must stay visible to play
+    the role of "the newest visible column" for that offset. Left
+    increases the offset (scrolls further back); Right decreases it
+    (scrolls back toward live)."""
+    if not frozen:
+        return scroll_offset
+    if key == "LEFT":
+        return min(scroll_offset + 1, max(max_offset, 0))
+    if key == "RIGHT":
+        return max(scroll_offset - 1, 0)
+    return scroll_offset
+
+
+def _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, result_queue, beats_per_bar,
+                            hop_seconds):
+    """'tab' view only: R triggers the non-causal rhythm re-analysis
+    (issue #77) -- a no-op unless the view is currently frozen, or a
+    recompute is already running (reanalysis_state.in_progress guards
+    against stacking up redundant recomputes on repeated presses).
+
+    Spawns a throwaway thread rather than routing the recompute through
+    the analysis thread: per docs/research/live-noncausal-rhythm-
+    reanalysis.md's Q5, the analysis thread's own per-hop cadence must
+    never stall on a recompute that can take up to ~1.3s at the largest
+    configured window, and the render loop has nothing else to do while
+    frozen anyway. `reanalysis_buffer.snapshot()` is read once, up front,
+    on the render thread itself -- a plain deque copy is safe (if not
+    perfectly point-in-time) against the analysis thread's concurrent
+    appends under CPython's GIL; see ReanalysisBuffer's own docstring.
+    The spawned thread then does the actual (slower) recompute work
+    entirely off both the render and analysis threads, and hands its
+    result back via `result_queue` (a single-slot queue.Queue, the same
+    always-overwritten idiom this codebase already uses for the analysis
+    -> render handoff) -- run_terminal_tab's main loop polls it
+    non-blockingly once per iteration."""
+    bound = store.keybind("rhythm_reanalysis")
+    if key is None or key.lower() != bound.lower() or not frozen or reanalysis_state.in_progress:
+        return
+    reanalysis_state.in_progress = True
+    hop_records = reanalysis_buffer.snapshot()
+
+    def _worker():
+        try:
+            result = rhythm_reanalysis.recompute(hop_records, hop_seconds, beats_per_bar)
+            _overwrite(result_queue, result)
+        finally:
+            reanalysis_state.in_progress = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _apply_reanalysis_result(display, result, hop_seconds):
+    """Applies one rhythm_reanalysis.RecomputeResult to the frozen
+    TabDisplay -- called from run_terminal_tab's main loop once a pending
+    recompute's result shows up on the reanalysis result queue. Corrected
+    note durations always apply (they fall back to the same
+    DEFAULT_DURATION_CLASS the live path already uses when no bpm was
+    available, so applying them is never worse than what's already
+    displayed). Barline reconciliation only happens when the recompute
+    actually produced a bpm estimate -- with none, recompute() can't place
+    any corrected barlines either (see its own docstring), and erasing the
+    window's existing (live-estimated, imperfect but non-empty) barlines
+    with nothing to replace them would be strictly worse than leaving them
+    alone. `end_t` is nudged one hop_seconds past the window's last hop so
+    a barline landing exactly at the final buffered hop is still erased."""
+    for note in result.corrected_notes:
+        display.correct_duration(note.pitch_class, note.octave, note.onset_time, note.duration_class)
+    if result.bpm_estimate is not None:
+        display.erase_barlines(result.window_start_time, result.window_end_time + hop_seconds)
+        for t in result.barline_times:
+            display.insert_barline(t)
 
 
 def _fade_toward(value, target, dt, tau_ms):
@@ -649,10 +809,12 @@ def _tab_note_label(pitch_class, octave):
 
 
 def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state,
-                      time_signature=config.DEFAULT_TIME_SIGNATURE):
+                      reanalysis_buffer, time_signature=config.DEFAULT_TIME_SIGNATURE):
     from terminal_tab_display import TabDisplay
 
-    display = TabDisplay(fps=config.TAB_FPS)
+    display = TabDisplay(fps=config.TAB_FPS, scrollback_seconds=store.preference(
+        "tab_scrollback_seconds", config.TAB_SCROLLBACK_SECONDS
+    ))
     dt = 1.0 / display.fps
     fix_interval = 1.0 / config.TAB_FIX_HOPS_PER_SEC
     time_since_tick = 0.0
@@ -667,6 +829,20 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     legend_on = config.TAB_DEFAULT_LEGEND_ON
     frozen = False
     help_legend_on = True
+    # Issue #77: R-key non-causal rhythm re-analysis + Left/Right scrollback,
+    # both freeze-mode-only. reanalysis_state/reanalysis_result_queue are
+    # this function's own, local to one run_terminal_tab call (unlike
+    # reanalysis_buffer, which outlives it on SessionState) -- a fresh pair
+    # every time 'tab' is entered is correct, there's nothing to preserve
+    # across a '|' back-to-menu round trip the way the buffer itself is.
+    reanalysis_state = ReanalysisState()
+    reanalysis_result_queue = queue.Queue(maxsize=1)
+    scroll_offset = 0
+    # Corrected tempo from the most recent successful reanalysis, shown in
+    # place of the live bpm_estimate once available -- see the tempo_str
+    # computation below. Reset to None on unfreeze, same "no catch-up"
+    # convention scroll_offset follows.
+    reanalysis_bpm_estimate = None
 
     # time_signature arrives pre-validated as an (int, int) tuple from the
     # CLI layer (main._parse_time_signature / virtualnote.py), not a
@@ -697,10 +873,32 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             chord_mode = _handle_chord_mode_key(key, chord_mode)
             notehead_style = _handle_notehead_style_key(key, notehead_style)
             legend_on = _handle_legend_key(key, legend_on)
+            was_frozen = frozen
             frozen = _handle_freeze_key(key, frozen)
+            if was_frozen and not frozen:
+                # Un-freezing resumes live immediately -- no catch-up of
+                # anything that happened while frozen, same convention
+                # Space itself already follows (see _handle_freeze_key).
+                # A stale scroll position or a stale corrected-tempo
+                # display would both be exactly that kind of catch-up.
+                scroll_offset = 0
+                reanalysis_bpm_estimate = None
+            scroll_offset = _handle_scroll_keys(key, frozen, scroll_offset, len(display.entries) - 1)
+            _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, reanalysis_result_queue,
+                                    beats_per_bar, hop_seconds)
             help_legend_on = _handle_help_legend_key(key, help_legend_on)
             if _handle_back_to_menu_key(key):
                 return "menu"
+
+            try:
+                reanalysis_result = reanalysis_result_queue.get_nowait()
+            except queue.Empty:
+                reanalysis_result = None
+            if reanalysis_result is not None:
+                _apply_reanalysis_result(display, reanalysis_result, hop_seconds)
+                if reanalysis_result.bpm_estimate is not None:
+                    reanalysis_bpm_estimate = reanalysis_result.bpm_estimate
+
             got_new = False
             is_onset = False
             # Frozen: don't drain result_queue at all, so the view keeps
@@ -770,8 +968,19 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                         display.push_barline()
                         beats_accumulated -= beats_per_bar
 
-            tempo_str = f"{bpm_estimate:.0f}" if bpm_estimate else "--"
+            # A completed reanalysis's corrected tempo takes over the
+            # display until the next unfreeze -- while frozen, the live
+            # bpm_estimate isn't advancing anyway (result_queue isn't
+            # being drained), so there's no "which is fresher" ambiguity.
+            display_bpm = reanalysis_bpm_estimate if reanalysis_bpm_estimate is not None else bpm_estimate
+            tempo_str = f"{display_bpm:.0f}" if display_bpm else "--"
             time_str = f"{beats_numerator}/{beats_denominator}"
+
+            reanalysis_hint = ""
+            if reanalysis_state.in_progress:
+                reanalysis_hint = "  rhythm=recomputing..."
+            elif scroll_offset:
+                reanalysis_hint = f"  scrollback=-{scroll_offset}"
 
             mode_hint = (f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  "
                          f"notes={notehead_style}({_key_hint('notehead_style_toggle')})  "
@@ -781,6 +990,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 "up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
                 f"{_key_hint('chord_mode_toggle')}=mode", f"{_key_hint('notehead_style_toggle')}=notes",
                 f"{_key_hint('legend_toggle')}=stafflegend", f"{_key_hint('freeze_toggle')}=freeze",
+                f"{_key_hint('rhythm_reanalysis')}=reanalyze(frozen)", "left/right=scrollback(frozen)",
             ]) if help_legend_on else ""
             if chord_mode:
                 notes = [
@@ -807,9 +1017,10 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
 
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
-                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
+                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}{reanalysis_hint}"
+                            f"  [{scroll_mode}] (Ctrl+C to quit)")
                 display.render(status, chord_mode=True, notehead_style=notehead_style, legend_on=legend_on,
-                                frozen=frozen, help_legend=help_legend)
+                                frozen=frozen, help_legend=help_legend, scroll_offset=scroll_offset)
             else:
                 glyph_rgb = _tab_note_rgb(pitch_class)
                 tab_label = _tab_note_label(pitch_class, octave)
@@ -825,9 +1036,10 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                             display.push(pitch_class, octave, glyph_rgb, tab_label)
 
                 status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
-                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}  [{scroll_mode}] (Ctrl+C to quit)")
+                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}{reanalysis_hint}"
+                            f"  [{scroll_mode}] (Ctrl+C to quit)")
                 display.render(status, chord_mode=False, notehead_style=notehead_style, legend_on=legend_on,
-                                frozen=frozen, help_legend=help_legend)
+                                frozen=frozen, help_legend=help_legend, scroll_offset=scroll_offset)
             time.sleep(dt)
     except KeyboardInterrupt:
         return "quit"
@@ -936,6 +1148,7 @@ class SessionState:
         self.result_queue = None
         self.stop_event = None
         self.analysis_thread = None
+        self.reanalysis_buffer = None
 
     def ensure_started(self):
         """Idempotent: a no-op once the capture/analysis thread already
@@ -954,9 +1167,15 @@ class SessionState:
         self.capture.start()
         self.result_queue = queue.Queue(maxsize=1)
         self.stop_event = threading.Event()
+        # Issue #77: owned by the analysis thread for its whole life, same
+        # as the trackers analysis_loop() constructs for itself -- created
+        # here (not inside analysis_loop()) so run_terminal_tab (via
+        # run_session, below) can reach the same instance to snapshot from.
+        self.reanalysis_buffer = ReanalysisBuffer(config.BLOCK_SIZE / config.SAMPLE_RATE)
         self.analysis_thread = threading.Thread(
             target=analysis_loop,
-            args=(self.capture, self.result_queue, self.stop_event, self.color_scheme, self.sensitivity),
+            args=(self.capture, self.result_queue, self.stop_event, self.color_scheme, self.sensitivity,
+                  self.reanalysis_buffer),
             daemon=True,
         )
         self.analysis_thread.start()
@@ -990,7 +1209,8 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
         return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state)
     if view == "tab":
         return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
-                                 session.capture, session.source_state, time_signature=time_signature)
+                                 session.capture, session.source_state, session.reanalysis_buffer,
+                                 time_signature=time_signature)
     return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state)
 
 
