@@ -675,6 +675,122 @@ inaudible, not a realistic harmonic profile, and out of this fix's scope.
 `tests/test_pitch_detect.py::test_octave2_harmonic_rich_tone_not_octave_doubled`
 is the regression test for the 6 originally-reported frequencies.
 
+### Follow-up: the fix itself regressed real-mic accuracy, root-caused and recalibrated (issue #69, round 2)
+
+A second real speaker→mic re-verification round found the fix above made
+things *worse*, not better: octave-2 recall dropped from 11/12 to 8/12
+notes ever detected (four notes, including three that were previously
+100% accurate, went completely undetected), overall chromatic recall fell
+from 97.9% to 91.7%, and several notes that were 100% accurate *before*
+this fix — D#2, E2, G2 — became unstable (15-34% steady-state accuracy)
+afterward, alongside a new regression on octave-3's C3. This wasn't "not
+fully fixed" — it was the fix actively breaking previously-correct
+detections, so the issue was reopened rather than left closed.
+
+**First finding: the existing regression test doesn't actually exercise
+the fix.** `test_octave2_harmonic_rich_tone_not_octave_doubled`'s profile
+(`harmonics=(1.0, 0.5, 1/3, 0.25)`, fundamental dominant, matching
+`chroma.HARMONIC_WEIGHTS`) turns out to already detect correctly with the
+subharmonic check fully disabled (`subharmonic_max_multiple=0`) — the
+scan's own ascending-threshold-then-walk-to-local-minimum behavior was
+already enough for this profile, so the test was validating "detection
+still works," not "the correction still fires." A genuinely adversarial
+profile was needed to reproduce the *original* bug reliably at all:
+`harmonics=(0.0, 0.1, 1.0, 0.2)` (fundamental fully silent, 3rd harmonic
+dominant) reliably octave-doubles (or worse — lands on the 3rd harmonic,
+~1902 cents off) across all 12 octave-2 pitch classes with the check
+disabled, and is what
+`test_octave2_silent_fundamental_dominant_3rd_harmonic_not_octave_doubled`
+now formalizes.
+
+**Root cause of the regression, found by reproducing it synthetically.**
+Sweeping a dominant-fundamental octave-3 tone (the same
+`chroma.HARMONIC_WEIGHTS`-shaped profile, fundamental strongest) plus
+additive white noise (0.05 amplitude) and a 60Hz+120Hz "mains hum"
+component (standing in for the mic self-noise/room rumble/electrical hum
+a real recording — but not a clean synthesized test tone — actually
+contains) reproduced the regression directly: a C3 tone's true tau (≈169
+samples at `SAMPLE_RATE=22050`) was found correctly by the ascending scan,
+but at only a middling confidence (refined CMND ≈0.115, close to
+`YIN_THRESHOLD=0.12` — a real, noisy signal, not the near-zero CMND a
+clean synthetic tone produces). The subharmonic check then examined 2×
+that tau (≈337 samples, landing just inside `tau_max≈339` — the boundary
+implied by `FMIN=65Hz` for `SAMPLE_RATE=22050`/`WINDOW_SIZE=2048`) and
+found a *deeper* dip there (refined CMND ≈0.017) — not because of any
+real periodicity at that lag, but because broadband low-frequency content
+sitting near the fmin edge produces its own coincidentally-deep dip
+there, independent of what note is actually playing. `YIN_SUBHARMONIC_
+MARGIN=0.5` (a switch needs the candidate to be only ~2x deeper) accepted
+that dip immediately, misreading a genuinely-correct C3 as C2 — an octave
+error inflicted *by the correction itself*, not the original bug. This
+mechanism is structural, not a one-off coincidence: it only affects
+octaves whose true tau's 2x/3x/4x multiple still lands inside `tau_max`
+(octave-2 notes' own tau already sits close to `tau_max`, so their own
+multiples always exceed it and the subharmonic check is a no-op *for an
+already-correct octave-2 candidate* regardless of margin — matching why
+the real-world regression report's directly-broken notes clustered at the
+octave-2/octave-3 boundary specifically). It's also, structurally, exactly
+the classic YIN "subharmonic error" pitfall the original paper's
+ascending-scan-plus-first-sub-threshold-dip heuristic exists to avoid in
+the first place (CMND is known to trend toward spuriously low values at
+larger lags, independent of real periodicity) — the original #69 fix
+reintroduced a scoped version of that same pitfall by deliberately
+searching larger lags for a "deeper" dip.
+
+**The fix: recalibrate `YIN_SUBHARMONIC_MARGIN` from 0.5 to 0.1** (a
+switch now needs the multiple's dip to be ~10x deeper, not ~2x), backed
+by adversarial-testing data that separates the two failure modes cleanly:
+sweeping fundamental weight from 0 up to the point genuine octave-doubling
+stops occurring at all (across three single-extra-harmonic profiles —
+2nd, 3rd, and 4th harmonic each tested alone) found genuine subharmonic-
+lock ratios (best-multiple-CMND / candidate-CMND) never exceeding ~0.08;
+stress-testing the mains-hum/noise regression mechanism above across all
+12 octave-3 notes, hum amplitudes 0.2-1.2, both 50Hz and 60Hz mains
+frequencies, and 8+ noise seeds each found the false-positive ratio never
+dropped below ~0.14. A margin of 0.1 sits with real headroom inside that
+gap on both sides, and — not a coincidence — lands almost exactly on this
+fix's own original "~10x+ deeper in the reported failure cases" empirical
+observation above, which the 0.5 value never actually reflected.
+`YIN_SUBHARMONIC_SKIP_CMND` was checked and left unchanged (0.01): it
+doesn't discriminate this regression at all, since the false-positive
+candidate's own CMND (≈0.115 in the C3 case) sits nowhere near that
+threshold — it's a genuinely correct but noise-degraded detection, not an
+already-ultra-confident one the skip gate was ever meant to guard.
+
+Re-validated after recalibration: the adversarial silent-fundamental
+octave-2 sweep above still corrects all 12 pitch classes (unaffected —
+margin tightening only makes the check *more* conservative, never
+prevents a genuine ≥10x-deeper correction); a 20-seeds-per-note stability
+sweep across all 12 octave-3 notes under the hum+noise regression
+mechanism holds 239/240 trials within 50 cents (the one residual failure,
+C#3 seed 1, reproduces identically with the subharmonic check fully
+disabled — confirmed unrelated to this fix, an ordinary base-YIN noise
+robustness limit, not something introduced or fixable here). Full
+`pytest tests/` suite (302 tests, including both new adversarial
+parametrized tests above plus every pre-existing #69 regression test)
+green throughout.
+`tests/test_pitch_detect.py::test_octave3_hum_and_noise_does_not_flip_already_correct_detection`
+is the regression test for this round.
+
+**Known residual risk, explicitly not closed out by this round.** All of
+the above — both the original bug's reproduction and this round's
+regression reproduction — is synthetic. This repo's `--source loopback`
+acoustic pipeline test (`scripts/acoustic_pipeline_test.py`) was re-run as
+a guard and stayed at 100% recall/100% steady-state accuracy on the
+`chromatic` suite, same as before this round's changes — but loopback
+audio has no physical mic frequency-response coloration or real room
+noise at all, so (as already noted when that test infrastructure was
+built) it cannot reproduce the real regression this round investigates,
+and passing it is not evidence the real-mic regression is fixed. The
+synthetic mains-hum/noise profile here is a plausible, reasoned proxy for
+what a real mic's self-noise/room rumble/electrical hum could look like
+to YIN's CMND curve — not a measurement of an actual mic. A real
+speaker→mic re-verification, the same kind that caught this regression in
+the first place, is the only way to confirm this recalibration holds up
+in the field; issue #69 is being left open pending that, not closed on
+synthetic evidence alone given this exact issue's own two-round history
+of "looked fixed synthetically, broke for real."
+
 ## Harmonic-pruning evaluation order fixed, not tolerance (issues #67/#68)
 
 Issue #67's own hypothesis — that a fixed `harmonic_tolerance_cents`

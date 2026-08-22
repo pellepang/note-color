@@ -346,7 +346,19 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   what keeps octave 3-5 (and plain sine tones) from regressing — see
   docs/DECISIONS.md for the full empirical root-cause writeup, including
   why a naive "just compare raw CMND depth" version of this same idea
-  regressed already-correct detections.
+  regressed already-correct detections. A subsequent real-mic
+  re-verification round found the fix's original `YIN_SUBHARMONIC_MARGIN`
+  (0.5, i.e. only ~2x deeper) far too loose: ordinary broadband
+  low-frequency content in a real recording (mic self-noise, room rumble,
+  mains hum) can produce its own coincidentally-deep CMND dip near
+  `tau_max` (the fmin edge), which a 2x margin accepted readily —
+  misreading already-correct octave-3 detections down an octave.
+  Recalibrated to 0.1 (~10x deeper), backed by adversarial synthetic
+  testing that separates genuine subharmonic-lock ratios (<=0.08) from
+  mains-hum/noise false-positive ratios (floor ~0.14) with real headroom
+  on both sides — see docs/DECISIONS.md's follow-up entry. Only confirmed
+  synthetically; a real-mic re-verification is still pending (see Known
+  limitations).
 - Microphone is the default input; `--source loopback` is opt-in and
   Linux-only (PipeWire/PulseAudio monitor), so portability of the default
   path is unaffected.
@@ -668,6 +680,19 @@ One-liners; full detail in `docs/DECISIONS.md`.
   conditions" still covers everything else, e.g. C#2/D2/G#2 sometimes
   going silence-gated in the same acoustic test, which is an amplitude/
   sensitivity-threshold question, not a YIN algorithm bug.)
+- Issue #69's octave-doubling fix has round-tripped through real-mic
+  verification twice: it fixed the originally-reported failures, a
+  follow-up real-mic check found it had regressed other, previously-
+  correct octave-2/3 detections, and that regression was root-caused and
+  fixed via a margin recalibration (`YIN_SUBHARMONIC_MARGIN` 0.5 → 0.1 —
+  see Key design decisions and docs/DECISIONS.md). That recalibration is
+  validated only against adversarial *synthetic* signals (deliberately
+  constructed to approximate real mic self-noise/room rumble/mains hum)
+  plus `--source loopback` (which cannot reproduce this failure mode at
+  all — no physical mic coloration). A real speaker→mic re-verification —
+  the same kind that caught the regression the first time — has not yet
+  been done for this round; treat the current constants as provisionally
+  fixed, not field-confirmed, until that happens.
 - Target 64-bit Raspberry Pi OS (Bookworm+) — 32-bit is a wheel risk.
 - macOS/Windows gate mic access per-app; a denied prompt gives silent zeros,
   not an error.

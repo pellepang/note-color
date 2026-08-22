@@ -20,8 +20,22 @@ YIN_THRESHOLD = 0.12
 # one that's both still sub-threshold and meaningfully deeper than the
 # candidate -- see pitch_detect.detect_pitch()'s docstring/comment and
 # docs/DECISIONS.md for the full empirical rationale.
+#
+# YIN_SUBHARMONIC_MARGIN was originally 0.5 (a multiple needed to be only
+# 2x deeper) and a real-mic re-verification round found that far too loose
+# -- it re-triggered on already-correct detections whenever ordinary
+# broadband low-frequency content (mic self-noise, room rumble, mains hum)
+# produced its own coincidentally-deep CMND dip near tau_max (the fmin
+# edge), since ANY dip there beat an already-correct-but-noise-degraded
+# candidate by more than 2x. Recalibrated to 0.1 (a multiple must now be
+# ~10x deeper) against adversarial synthetic data bracketing both failure
+# modes: genuine octave-doubling cases clear this with wide margin (ratios
+# empirically <=0.08 across a weak-fundamental sweep), while synthesized
+# mains-hum/noise false-positive cases never exceeded a floor of ~0.14 --
+# see docs/DECISIONS.md's "regression" follow-up entry for the full
+# methodology.
 YIN_SUBHARMONIC_MAX_MULTIPLE = 4   # matches chroma.HARMONIC_WEIGHTS' harmonics 1-4
-YIN_SUBHARMONIC_MARGIN = 0.5       # a multiple must beat the candidate's CMND by at least this factor
+YIN_SUBHARMONIC_MARGIN = 0.1       # a multiple must beat the candidate's CMND by at least this factor
 YIN_SUBHARMONIC_SKIP_CMND = 0.01   # skip the check when the candidate is already this confident
 
 # --- Note smoothing ---

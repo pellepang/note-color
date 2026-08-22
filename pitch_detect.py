@@ -64,7 +64,7 @@ def detect_pitch(
     fmax=1000.0,
     threshold=0.12,
     subharmonic_max_multiple=4,
-    subharmonic_margin=0.5,
+    subharmonic_margin=0.1,
     subharmonic_skip_cmnd=0.01,
 ):
     """Return (freq_hz, confidence) for the dominant pitch in `window`,
@@ -130,6 +130,23 @@ def detect_pitch(
         # advantage -- gating on the original candidate's own confidence
         # avoids that regression (verified against octaves 3-5, see
         # tests/test_pitch_detect.py and docs/DECISIONS.md).
+        #
+        # A real-mic re-verification round (still issue #69) found the
+        # margin ALONE was not a strong enough gate: ordinary broadband
+        # low-frequency content in a real recording (mic self-noise, room
+        # rumble, mains hum) can produce its own coincidentally-deep CMND
+        # dip near tau_max (the fmin edge) even when the *original*
+        # candidate was already correct, and the skip-if-confident gate
+        # above doesn't help there -- a correct-but-noise-degraded
+        # candidate's own CMND sits well above `subharmonic_skip_cmnd`
+        # (it's genuinely less confident, just not *wrong*). Recalibrated
+        # `subharmonic_margin` from 0.5 (2x deeper) to 0.1 (10x deeper),
+        # matching this docstring's own "~10x+ deeper" empirical
+        # observation for genuine subharmonic locks, and confirmed via
+        # adversarial synthetic testing that a 0.1 margin cleanly separates
+        # genuine octave-doubling cases (ratios <=0.08 across a
+        # weak-fundamental sweep) from mains-hum/noise false positives
+        # (ratio floor ~0.14) -- see docs/DECISIONS.md.
         _, tau_value = _parabolic_vertex(cmnd, tau)
         if tau_value > subharmonic_skip_cmnd:
             best_tau, best_value = tau, tau_value
