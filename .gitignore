@@ -4,4 +4,5 @@ __pycache__/
 .venv/
 note_history_*.txt
 acoustic_test_results/
+rhythm_test_results/
 .claude/
