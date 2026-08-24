@@ -108,6 +108,8 @@ import sys
 import time
 from collections import deque, namedtuple
 
+import wcwidth
+
 import config
 from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
 from duration_tracker import DEFAULT_DURATION_CLASS
@@ -162,6 +164,28 @@ FLAG_GLYPHS = {
     "thirtysecond": "\U0001D170",
 }
 DOT_GLYPH = "\U0001D16D"           # MUSICAL SYMBOL COMBINING AUGMENTATION DOT
+# STEM_GLYPH/FLAG_GLYPHS/DOT_GLYPH are all Unicode General_Category "Mc"
+# (spacing combining mark) codepoints meant to visually combine onto the
+# preceding notehead glyph rather than occupy their own column -- but a
+# real terminal doesn't render that composition (no font here actually
+# fuses notehead+stem+flag+dot into one glyph), so per `wcwidth` (the same
+# width table virtually every terminal emulator's own cursor-advance logic
+# is built on), a notehead followed by one of these renders as a ~2-cell
+# grapheme cluster, not the 1 cell a single glyph would take nor the 4+
+# cells naively summing each codepoint's own width would suggest (most of
+# them measure 0 in isolation, since they're not meant to stand alone).
+# `_note_cell()` must measure/pad cell text with `_pad_center()`'s
+# `wcwidth.wcswidth()` call, not Python's code-point-counting
+# `str.center()`/`str[:width]` -- either kind of naive count (assuming
+# every codepoint is 1 column, or assuming a combining mark is always 0)
+# gets a duration-glyph-bearing note cell's real width wrong, so every
+# column drawn after it on that screen row -- including barline columns --
+# lands somewhere other than where it should. Since different screen rows
+# carry different note content (a "whole" note has no stem at all; a
+# "dotted-sixteenth" note pulls in three of these glyphs), the miscount
+# varies row to row, which is what made barlines -- meant to be one
+# continuous straight vertical divider -- visibly drift into different
+# columns depending on the row.
 
 # Duration suffix for *name* style -- composed as f"{letter}·{suffix}"
 # (middle dot, U+00B7), e.g. "Bb·8th". Kept as short text rather than a
@@ -596,11 +620,37 @@ def _sorted_insert(container, entry):
     container.insert(idx, entry)
 
 
+def _pad_center(text, width):
+    """Center `text` into exactly `width` real terminal display columns.
+    Unlike `str.center(width)`/`text[:width]` (which count Python code
+    points), this measures with `wcwidth.wcswidth()` -- grapheme-cluster
+    aware, so e.g. a notehead followed by its combining stem/flag/dot
+    (this module's symbol-style duration glyphs, see the STEM_GLYPH/
+    FLAG_GLYPHS/DOT_GLYPH comment above) is sized as the ~2-cell cluster a
+    real terminal renders it as, rather than double-counted per code point
+    (the original bug: naive length-based centering treated a duration-
+    glyph-heavy cell's text as wider than it actually renders) or naively
+    assumed zero-width instead (which undercounts it just as wrongly).
+    Either kind of miscount desyncs every column drawn after it on the
+    same screen row -- which is what let a barline column drift out of
+    vertical alignment depending on which row's note content preceded
+    it."""
+    text = text or ""
+    clipped = text
+    while clipped and wcwidth.wcswidth(clipped) > width:
+        clipped = clipped[:-1]
+    used = max(wcwidth.wcswidth(clipped), 0)
+    pad = max(width - used, 0)
+    left = pad // 2
+    right = pad - left
+    return " " * left + clipped + " " * right
+
+
 def _note_cell(rgb, label, width):
     r, g, b = rgb
     lum = 0.299 * r + 0.587 * g + 0.114 * b
     fg = (20, 20, 20) if lum > 140 else (230, 230, 230)
-    text = (label or "")[:width].center(width)
+    text = _pad_center(label or "", width)
     return f"\033[48;2;{r};{g};{b}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m{text}\033[0m"
 
 

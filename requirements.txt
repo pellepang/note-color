@@ -2,4 +2,5 @@ numpy>=1.24
 sounddevice>=0.4.6
 pygame-ce>=2.4.1
 blessed>=1.20
+wcwidth>=0.2      # terminal_tab_display.py -- display-width-aware cell padding for combining duration glyphs
 librosa>=0.10  # batch_transcribe.py only -- never imported by the live pipeline (issue #55)

@@ -4,6 +4,7 @@ import shutil
 import sys
 
 import pytest
+import wcwidth
 
 import config
 from duration_tracker import DEFAULT_DURATION_CLASS
@@ -247,6 +248,61 @@ def test_rapid_reattack_supersedes_older_open_note(monkeypatch):
 
     assert new_note["duration_class"] == "half"
     assert old_note["duration_class"] is None  # abandoned, never finalized
+
+
+def test_pad_center_measures_display_width_not_code_point_count():
+    # A notehead plus its combining stem/flag/dot (symbol-style duration
+    # glyphs) is one ~2-cell grapheme cluster on a real terminal -- str.
+    # center()'s code-point count would see 4+ "characters" here and either
+    # truncate the glyphs away (at a narrow width) or, when they fit,
+    # still pad the field to the wrong total display width. _pad_center()
+    # must land on exactly `width` real display columns and must not have
+    # truncated away any of the glyphs.
+    from terminal_tab_display import _pad_center
+
+    heavy = NOTEHEAD_GLYPH + STEM_GLYPH + FLAG_GLYPHS["sixteenth"] + DOT_GLYPH
+    out = _pad_center(heavy, config.TAB_COLUMN_WIDTH)
+
+    assert wcwidth.wcswidth(out) == config.TAB_COLUMN_WIDTH
+    assert STEM_GLYPH in out
+    assert FLAG_GLYPHS["sixteenth"] in out
+    assert DOT_GLYPH in out
+
+
+def test_barline_column_stays_aligned_across_rows_with_mixed_duration_glyphs(monkeypatch):
+    # Rows carrying different duration classes pull in very different
+    # numbers of zero-width combining marks (a "whole" note has none; a
+    # "dotted-sixteenth" note has three: stem, flag, dot). Before fixing
+    # _note_cell()'s code-point-based centering, that mismatch meant every
+    # column drawn after such a note on the same screen row -- including a
+    # barline column -- landed at a different real terminal position
+    # depending on which row's note content came before it, i.e. the
+    # barline didn't render as one straight vertical divider.
+    def setup(display):
+        display.push(0, 4, (200, 50, 50), "C4", t=1.0)
+        display.finalize_duration(0, 4, "whole")
+        display.push(2, 5, (50, 200, 50), "D5", t=2.0)
+        display.finalize_duration(2, 5, "dotted-sixteenth")
+        display.push_barline(t=3.0)
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, setup=setup, notehead_style="symbol")
+
+    # Each screen row is written as "\033[{row};1H\033[K{content}", back to
+    # back with no separator -- split on that row-address prefix to get
+    # one string per rendered line.
+    starts = [m.start() for m in re.finditer(r"\033\[\d+;1H\033\[K", out)] + [len(out)]
+    lines = [out[starts[i]:starts[i + 1]] for i in range(len(starts) - 1)]
+
+    offsets = []
+    for line in lines:
+        if BARLINE_GLYPH not in line:
+            continue
+        before = line.split(BARLINE_GLYPH)[0]
+        plain = re.sub(r"\033\[[\d;]*[A-Za-z]", "", before)  # strip CSI codes (color + cursor-address)
+        offsets.append(wcwidth.wcswidth(plain))
+
+    assert len(offsets) >= 2  # the barline spans multiple staff rows
+    assert len(set(offsets)) == 1  # every row places it at the same real column
 
 
 def test_push_barline_renders_glyph_spanning_staff_at_barline_width(monkeypatch):
