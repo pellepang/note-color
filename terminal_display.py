@@ -36,12 +36,23 @@ class TerminalDisplay:
         clear = "\033[2J" if size != self._last_size else ""
         self._last_size = size
 
-        out = ["\033[H"]  # cursor home (avoids full-clear flicker on unchanged size)
-        out.extend([block_line] * rows)
+        # "\033[H" is a cursor-home command, not a line of content -- joining
+        # it into `out` with the rest and "\n".join()-ing the whole list (as
+        # this used to do) burns an extra "\n" between it and the first real
+        # line, pushing every line one row lower than the `rows`/`text_rows`
+        # accounting above assumes. On an exact-height terminal that shoves
+        # the status/legend row(s) one past the bottom margin, forcing the
+        # terminal to auto-scroll every frame -- the visible symptom being
+        # the status/legend text drifting upward and appearing to duplicate
+        # (old, scrolled-up content never gets overwritten by the new
+        # frame's own cursor-addressed writes). Prepending "\033[H" directly
+        # instead of joining it in keeps line 1 as the first real content
+        # line, matching what `rows`/`text_rows` already reserve.
+        out = [block_line] * rows
         out.append(reset + "\033[K" + fg + status + reset)
         if legend:
             out.append(reset + "\033[K" + fg + legend + reset)
-        sys.stdout.write(clear + "\n".join(out))
+        sys.stdout.write(clear + "\033[H" + "\n".join(out))
         sys.stdout.flush()
 
     def render_bands(self, rgbs, status="", legend=""):
@@ -72,12 +83,13 @@ class TerminalDisplay:
         top_r, top_g, top_b = rgbs[-1]
         fg = f"\033[38;2;{top_r};{top_g};{top_b}m"
 
-        out = ["\033[H"]
-        out.extend(lines)
+        # See render()'s comment above on why "\033[H" is prepended directly
+        # rather than joined in as a list element -- same overflow/scroll bug.
+        out = list(lines)
         out.append(reset + "\033[K" + fg + status + reset)
         if legend:
             out.append(reset + "\033[K" + fg + legend + reset)
-        sys.stdout.write(clear + "\n".join(out))
+        sys.stdout.write(clear + "\033[H" + "\n".join(out))
         sys.stdout.flush()
 
     def quit(self):
