@@ -576,9 +576,9 @@ class TabDisplay:
         out = []
         for i, line in enumerate(lines, start=1):
             out.append(f"\033[{i};1H\033[K{line}")
-        out.append(f"\033[{len(lines) + 1};1H\033[K{status}")
+        out.append(f"\033[{len(lines) + 1};1H\033[K{_clip_to_width(status, cols)}")
         if help_legend:
-            out.append(f"\033[{len(lines) + 2};1H\033[K{help_legend}")
+            out.append(f"\033[{len(lines) + 2};1H\033[K{_clip_to_width(help_legend, cols)}")
         sys.stdout.write(clear + "".join(out))
         sys.stdout.flush()
 
@@ -618,6 +618,26 @@ def _sorted_insert(container, entry):
     ts = [e.t for e in container]
     idx = bisect.bisect_right(ts, entry.t)
     container.insert(idx, entry)
+
+
+def _clip_to_width(text, width):
+    """Truncate `text` to at most `width` real terminal display columns
+    (wcwidth-aware, same convention as `_pad_center()`'s own clip loop) --
+    used for the status/help_legend trailing rows, which build up to
+    ~150-225 characters in real usage (mode/reanalysis/scrollback hints all
+    concatenated) and easily exceed any terminal narrower than that. Without
+    clipping, the terminal's own line-wrap silently consumes an extra row
+    `text_rows`/`usable_rows` never accounted for, forcing an unwanted
+    scroll every frame -- the visible symptom being the whole staff's
+    content drifting upward by one row per overflowing line, discovered via
+    `research/terminal-capture/`'s pyte-based capture tool (see its
+    FINDINGS.md)."""
+    if not text:
+        return text
+    clipped = text
+    while clipped and wcwidth.wcswidth(clipped) > width:
+        clipped = clipped[:-1]
+    return clipped
 
 
 def _pad_center(text, width):

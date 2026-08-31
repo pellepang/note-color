@@ -1,3 +1,82 @@
+# Finding: tab view's status/help_legend lines overflow on almost every
+# real terminal, corrupting the whole staff via an unwanted scroll (fixed)
+
+Caught while extending this tool to render additional scenes (chord mode,
+different notehead styles) with more realistic status text than the first
+finding's minimal repro used.
+
+## Reproduction
+
+Building a *realistic* status string via `main._status_text()` +
+`main._legend_line()` — the exact functions `main.py`'s `run_terminal_tab()`
+calls every frame — for perfectly ordinary conditions (not even an extreme
+case): a plain note letter, a tempo estimate, a time signature, and the
+default-on help-legend hints:
+
+```python
+status_len = len(main._status_text(...) + "  tempo=120  time=4/4  " + mode_hint + "  [onset] (Ctrl+C to quit)")
+# -> 203 characters, not-frozen/no-scrollback/no-reanalysis "everyday" case
+# -> 226 characters, frozen + scrollback active (an entirely ordinary,
+#    documented workflow: freeze, then Left/Right through history)
+
+help_legend_len = len(main._legend_line([...]))  # the real hint list run_terminal_tab() builds
+# -> 145 characters, help-legend is on by default (`H` toggle)
+```
+
+`TabDisplay.render()` writes both directly with no width clipping:
+
+```python
+out.append(f"\033[{len(lines) + 1};1H\033[K{status}")
+if help_legend:
+    out.append(f"\033[{len(lines) + 2};1H\033[K{help_legend}")
+```
+
+Any terminal narrower than the status/help_legend text's own length (i.e.
+almost every real terminal — 203-226 and 145 characters are both wider
+than the vast majority of real terminal windows) hits the terminal's own
+auto-wrap: the overflow spills onto an extra row neither `text_rows` nor
+`usable_rows` accounted for. Since that extra row lands past the terminal's
+last line, writing it triggers a real scroll-up of the *entire screen* —
+confirmed via `pyte`: feeding the exact ANSI `render()` produces with a
+realistic long status shows the whole staff, including the chord-mode
+header row, shifted up by one row and the true top row lost off-screen,
+reproducing exactly on every single frame in ordinary use (not an edge
+case) on any terminal narrower than ~226 columns.
+
+## Why this had gone unnoticed
+
+Commit `87be8b3` ("terminal_display: fix status/legend line overflowing
+past terminal height") fixed a *differently-shaped* bug in this same
+family, but only in `terminal_display.py` (the `fill` view): a
+`"\033[H"`-joined-into-`"\n".join()` off-by-one, not a "the text itself is
+too long" issue. `terminal_tab_display.py` was never touched by that fix
+and has no width clipping of its own — a distinct instance of the same bug
+*class* (unaccounted-for extra row forcing a scroll), not a regression of
+the already-fixed one.
+
+## Fix applied
+
+Added `_clip_to_width()` (wcwidth-aware, same clip-loop convention
+`_pad_center()` already uses) and applied it to both `status` and
+`help_legend` immediately before they're written, so an oversized string
+is truncated to the real terminal width instead of being handed to the
+terminal's own auto-wrap. Verified by reproducing the exact scenario above
+before and after: before, the chord header row and every staff row after
+it shifted up by one and the true top row was lost; after, every row lands
+at its intended position with the status/help_legend lines silently
+truncated to fit. `tests/test_terminal_tab_display.py`'s existing 44 tests
+still pass unchanged.
+
+## Residual, lower-priority risk (not fixed here)
+
+`terminal_display.py` (`fill`) and `terminal_wheel_display.py` (`wheel`)
+have the same "no width clipping on status/legend text" gap in principle,
+but their status strings are much shorter (no mode/reanalysis/scrollback
+hints) and this wasn't reproduced actually overflowing for either — noted
+as a residual risk worth a quick look, not blind-fixed without evidence.
+
+---
+
 # Finding: the d7d2ea0 barline fix may not hold on every real terminal
 
 Caught on this tool's first real run, by comparing `TabDisplay.render()`'s
@@ -91,9 +170,43 @@ visual check.
 
 ## Suggested next step
 
-Filed as issue (see repo issue tracker) rather than fixed here — fixing
-it would mean picking one cursor-advance model to target without knowing
-which one this project's actual users' terminals follow, which needs a
-real multi-emulator visual check first (exactly what docs/research/
+Filed as issue #82 rather than fixed here — fixing it would mean picking
+one cursor-advance model to target without knowing which one this
+project's actual users' terminals follow, which needs a real
+multi-emulator visual check first (exactly what docs/research/
 terminal-rendering-performance.md's own next-steps list already
 recommended, now with a concrete repro instead of a hypothetical one).
+
+### Attempted: real-terminal cross-check (inconclusive, environment-limited)
+
+Tried to get a second real data point beyond pyte's interpretation by
+running `kitty` headlessly under `Xvfb` (both available in this dev
+environment) and feeding it the identical ANSI payload `capture.py`
+produces, then reading back kitty's own idea of the rendered grid. Two
+approaches, both blocked by this specific sandbox, not by anything about
+the actual question:
+
+- `kitty @ get-text --extent screen` (kitty's remote-control text-dump
+  command) turned out to be the wrong tool: it's built to extract
+  "readable output" (e.g. for scripting copy-paste), not to dump an exact
+  per-cell grid, and it silently joined all 30 rows into one line with a
+  single trailing newline — no way to recover which row a given character
+  belongs to, so no per-row barline-position comparison was possible from
+  it.
+- A literal pixel screenshot (`PIL.ImageGrab.grab()` against the Xvfb
+  display) came back all-black at both default and forced
+  `background_opacity=1.0` — ruled out alpha/compositing as the cause
+  first. Most likely cause: kitty's GPU-accelerated rendering path
+  doesn't get composited into Xvfb's visible framebuffer without a
+  window manager/compositor present, a known class of issue for
+  GL-accelerated terminal emulators under a bare Xvfb, unrelated to the
+  width-model question itself.
+
+Not chased further — burning more time on this specific sandbox's
+GL/Xvfb interaction wasn't worth it once the actual question (does a
+standards-conformant cursor model disagree with `wcwidth.wcswidth()`
+here) was already answered cleanly via direct source inspection. A real
+physical machine with an actual display (or a software-rendering-only
+terminal like a plain TTY/`xterm`, if available) would sidestep this
+entirely — worth trying first before another GPU-terminal-under-Xvfb
+attempt.
