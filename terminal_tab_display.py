@@ -659,7 +659,7 @@ def _barline_cell(rgb, width):
     background swatch, unlike a note cell) -- a barline is a divider line,
     not a data block."""
     r, g, b = rgb
-    text = BARLINE_GLYPH.center(width)
+    text = _pad_center(BARLINE_GLYPH, width)
     return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
 
 
