@@ -580,6 +580,13 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   a precomputed label) so a live `N` toggle restyles columns already on
   screen; `dump_ansi()` keeps its own precomputed letter+octave label
   independently, unaffected by either notehead toggle.
+- Mono *name* style gets its own wider column, `config.TAB_COLUMN_WIDTH_NAME`
+  (9, mirroring `TAB_COLUMN_WIDTH_CHORD`'s existing precedent), selected in
+  `TabDisplay.render()` only when `not chord_mode and notehead_style ==
+  "name"` (issue #83) — its `f"{letter}·{suffix}"` duration text (e.g.
+  "Bb·16th.") doesn't fit in the default `TAB_COLUMN_WIDTH` (3) the way
+  symbol style's combining-mark duration glyphs do, and was rendering as an
+  unreadable clipped stub ("C·whole" -> "C·w") before this fix.
 - `tab`'s per-column dimming (issue #22) recomputes each note's color fresh
   every `render()` call from its raw `pitch_class` and the column's age
   (distance from the newest *visible* column), rather than reusing the

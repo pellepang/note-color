@@ -422,7 +422,20 @@ class TabDisplay:
                 top -= 1
                 shrink -= 1
 
-        width = config.TAB_COLUMN_WIDTH_CHORD if chord_mode else config.TAB_COLUMN_WIDTH
+        # Chord mode always gets the wide chord-name column; mono's *name*
+        # style (issue #83) also needs the wider column, since its
+        # f"{letter}·{suffix}" duration text (e.g. "Bb·16th.") doesn't fit
+        # in TAB_COLUMN_WIDTH's 3 cells -- `_pad_center()` would otherwise
+        # clip it to an unreadable stub like "Bb·1". Mono *symbol* style
+        # keeps the narrow column: its duration glyphs are combining marks
+        # composed onto the notehead, not extra text, so they don't need
+        # the extra width.
+        if chord_mode:
+            width = config.TAB_COLUMN_WIDTH_CHORD
+        elif notehead_style == "name":
+            width = config.TAB_COLUMN_WIDTH_NAME
+        else:
+            width = config.TAB_COLUMN_WIDTH
         # `L` (legend_on) reclaims the legend column's width for note
         # columns entirely when off, rather than just blanking its
         # content -- issue #19's stated intent for the toggle.

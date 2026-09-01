@@ -134,6 +134,15 @@ TAB_FPS = 20
 TAB_FIX_HOPS_PER_SEC = 4        # 'fix' mode: new column every 0.25s
 TAB_COLUMN_WIDTH = 3            # terminal characters per history column/glyph cell
 TAB_COLUMN_WIDTH_CHORD = 9       # chord mode: wide enough for names like "C#13b9/F#"
+TAB_COLUMN_WIDTH_NAME = 9        # mono *name* notehead style (issue #83): wide enough for
+                                  # a duration suffix like "Bb·16th."/"C·whole" (up to 8
+                                  # cells: 2-char letter + middle dot + 5-char suffix) --
+                                  # TAB_COLUMN_WIDTH (3) clips every suffix longer than 1
+                                  # char down to an unreadable stub ("C·whole" -> "C·w").
+                                  # Same value as TAB_COLUMN_WIDTH_CHORD by coincidence of
+                                  # both needing ~9 cells, not because they're the same
+                                  # concept -- kept as its own constant so the two can move
+                                  # independently later.
 TAB_CLEF_WIDTH = 3               # left-hand legend sub-column: clef glyph on its anchor
                                  # row, blank elsewhere (issue #36: its own column, not
                                  # merged with the letter column)
