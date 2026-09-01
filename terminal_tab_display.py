@@ -401,6 +401,23 @@ class TabDisplay:
             _sorted_insert(self.session_history, entry)
         self._trim_entries()
 
+    def timestamp_at_offset(self, scroll_offset):
+        """Returns the `.t` timestamp of whichever entry plays the role of
+        "the newest visible column" at the given `scroll_offset` -- the
+        exact same truncation `render(scroll_offset=N)` applies (see
+        there) -- or `None` if `self.entries` is empty. Used by main.py's
+        loop/section-marker keybinds (`mark_range_start`/`mark_range_end`)
+        to capture "the point in history currently being looked at" while
+        scrolled back, so a mark lands on the column actually on screen
+        rather than the live tail."""
+        if not self.entries:
+            return None
+        all_entries = list(self.entries)
+        scroll_offset = max(scroll_offset, 0)
+        if scroll_offset:
+            all_entries = all_entries[: max(len(all_entries) - scroll_offset, 0)]
+        return all_entries[-1].t if all_entries else None
+
     def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False,
                help_legend="", scroll_offset=0):
         size = shutil.get_terminal_size(fallback=(80, 24))

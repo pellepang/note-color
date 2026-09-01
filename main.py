@@ -592,8 +592,61 @@ def _handle_scroll_keys(key, frozen, scroll_offset, max_offset):
     return scroll_offset
 
 
+def _handle_mark_keys(key, frozen, mark_start, mark_end, timestamp):
+    """'tab' view only: loop/section markers -- `mark_range_start`/
+    `mark_range_end` each capture `timestamp` (the point in history
+    currently being looked at; see TabDisplay.timestamp_at_offset(), which
+    already accounts for any active Left/Right scrollback) as one end of a
+    range that `_handle_reanalysis_key()` later scopes the R-key non-causal
+    reanalysis to, instead of the whole rolling buffer -- see notation-
+    and-feature-ideas.md's "Loop/section markers for review".
+
+    A no-op (returns the marks unchanged) unless frozen -- same gating as
+    scrollback/reanalysis themselves, since a live-scrolling tail has no
+    stable "point in history" to mark -- or when `timestamp` is None (no
+    entries pushed yet, nothing to mark). Order-independent: whichever
+    mark's key is pressed just gets overwritten with the current
+    timestamp; `_mark_range()` normalizes the pair into (lo, hi) only
+    where the range is actually consumed, so pressing end-then-start
+    works the same as start-then-end."""
+    if not frozen or timestamp is None or key is None:
+        return mark_start, mark_end
+    if key.lower() == store.keybind("mark_range_start").lower():
+        return timestamp, mark_end
+    if key.lower() == store.keybind("mark_range_end").lower():
+        return mark_start, timestamp
+    return mark_start, mark_end
+
+
+def _mark_range(mark_start, mark_end):
+    """Returns a (lo, hi) tuple once both loop/section markers are set, or
+    None otherwise (no marks, or only one end placed so far) -- the shape
+    `_handle_reanalysis_key()`'s `mark_range=` param and the status line's
+    mark hint both consume. Normalizes order since mark_range_start/
+    mark_range_end can be pressed in either order relative to each other
+    in time (see _handle_mark_keys)."""
+    if mark_start is None or mark_end is None:
+        return None
+    return (min(mark_start, mark_end), max(mark_start, mark_end))
+
+
+def _filter_hop_records_to_range(hop_records, mark_range, hop_seconds):
+    """Restricts `hop_records` (see ReanalysisBuffer.snapshot()) to those
+    whose real timestamp (`hop_index * hop_seconds`) falls within the
+    inclusive `[lo, hi]` loop/section-marked range -- or returns
+    `hop_records` unchanged when `mark_range` is None (no marks set, the
+    R-key reanalysis's original whole-buffer scope). `rhythm_reanalysis.
+    recompute()` already handles an empty list (returns None, the same
+    "nothing to reanalyze" no-op its caller already treats as such), so a
+    mark_range with no hops inside it is safe, not a crash."""
+    if mark_range is None:
+        return hop_records
+    lo, hi = mark_range
+    return [r for r in hop_records if lo <= r.hop_index * hop_seconds <= hi]
+
+
 def _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, result_queue, beats_per_bar,
-                            hop_seconds):
+                            hop_seconds, mark_range=None):
     """'tab' view only: R triggers the non-causal rhythm re-analysis
     (issue #77) -- a no-op unless the view is currently frozen, or a
     recompute is already running (reanalysis_state.in_progress guards
@@ -613,12 +666,17 @@ def _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, res
     result back via `result_queue` (a single-slot queue.Queue, the same
     always-overwritten idiom this codebase already uses for the analysis
     -> render handoff) -- run_terminal_tab's main loop polls it
-    non-blockingly once per iteration."""
+    non-blockingly once per iteration.
+
+    `mark_range` (loop/section markers; see _mark_range()) optionally
+    narrows the snapshot to just that `(lo, hi)` window via
+    _filter_hop_records_to_range() before the recompute runs -- None (no
+    marks set) reproduces the original whole-buffer scope exactly."""
     bound = store.keybind("rhythm_reanalysis")
     if key is None or key.lower() != bound.lower() or not frozen or reanalysis_state.in_progress:
         return
     reanalysis_state.in_progress = True
-    hop_records = reanalysis_buffer.snapshot()
+    hop_records = _filter_hop_records_to_range(reanalysis_buffer.snapshot(), mark_range, hop_seconds)
 
     def _worker():
         try:
@@ -885,6 +943,13 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     # computation below. Reset to None on unfreeze, same "no catch-up"
     # convention scroll_offset follows.
     reanalysis_bpm_estimate = None
+    # Loop/section markers (notation-and-feature-ideas.md's Feature 6):
+    # timestamps, not scroll-offset counts, so they stay meaningful even
+    # as scroll_offset itself changes across further Left/Right presses.
+    # None/None means no range is marked; reset on unfreeze, same "no
+    # catch-up" convention every other frozen-only piece of state here
+    # follows (scroll_offset, reanalysis_bpm_estimate above).
+    mark_start, mark_end = None, None
 
     # time_signature arrives pre-validated as an (int, int) tuple from the
     # CLI layer (main._parse_time_signature / virtualnote.py), not a
@@ -925,9 +990,13 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 # display would both be exactly that kind of catch-up.
                 scroll_offset = 0
                 reanalysis_bpm_estimate = None
+                mark_start, mark_end = None, None
             scroll_offset = _handle_scroll_keys(key, frozen, scroll_offset, len(display.entries) - 1)
+            mark_start, mark_end = _handle_mark_keys(
+                key, frozen, mark_start, mark_end, display.timestamp_at_offset(scroll_offset)
+            )
             _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, reanalysis_result_queue,
-                                    beats_per_bar, hop_seconds)
+                                    beats_per_bar, hop_seconds, mark_range=_mark_range(mark_start, mark_end))
             help_legend_on = _handle_help_legend_key(key, help_legend_on)
             _handle_session_record_key(key, session_recorder)
             if _handle_back_to_menu_key(key):
@@ -1025,6 +1094,14 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             elif scroll_offset:
                 reanalysis_hint = f"  scrollback=-{scroll_offset}"
 
+            marked_range = _mark_range(mark_start, mark_end)
+            if marked_range is not None:
+                reanalysis_hint += f"  mark=[{marked_range[0]:.2f}s,{marked_range[1]:.2f}s]"
+            elif mark_start is not None:
+                reanalysis_hint += f"  mark=[{mark_start:.2f}s,...]"
+            elif mark_end is not None:
+                reanalysis_hint += f"  mark=[...,{mark_end:.2f}s]"
+
             mode_hint = (f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  "
                          f"notes={notehead_style}({_key_hint('notehead_style_toggle')})  "
                          f"legend={'on' if legend_on else 'off'}({_key_hint('legend_toggle')})  "
@@ -1036,6 +1113,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 f"{_key_hint('chord_mode_toggle')}=mode", f"{_key_hint('notehead_style_toggle')}=notes",
                 f"{_key_hint('legend_toggle')}=stafflegend", f"{_key_hint('freeze_toggle')}=freeze",
                 f"{_key_hint('rhythm_reanalysis')}=reanalyze(frozen)", "left/right=scrollback(frozen)",
+                f"{_key_hint('mark_range_start')}/{_key_hint('mark_range_end')}=mark range(frozen)",
                 f"{_key_hint('session_record_toggle')}=record",
             ]) if help_legend_on else ""
             if chord_mode:
