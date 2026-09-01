@@ -51,7 +51,8 @@ import multipitch
 import rhythm_reanalysis
 from config_store import store
 from audio_capture import AudioCapture, resolve_loopback_device
-from pitch_detect import compute_spectrum, detect_pitch
+from detection_backends import default_pitch_backend, default_poly_backend
+from pitch_detect import compute_spectrum
 from note_smoother import NoteSmoother
 from chord_smoother import ChordSmoother
 from duration_tracker import DurationTracker, duration_class_for_beats
@@ -310,7 +311,7 @@ class RenderItem(NamedTuple):
 
 
 def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, reanalysis_buffer,
-                   session_recorder):
+                   session_recorder, pitch_backend, poly_backend):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
     low_ring = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
@@ -341,10 +342,7 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, 
 
         smoother.set_sensitivity(sensitivity.value)
         spectrum = compute_spectrum(ring)
-        freq, confidence = detect_pitch(
-            ring, config.SAMPLE_RATE, spectrum, config.FMIN, config.FMAX, config.YIN_THRESHOLD,
-            config.YIN_SUBHARMONIC_MAX_MULTIPLE, config.YIN_SUBHARMONIC_MARGIN, config.YIN_SUBHARMONIC_SKIP_CMND,
-        )
+        freq, confidence = pitch_backend.detect(ring, spectrum, config.SAMPLE_RATE)
         pitch_class, octave, is_onset = smoother.update(freq, confidence, rms, spectrum)
 
         if pitch_class is None:
@@ -388,17 +386,7 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, 
         multipitch_window = multipitch.select_window(
             ring, low_ring, main_chroma, bass_chroma, gate_ratio=config.MULTIPITCH_BASS_GATE_RATIO
         )
-        raw_notes = multipitch.detect(
-            multipitch_window,
-            config.SAMPLE_RATE,
-            max_notes=config.CHORD_MAX_NOTES,
-            min_mag_ratio=config.CHORD_PEAK_MIN_MAG_RATIO,
-            harmonic_tolerance_cents=config.CHORD_HARMONIC_TOLERANCE_CENTS,
-            max_peak_candidates=config.CHORD_MAX_PEAK_CANDIDATES,
-            harmonic_max_number=config.CHORD_HARMONIC_MAX_NUMBER,
-            min_freq_hz=config.FMIN,
-            max_freq_hz=config.FMAX,
-        )
+        raw_notes = poly_backend.detect(multipitch_window, config.SAMPLE_RATE)
 
         chord_name, raw_stack = chord_smoother.update(main_chroma, bass_chroma, raw_notes)
 
@@ -1196,12 +1184,23 @@ class SessionState:
     resetting to CLI defaults every time a user picks a different tool.
     A single `color_scheme` is fixed for the session's whole life, same as
     it always has been for one process -- there's no live toggle for it,
-    so there's nothing to persist differently per tool switch."""
+    so there's nothing to persist differently per tool switch.
 
-    def __init__(self, color_scheme, sensitivity_value, source_value):
+    `pitch_backend`/`poly_backend` (detection_backends.py) default to
+    `None`, resolved to `default_pitch_backend(config)`/
+    `default_poly_backend(config)` here -- YinBackend/SpectralPeakBackend
+    built from config.* exactly as analysis_loop() called detect_pitch()/
+    multipitch.detect() directly before this seam existed, so default
+    behavior is unchanged. Explicit params exist so a future alternative
+    backend can be swapped in by construction, without editing
+    analysis_loop()'s body."""
+
+    def __init__(self, color_scheme, sensitivity_value, source_value, pitch_backend=None, poly_backend=None):
         self.color_scheme = color_scheme
         self.sensitivity = Sensitivity(sensitivity_value)
         self.source_state = SourceState(source_value)
+        self.pitch_backend = pitch_backend if pitch_backend is not None else default_pitch_backend(config)
+        self.poly_backend = poly_backend if poly_backend is not None else default_poly_backend(config)
         self.capture = None
         self.result_queue = None
         self.stop_event = None
@@ -1240,7 +1239,7 @@ class SessionState:
         self.analysis_thread = threading.Thread(
             target=analysis_loop,
             args=(self.capture, self.result_queue, self.stop_event, self.color_scheme, self.sensitivity,
-                  self.reanalysis_buffer, self.session_recorder),
+                  self.reanalysis_buffer, self.session_recorder, self.pitch_backend, self.poly_backend),
             daemon=True,
         )
         self.analysis_thread.start()
