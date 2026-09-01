@@ -1286,7 +1286,7 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
                               session.session_recorder)
 
 
-def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None):
+def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None, play=False):
     """Offline transcription entry point (issue #55, `virtualnote
     transcribe`): loads `file_path`, runs batch_transcribe.transcribe()
     over the whole array, then builds TabDisplay columns from the result
@@ -1387,8 +1387,25 @@ def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=
         )
         score_writer.write_score(result, resolved_write_score_path, time_signature=time_signature)
 
+    if play:
+        # Local import, same "pay the cost only when the feature is used"
+        # convention as score_writer/pygame above -- though playback.py's
+        # own import cost is negligible (sounddevice is already loaded via
+        # audio_capture.py in every other code path; this just avoids
+        # opening an OutputStream device for a one-shot batch run that
+        # never asked for one). Offline pre-render (playback.py's module
+        # docstring) is the right mode here -- `result` already holds the
+        # whole transcription, nothing left to schedule against.
+        import playback
 
-def run_replay_session(file_path, dump_file, speed=1.0):
+        notes = [
+            (n.onset_hop * result.hop_seconds, n.pitch_class, n.octave, n.duration_hops * result.hop_seconds)
+            for n in result.notes
+        ]
+        playback.play_offline(notes)
+
+
+def run_replay_session(file_path, dump_file, speed=1.0, play=False):
     """`virtualnote replay <file>` (issue: session recording + playback,
     feature idea 1 in docs/research/notation-and-feature-ideas.md): reads
     a `.jsonl` session log written by `session_recorder.SessionRecorder`
@@ -1413,11 +1430,28 @@ def run_replay_session(file_path, dump_file, speed=1.0):
 
     Ctrl+C stops the replay early (same as every other terminal view) --
     still dumps via TabDisplay.dump_ansi() on the way out, covering
-    whatever was replayed up to that point, not just a full run."""
+    whatever was replayed up to that point, not just a full run.
+
+    `play=True` (map #24's playback engine) triggers each column's
+    note(s) through a `playback.LiveScheduler` the instant that column is
+    pushed on screen, reusing this loop's own already-paced `time.sleep()`
+    clock rather than running a second, independent one -- see
+    playback.py's module docstring for why live scheduling (not offline
+    pre-render) is the right mode for this specific caller. Each event's
+    own recorded `duration_seconds` is divided by `speed` so the audio
+    speeds up/slows down in lockstep with the visual pacing above, not
+    just the gaps between notes."""
     from terminal_tab_display import TabDisplay
 
     events = load_events(file_path)
     columns = group_columns(events)
+
+    scheduler = None
+    if play:
+        import playback
+
+        scheduler = playback.LiveScheduler()
+        scheduler.start()
 
     display = TabDisplay(fps=config.TAB_FPS)
     last_t = 0.0
@@ -1439,11 +1473,17 @@ def run_replay_session(file_path, dump_file, speed=1.0):
                 display.push_notes(push_tuples, chord_name, t=t)
                 for event in group:
                     display.finalize_duration(event["pc"], event["octave"], event["duration_class"])
+                    if scheduler is not None:
+                        scheduler.trigger_note(
+                            event["pc"], event["octave"], event["duration_seconds"] / max(speed, 1e-6)
+                        )
             status = f"virtualnote replay  file={os.path.basename(file_path)}  t={t:.2f}s  speed={speed}x"
             display.render(status, chord_mode=True)
     except KeyboardInterrupt:
         pass
     finally:
+        if scheduler is not None:
+            scheduler.stop()
         resolved_dump_path = dump_file or os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
