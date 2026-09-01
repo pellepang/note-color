@@ -1,6 +1,6 @@
 import numpy as np
 
-from onset_detect import chroma_flux, spectral_flux
+from onset_detect import chroma_flux, complex_domain_novelty, hfc_novelty, spectral_flux
 from pitch_detect import compute_spectrum
 import config
 
@@ -96,3 +96,85 @@ def test_chroma_flux_ignores_pure_decay():
     prev = np.full(12, 2.0)
     now = np.full(12, 1.0)
     assert chroma_flux(now, prev) == 0.0
+
+
+# --- hfc_novelty (issue #78) ---------------------------------------------
+
+def test_hfc_novelty_zero_with_no_previous_spectrum():
+    spectrum = np.array([1 + 1j, 2 + 2j, 3 + 3j])
+    assert hfc_novelty(spectrum, None) == 0.0
+
+
+def test_hfc_novelty_zero_between_identical_frames():
+    spectrum = np.array([1 + 1j, 2 + 2j, 3 + 3j])
+    assert hfc_novelty(spectrum.copy(), spectrum.copy()) == 0.0
+
+
+def test_hfc_novelty_zero_on_shape_mismatch():
+    prev = np.array([1.0, 1.0], dtype=np.complex128)
+    now = np.array([1.0, 1.0, 1.0], dtype=np.complex128)
+    assert hfc_novelty(now, prev) == 0.0
+
+
+def test_hfc_novelty_ignores_pure_decay():
+    prev = np.array([5.0, 5.0, 5.0], dtype=np.complex128)
+    now = np.array([1.0, 1.0, 1.0], dtype=np.complex128)
+    assert hfc_novelty(now, prev) == 0.0
+
+
+def test_hfc_novelty_weights_high_bins_more_than_spectral_flux_does():
+    # A fixed-size jump in a HIGH bin should register relatively more HFC
+    # novelty than the identical-size jump in a LOW bin -- that's the
+    # whole point of the bin-index weighting (issue #78's premise).
+    prev = np.array([0.1, 0.1, 0.1, 0.1], dtype=np.complex128)
+    low_bin_jump = np.array([5.0, 0.1, 0.1, 0.1], dtype=np.complex128)
+    high_bin_jump = np.array([0.1, 0.1, 0.1, 5.0], dtype=np.complex128)
+    assert hfc_novelty(high_bin_jump, prev) > hfc_novelty(low_bin_jump, prev)
+
+
+def test_hfc_novelty_positive_on_a_new_transient():
+    prev = np.array([0.1, 0.1, 0.1], dtype=np.complex128)
+    now = np.array([0.1, 5.0, 0.1], dtype=np.complex128)
+    assert hfc_novelty(now, prev) > 0.0
+
+
+# --- complex_domain_novelty (issue #78) ----------------------------------
+
+def test_complex_domain_novelty_zero_with_missing_previous_frames():
+    spectrum = np.array([1 + 1j, 2 + 2j, 3 + 3j])
+    assert complex_domain_novelty(spectrum, None, None) == 0.0
+    assert complex_domain_novelty(spectrum, spectrum.copy(), None) == 0.0
+
+
+def test_complex_domain_novelty_zero_on_shape_mismatch():
+    a = np.array([1.0, 1.0], dtype=np.complex128)
+    b = np.array([1.0, 1.0, 1.0], dtype=np.complex128)
+    assert complex_domain_novelty(b, a, a) == 0.0
+    assert complex_domain_novelty(b, b, a) == 0.0
+
+
+def test_complex_domain_novelty_near_zero_for_steady_linear_phase_advance():
+    # A perfectly sustained tone's phase advances by a constant amount
+    # each hop -- the linear extrapolation predicts this exactly, so
+    # novelty should be ~0 even though magnitude/phase both keep moving.
+    mag = np.array([1.0, 2.0, 3.0])
+    phase_step = 0.3
+    p0 = np.zeros(3)
+    p1 = p0 + phase_step
+    p2 = p1 + phase_step
+    s0 = mag * np.exp(1j * p0)
+    s1 = mag * np.exp(1j * p1)
+    s2 = mag * np.exp(1j * p2)
+    novelty = complex_domain_novelty(s2, s1, s0)
+    assert novelty < 1e-9
+
+
+def test_complex_domain_novelty_positive_when_phase_prediction_breaks():
+    # Same steady magnitude, but the phase step abruptly changes on the
+    # third frame -- a genuine attack breaks the linear-phase assumption.
+    mag = np.array([1.0, 2.0, 3.0])
+    s0 = mag * np.exp(1j * np.zeros(3))
+    s1 = mag * np.exp(1j * np.full(3, 0.3))
+    s2 = mag * np.exp(1j * np.full(3, 2.5))  # jump, not another +0.3 step
+    novelty = complex_domain_novelty(s2, s1, s0)
+    assert novelty > 0.1
