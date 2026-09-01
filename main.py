@@ -1508,7 +1508,8 @@ def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=
         playback.play_offline(notes)
 
 
-def run_replay_session(file_path, dump_file, speed=1.0, play=False):
+def run_replay_session(file_path, dump_file, speed=1.0, play=False, write_score_path=None,
+                        time_signature=config.DEFAULT_TIME_SIGNATURE):
     """`virtualnote replay <file>` (issue: session recording + playback,
     feature idea 1 in docs/research/notation-and-feature-ideas.md): reads
     a `.jsonl` session log written by `session_recorder.SessionRecorder`
@@ -1543,7 +1544,25 @@ def run_replay_session(file_path, dump_file, speed=1.0, play=False):
     pre-render) is the right mode for this specific caller. Each event's
     own recorded `duration_seconds` is divided by `speed` so the audio
     speeds up/slows down in lockstep with the visual pacing above, not
-    just the gaps between notes."""
+    just the gaps between notes.
+
+    `write_score_path` (issue #89, map #57's live-score-saving child
+    ticket) follows the exact `None`/`""`/explicit-path convention
+    `run_batch_transcribe()`'s own `write_score_path` already uses --
+    `None` (default) writes nothing and never even imports `score_writer`/
+    `session_score`; `""` (virtualnote.py's `--write-score` bare-flag
+    sentinel) resolves to a default `score_<timestamp>.musicxml` path next
+    to `main.py`; any other string is used verbatim. Built from `events`
+    (the *whole* log this function already loaded above, not just
+    whatever's scrolled onto the screen by the time the loop exits/is
+    interrupted) via `session_score.from_session_log()` -- see that
+    module's docstring for why a session log can feed
+    `score_writer.write_score()` directly with zero non-causal rhythm
+    *re*-refinement (issue #89's resolution: the raw per-hop data that
+    would need is never in the log). Written in the `finally` block below,
+    same "still runs on an early Ctrl+C" treatment `dump_ansi()` already
+    gets, since `events` is already the complete file regardless of how
+    much of the replay loop actually ran."""
     from terminal_tab_display import TabDisplay
 
     events = load_events(file_path)
@@ -1592,6 +1611,21 @@ def run_replay_session(file_path, dump_file, speed=1.0, play=False):
             f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
         )
         display.dump_ansi(resolved_dump_path)
+
+        if write_score_path is not None:
+            # Local imports -- keeps music21's real, one-time import cost
+            # (via score_writer) off every plain `replay` run, paid only
+            # when --write-score is actually passed. Mirrors
+            # run_batch_transcribe()'s identical write_score_path pattern.
+            import score_writer
+            from session_score import from_session_log
+
+            resolved_write_score_path = write_score_path or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                f"score_{time.strftime('%Y%m%d_%H%M%S')}.musicxml",
+            )
+            score_result = from_session_log(events)
+            score_writer.write_score(score_result, resolved_write_score_path, time_signature=time_signature)
 
 
 def main():
