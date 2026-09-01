@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 note_history_*.txt
+session_log_*.jsonl
 acoustic_test_results/
 rhythm_test_results/
 .claude/

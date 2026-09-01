@@ -37,6 +37,7 @@ KEYBIND_ACTIONS = [
     "legend_toggle",
     "freeze_toggle",
     "rhythm_reanalysis",
+    "session_record_toggle",
 ]
 
 _KEYBIND_LABELS = {
@@ -46,6 +47,7 @@ _KEYBIND_LABELS = {
     "legend_toggle": "Staff legend (tab view)",
     "freeze_toggle": "Freeze view (tab view)",
     "rhythm_reanalysis": "Rhythm re-analysis (tab view)",
+    "session_record_toggle": "Session recording (opt-in .jsonl log)",
 }
 
 # A generic numeric preference row -- key is the config.toml [preferences]

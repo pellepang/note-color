@@ -59,6 +59,8 @@ from onset_detect import chroma_flux
 from tempo_tracker import TempoTracker
 from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES, NOTE_NAMES_FIFTHS
 from animation import ColorAnimator
+from session_recorder import SessionRecorder
+from session_player import load_events, group_columns
 
 try:
     import termios
@@ -273,6 +275,17 @@ def _handle_source_key(key, capture, source_state):
     source_state.error = None
 
 
+def _handle_session_record_key(key, session_recorder):
+    """Opt-in live session recorder toggle (default 's'), available in
+    every terminal view (fill/wheel/tab) -- GUI has no live-hotkey
+    mechanism for toggles like this, same established out-of-scope
+    precedent as chord mode's 'P'. Mutates session_recorder in place
+    (opens/closes its backing file), same shape as _handle_source_key."""
+    bound = store.keybind("session_record_toggle")
+    if key is not None and key.lower() == bound.lower():
+        session_recorder.toggle()
+
+
 class RenderItem(NamedTuple):
     """Per-hop analysis result, single-slot queue item. The first 9 fields
     are the original monophonic-pipeline shape/order; `note_stack` and
@@ -296,7 +309,8 @@ class RenderItem(NamedTuple):
     bpm_estimate: Optional[float]  # live tempo estimate, or None before enough history exists
 
 
-def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, reanalysis_buffer):
+def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, reanalysis_buffer,
+                   session_recorder):
     ring = np.zeros(config.WINDOW_SIZE, dtype=np.float64)
     low_ring = np.zeros(config.MULTIPITCH_LOW_WINDOW_SIZE, dtype=np.float64)
     smoother = NoteSmoother(config, sensitivity.value)
@@ -309,7 +323,8 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, 
     # tracker keeps the default off.
     mono_duration_tracker = DurationTracker(config, require_onset_for_new_note=True)
     chord_duration_tracker = DurationTracker(config)
-    tempo_tracker = TempoTracker(config, config.BLOCK_SIZE / config.SAMPLE_RATE)
+    hop_seconds = config.BLOCK_SIZE / config.SAMPLE_RATE
+    tempo_tracker = TempoTracker(config, hop_seconds)
     prev_chroma = None
     hop_index = 0
 
@@ -454,6 +469,16 @@ def analysis_loop(capture, result_queue, stop_event, color_scheme, sensitivity, 
                 chroma_novelty=chroma_novelty,
             )
         )
+
+        # Opt-in session recording (armed live via 's', off by default) --
+        # hooked here rather than render-thread-side for the same reason
+        # reanalysis_buffer.append() is: result_queue is single-slot and
+        # overwrite-on-full, so a render-thread-side recorder would
+        # silently miss a finalized note whenever two hops complete
+        # between two polls. record_hop() is a cheap no-op whenever not
+        # armed (see session_recorder.py).
+        session_recorder.record_hop(pitch_class, octave, note_stack, chord_name, duration_hops, bpm_estimate,
+                                     hop_index, hop_seconds)
 
         item = RenderItem(target_rgb, is_onset, label, freq, confidence, rms, fifths_idx, pitch_class, octave,
                            note_stack, chord_name, duration_hops, bpm_estimate)
@@ -670,7 +695,7 @@ def _animate_note_stack(animators, note_stack, dt):
     return bands
 
 
-def run_terminal_fill(result_queue, sensitivity, capture, source_state):
+def run_terminal_fill(result_queue, sensitivity, capture, source_state, session_recorder):
     from terminal_display import TerminalDisplay
 
     display = TerminalDisplay(fps=config.TERMINAL_FPS)
@@ -691,6 +716,7 @@ def run_terminal_fill(result_queue, sensitivity, capture, source_state):
             _handle_source_key(key, capture, source_state)
             chord_mode = _handle_chord_mode_key(key, chord_mode)
             help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            _handle_session_record_key(key, session_recorder)
             if _handle_back_to_menu_key(key):
                 return "menu"
             try:
@@ -701,18 +727,20 @@ def run_terminal_fill(result_queue, sensitivity, capture, source_state):
                 is_onset = False
 
             mode_hint = f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  legend(h)"
+            rec_hint = f"rec={'ON' if session_recorder.armed else 'off'}({_key_hint('session_record_toggle')})"
             legend = _legend_line(["up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
-                                    f"{_key_hint('chord_mode_toggle')}=mode"]) if help_legend_on else ""
+                                    f"{_key_hint('chord_mode_toggle')}=mode",
+                                    f"{_key_hint('session_record_toggle')}=record"]) if help_legend_on else ""
             if chord_mode:
                 bands = _animate_note_stack(band_animators, note_stack, dt)
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
-                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
                 display.render_bands(bands, status, legend)
             else:
                 rgb = animator.update(dt, target_rgb, is_onset)
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
-                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
                 display.render(rgb, status, legend)
             time.sleep(dt)
     except KeyboardInterrupt:
@@ -722,7 +750,7 @@ def run_terminal_fill(result_queue, sensitivity, capture, source_state):
         display.quit()
 
 
-def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
+def run_terminal_wheel(result_queue, sensitivity, capture, source_state, session_recorder):
     from terminal_wheel_display import WheelDisplay
 
     display = WheelDisplay(fps=config.WHEEL_FPS)
@@ -745,6 +773,7 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
             _handle_source_key(key, capture, source_state)
             chord_mode = _handle_chord_mode_key(key, chord_mode)
             help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            _handle_session_record_key(key, session_recorder)
             if _handle_back_to_menu_key(key):
                 return "menu"
             is_onset = False
@@ -756,8 +785,10 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
                 pass
 
             mode_hint = f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  legend(h)"
+            rec_hint = f"rec={'ON' if session_recorder.armed else 'off'}({_key_hint('session_record_toggle')})"
             legend = _legend_line(["up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
-                                    f"{_key_hint('chord_mode_toggle')}=mode"]) if help_legend_on else ""
+                                    f"{_key_hint('chord_mode_toggle')}=mode",
+                                    f"{_key_hint('session_record_toggle')}=record"]) if help_legend_on else ""
             if chord_mode:
                 active_pcs = {e["pitch_class"] for e in note_stack}
                 bass_pc = next((e["pitch_class"] for e in note_stack if e["is_bass"]), None)
@@ -766,12 +797,12 @@ def run_terminal_wheel(result_queue, sensitivity, capture, source_state):
                     wedge_fades[pc] = _fade_toward(wedge_fades[pc], target, dt, config.CROSSFADE_TAU_MS)
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
                                         chord_name=chord_name, chord_mode=True)
-                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
                 display.render_chord(wedge_fades, bass_pc, status, legend)
             else:
                 pulse = 1.0 if is_onset else pulse * math.exp(-dt / pulse_decay)
                 status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
-                          + f"  {mode_hint}  (Ctrl+C to quit)")
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
                 display.render(active_index, pulse, status, legend)
             time.sleep(dt)
     except KeyboardInterrupt:
@@ -832,7 +863,7 @@ def _hop_beats(beats_values):
 
 
 def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state,
-                      reanalysis_buffer, time_signature=config.DEFAULT_TIME_SIGNATURE):
+                      reanalysis_buffer, session_recorder, time_signature=config.DEFAULT_TIME_SIGNATURE):
     from terminal_tab_display import TabDisplay
 
     display = TabDisplay(fps=config.TAB_FPS, scrollback_seconds=store.preference(
@@ -910,6 +941,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, reanalysis_result_queue,
                                     beats_per_bar, hop_seconds)
             help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            _handle_session_record_key(key, session_recorder)
             if _handle_back_to_menu_key(key):
                 return "menu"
 
@@ -1008,12 +1040,15 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             mode_hint = (f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  "
                          f"notes={notehead_style}({_key_hint('notehead_style_toggle')})  "
                          f"legend={'on' if legend_on else 'off'}({_key_hint('legend_toggle')})  "
-                         f"frozen={'on' if frozen else 'off'}({_key_hint('freeze_toggle')})  helplegend(h)")
+                         f"frozen={'on' if frozen else 'off'}({_key_hint('freeze_toggle')})  "
+                         f"rec={'ON' if session_recorder.armed else 'off'}({_key_hint('session_record_toggle')})  "
+                         f"helplegend(h)")
             help_legend = _legend_line([
                 "up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
                 f"{_key_hint('chord_mode_toggle')}=mode", f"{_key_hint('notehead_style_toggle')}=notes",
                 f"{_key_hint('legend_toggle')}=stafflegend", f"{_key_hint('freeze_toggle')}=freeze",
                 f"{_key_hint('rhythm_reanalysis')}=reanalyze(frozen)", "left/right=scrollback(frozen)",
+                f"{_key_hint('session_record_toggle')}=record",
             ]) if help_legend_on else ""
             if chord_mode:
                 notes = [
@@ -1172,6 +1207,13 @@ class SessionState:
         self.stop_event = None
         self.analysis_thread = None
         self.reanalysis_buffer = None
+        # Opt-in, off by default (armed live via 's') -- constructed eagerly
+        # here rather than lazily in ensure_started(), unlike capture/the
+        # analysis thread: unlike opening the mic, constructing a
+        # SessionRecorder has no side effect (no file is opened until
+        # armed), and it needs to exist before ensure_started() builds the
+        # analysis thread's arg tuple below.
+        self.session_recorder = SessionRecorder()
 
     def ensure_started(self):
         """Idempotent: a no-op once the capture/analysis thread already
@@ -1198,7 +1240,7 @@ class SessionState:
         self.analysis_thread = threading.Thread(
             target=analysis_loop,
             args=(self.capture, self.result_queue, self.stop_event, self.color_scheme, self.sensitivity,
-                  self.reanalysis_buffer),
+                  self.reanalysis_buffer, self.session_recorder),
             daemon=True,
         )
         self.analysis_thread.start()
@@ -1206,6 +1248,11 @@ class SessionState:
     def stop(self):
         """Process-exit-only teardown -- never called between tool
         switches, only once the whole session (menu included) is done."""
+        # Idempotent and safe even if recording was never armed (see
+        # SessionRecorder.close()) -- flushes/closes a still-armed
+        # recorder's file rather than relying on the user to press 's'
+        # again before quitting.
+        self.session_recorder.close()
         if self.capture is None:
             return
         self.stop_event.set()
@@ -1229,12 +1276,14 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
     if view == "gui":
         return run_gui(session.result_queue, fullscreen, debug, session.sensitivity)
     if view == "wheel":
-        return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state)
+        return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                                   session.session_recorder)
     if view == "tab":
         return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
                                  session.capture, session.source_state, session.reanalysis_buffer,
-                                 time_signature=time_signature)
-    return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state)
+                                 session.session_recorder, time_signature=time_signature)
+    return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                              session.session_recorder)
 
 
 def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None):
@@ -1337,6 +1386,69 @@ def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=
             f"score_{time.strftime('%Y%m%d_%H%M%S')}.musicxml",
         )
         score_writer.write_score(result, resolved_write_score_path, time_signature=time_signature)
+
+
+def run_replay_session(file_path, dump_file, speed=1.0):
+    """`virtualnote replay <file>` (issue: session recording + playback,
+    feature idea 1 in docs/research/notation-and-feature-ideas.md): reads
+    a `.jsonl` session log written by `session_recorder.SessionRecorder`
+    and re-drives a real `TabDisplay` from its recorded events instead of
+    live audio -- the JSONL-log-shaped sibling of run_batch_transcribe()
+    above (same "build TabDisplay columns from already-detected note
+    events" shape, just from a session log's flat event stream instead of
+    a batch_transcribe.TranscriptionResult). No SessionState/audio is
+    touched at all, mirroring how 'transcribe' bypasses it too (see
+    virtualnote.py's main()).
+
+    Unlike batch transcription (a silent sweep with no interactive
+    render), replay renders live -- `time.sleep()` between columns paced
+    by their real recorded timestamp gaps (divided by `speed`, so 2.0
+    replays twice as fast) reproduces the original session's actual
+    pacing on screen, the same "watch what I actually played" value this
+    feature exists for. `session_player.load_events()`/`group_columns()`
+    do the pure reading/grouping (unit-tested there); this function owns
+    only the TabDisplay-driving/timing side effects, same "pure logic
+    unit-tested, real I/O smoke-tested" split as
+    rhythm_reanalysis.recompute() vs. main.py's own `R`-key wiring.
+
+    Ctrl+C stops the replay early (same as every other terminal view) --
+    still dumps via TabDisplay.dump_ansi() on the way out, covering
+    whatever was replayed up to that point, not just a full run."""
+    from terminal_tab_display import TabDisplay
+
+    events = load_events(file_path)
+    columns = group_columns(events)
+
+    display = TabDisplay(fps=config.TAB_FPS)
+    last_t = 0.0
+    try:
+        for kind, t, group in columns:
+            gap = (t - last_t) / max(speed, 1e-6)
+            if gap > 0:
+                time.sleep(gap)
+            last_t = t
+            if kind == "barline":
+                display.push_barline(t=t)
+            else:
+                push_tuples = [
+                    (event["pc"], event["octave"], _tab_note_rgb(event["pc"]),
+                     _tab_note_label(event["pc"], event["octave"]))
+                    for event in group
+                ]
+                chord_name = next((event.get("chord_name") for event in group if event.get("chord_name")), None)
+                display.push_notes(push_tuples, chord_name, t=t)
+                for event in group:
+                    display.finalize_duration(event["pc"], event["octave"], event["duration_class"])
+            status = f"virtualnote replay  file={os.path.basename(file_path)}  t={t:.2f}s  speed={speed}x"
+            display.render(status, chord_mode=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        resolved_dump_path = dump_file or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+        )
+        display.dump_ansi(resolved_dump_path)
 
 
 def main():

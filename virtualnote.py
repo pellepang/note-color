@@ -26,7 +26,8 @@ have a consistent way back to the menu without restarting the process."
 import argparse
 
 import config
-from main import SessionState, _positive_float, _parse_time_signature, run_batch_transcribe, run_session
+from main import (SessionState, _positive_float, _parse_time_signature, run_batch_transcribe, run_replay_session,
+                   run_session)
 from shell import run_menu_loop
 
 
@@ -106,6 +107,16 @@ def build_parser():
     # No _add_common_flags(transcribe_p) -- batch has no live audio, so
     # --color-scheme/--sensitivity/--source don't apply.
 
+    replay_p = sub.add_parser("replay", help="replay a recorded .jsonl session log through the tab view")
+    replay_p.add_argument("file", help="path to a .jsonl session log written by the 's' session-recording keybind")
+    replay_p.add_argument("--dump-file", default=None,
+                           help="path for the ANSI session note-history dump written when replay ends "
+                                "(default: note_history_<timestamp>.txt next to main.py)")
+    replay_p.add_argument("--speed", type=_positive_float, default=1.0,
+                           help="playback speed multiplier (default 1.0, real time; 2.0 replays twice as fast)")
+    # No _add_common_flags(replay_p) -- same reasoning as transcribe: no
+    # live audio, so --color-scheme/--sensitivity/--source don't apply.
+
     return parser
 
 
@@ -119,6 +130,12 @@ def main(argv=None):
     # bypass it entirely (see main.py's Key design decisions).
     if args.view == "transcribe":
         run_batch_transcribe(args.file, args.time_signature, args.dump_file, args.write_score)
+        return
+
+    # 'replay' likewise never touches SessionState/audio -- it re-drives
+    # TabDisplay from an already-recorded .jsonl log, not live capture.
+    if args.view == "replay":
+        run_replay_session(args.file, args.dump_file, args.speed)
         return
 
     # 'circle' is colorize's old name for the wheel view -- kept as a

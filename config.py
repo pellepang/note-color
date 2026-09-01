@@ -191,6 +191,7 @@ DEFAULT_KEYBINDS = {
     "legend_toggle": "l",
     "freeze_toggle": " ",
     "rhythm_reanalysis": "r",
+    "session_record_toggle": "s",
 }
 
 # --- Credits & donation (issue #44) ---
