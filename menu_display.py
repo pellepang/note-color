@@ -35,16 +35,17 @@ TOOLS = [
 ]
 
 # TOOLS plus the non-audio screens (issue #43's Settings, issue #44's
-# Credits, and Prototypes below) that live in the same menu but don't go
-# through main.run_session -- shell.py special-cases these view names
-# instead of dispatching them there. Selection/render/digit-jump all
-# operate on this combined list so every entry is reachable "same tier as
-# any tool" (#37), while TOOLS itself stays exactly the set run_session
-# knows how to launch.
+# Credits, Prototypes, and the Feature-4 Play Stats screen below) that
+# live in the same menu but don't go through main.run_session --
+# shell.py special-cases these view names instead of dispatching them
+# there. Selection/render/digit-jump all operate on this combined list so
+# every entry is reachable "same tier as any tool" (#37), while TOOLS
+# itself stays exactly the set run_session knows how to launch.
 MENU_ITEMS = TOOLS + [
     ("settings", "Settings -- keybinds & note colors"),
     ("credits", "Credits -- author & attribution"),
     ("prototypes", "Prototypes -- browse prototypes/ READMEs"),
+    ("stats", "Stats -- historical play stats"),
 ]
 
 
