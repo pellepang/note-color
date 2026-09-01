@@ -858,10 +858,17 @@ One-liners; full detail in `docs/DECISIONS.md`.
   onset transient (proven by running the same experiment against a real
   chord's genuine attack), and the third is already known-fragile
   tolerance-boundary territory (this exact case sits at -34.9 cents,
-  inside the existing 35-cent tolerance by construction). Left open with
-  the full investigation in `docs/DECISIONS.md` rather than forcing an
-  unsafe fix -- closing it for real would need a genuine transient/onset
-  classifier, a materially bigger feature than this issue's scope.
+  inside the existing 35-cent tolerance by construction). A follow-up
+  round tried two more angles -- a persistence gate scoped narrowly to
+  "duplicate pitch class, different octave, already active" (not (a)'s
+  blanket version) and a spectral-breadth check on the chroma novelty at
+  onset -- and empirically rejected both the same way: matched-control
+  testing showed each is indistinguishable from a common, legitimate
+  case (a genuine octave-doubled note for the first, a genuine chord/note
+  attack for the second). Left open with the full investigation (both
+  rounds) in `docs/DECISIONS.md` rather than forcing an unsafe fix --
+  closing it for real would need a genuine transient/onset classifier, a
+  materially bigger feature than this issue's scope.
 - Octave-error blips (~100ms) can occur during note decay; not worth fixing
   without a concrete complaint.
 - Live pitch-tracking quality varies run-to-run with room/mic conditions —

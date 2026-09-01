@@ -1706,6 +1706,121 @@ recorded rather than closed, so a future, better-scoped attempt (e.g.
 alongside a real onset/transient classifier, if one is ever built for
 other reasons) has this groundwork rather than starting over.
 
+### Second round: two more angles tried, same conclusion
+
+A follow-up pass looked for a genuinely different signal from the three
+already-rejected candidates above -- not a re-attempt of (a)/(b)/(c), but
+two new mechanisms neither of which this codebase had tried yet.
+
+**(e) A persistence gate scoped narrowly to "duplicate pitch class,
+different octave, while another octave of that pitch class is already an
+active `DurationTracker` state"** -- i.e. not (a)'s blanket minimum-
+persistence-before-opening-any-new-state gate, but one that only engages
+for the exact shape the phantom always has (a new key whose pitch class
+duplicates an already-long-sustained different-octave key). This is
+purely internal to `DurationTracker` (it already knows every currently
+active key's pitch class), so it was cheap to prototype: a pending-state
+buffer that accumulates peak/last magnitude across a grace window and,
+if the candidate survives `duplicate_pc_grace_hops` consecutive hops,
+opens a normal tracked state backdated to when it first appeared (so a
+note that does survive the grace window keeps its true measured
+duration, not a truncated one) -- otherwise the candidate is dropped with
+no finalize event at all.
+
+Prototyped and tested in full isolation from multipitch/chord_smoother
+(directly against `DurationTracker.update()` with hand-built per-hop note
+sequences, to remove the harmonic-pruning coin-flip noise a full pipeline
+run adds -- see below) with two matched scenarios: a "phantom" candidate
+present for exactly N consecutive hops then gone, and a "genuine" candidate
+present for the *same* N hops then gone (a player releasing a real short
+note, not a decaying transient). **Both scenarios produced byte-identical
+suppression behavior at every grace value tried (4-8 hops):** whichever
+grace threshold reliably suppressed the phantom (grace > its ~5-hop
+observed max lifetime) also completely suppressed the genuine same-length
+note, with zero finalize event either way -- not delayed, not
+under-measured, simply never reported at all. This is the same
+information-theoretic wall (a) already hit, just relocated to a narrower
+input class: duration/persistence alone cannot distinguish "short because
+it's a transient" from "short because the player played it briefly" no
+matter how the gate is scoped, because both produce the exact same
+`DurationTracker` input shape. Narrowing the gate's blast radius from "any
+new note" to "duplicate-pitch-class new notes only" doesn't buy safety --
+it only shrinks which real notes get silently dropped, and duplicate-
+pitch-class-different-octave notes are not a rare or contrived case to
+sacrifice: octave-doubling (playing the same pitch class in two registers
+at once, or adding a doubled note shortly after the first) is one of the
+most common real voicing techniques on piano and guitar alike, arguably
+*more* common than the phantom scenario this would be trading against.
+Rejected on the same evidence standard as (b) -- disproven empirically
+with a matched control, not just reasoned away. A full-pipeline run of
+this same prototype (through real `multipitch.detect()`/`chord_smoother`
+output, not hand-built sequences) additionally surfaced a second,
+independent confound worth recording: introducing a genuine new
+lower-octave note can itself intermittently knock the *existing* higher-
+octave note out of `multipitch.detect()`'s harmonic-pruning acceptance
+(the note ordering shifts once a second candidate near a harmonic-of-2
+relationship is present), reproducing (c)'s already-documented coin-flip
+independently of any duration-tracker change -- consistent with, not a
+new instance beyond, what (c) already found.
+
+**(f) Spectral breadth of the chroma novelty at the candidate's onset
+hop** -- distinct from (b) (which looked at one peak's *temporal* shape
+within its own analysis window): this instead asks whether a percussive
+transient's broadband energy shows up as a wide spread of simultaneously-
+rising `chroma.fold()` bins (many of the 12 pitch classes jumping at
+once, since noise has no privileged pitch class) versus a real note's
+attack concentrating its novelty into one or two bins (its own pitch
+class plus close harmonics). Tested directly: computed `chroma.fold()`
+frame-to-frame flux and its per-hop "how many of the 12 bins moved
+together" spread across three synthesized scenarios -- the documented
+snare-hit phantom, a genuine full chord attack from silence, and a
+genuine single new note added to an already-sustained chord. All three
+showed the same noisy, overlapping pattern: hops where all 12 bins moved
+together happened in *every* scenario, including the two genuine-note
+ones (a real chord's own onset, and a real added note's onset, both
+routinely lit up most or all 12 chroma bins on at least one hop each).
+Root cause is `fold()`'s own already-documented harmonic-summing bleed
+(issue #56's docstring in `chord_smoother.py`): a single real note's 2nd-
+4th harmonics land across several *other* pitch-class bins by design, so
+a genuine attack is already spectrally "broadband" at this 12-bin,
+single-hop resolution -- there isn't a clean narrowband/broadband line to
+draw here either, for essentially the same reason (b) found no clean
+within-window-shape line: a handful of hops of coarse aggregate spectral
+evidence just isn't enough resolution to separate "a real note's own
+onset mechanics" from "an unrelated transient's broadband onset,"
+regardless of which axis (temporal shape, spectral breadth, or now
+duration/persistence) is used to look for the difference.
+
+A third angle was considered but not separately prototyped, since the
+reasoning is conclusive without needing a run: **scaling any persistence
+gate to the *live tempo estimate* instead of a fixed hop count** (i.e.
+require some fraction of a beat rather than a fixed ms/hop threshold,
+so the gate tightens automatically at faster tempos where legitimate
+notes are also shorter). This does not resolve the underlying conflict,
+it just relocates where the two curves cross: the phantom's real-world
+duration is governed by drum-transient physics (the shell/head
+resonance's own decay time, tens of ms, tempo-independent), while a
+legitimate short note's duration is tempo-proportional by construction.
+At a slow tempo both curves sit comfortably apart (a phantom is short in
+absolute terms, a legitimate note is long in absolute terms) and a fixed
+gate already works fine there; at a fast tempo -- exactly where a real
+song is more likely to have both a driving beat *and* fast passages
+played over it -- a tempo-relative gate shrinks in lockstep with
+legitimate note length, converging on the same phantom-sized duration
+it's trying to reject. A tempo-relative gate is not more discriminating
+than a fixed one, it just makes the failure mode tempo-dependent instead
+of a flat constant.
+
+Conclusion unchanged from the first round: no signal available at the
+`DurationTracker`/`multipitch`/`chroma` layer -- duration, temporal decay
+shape, spectral breadth, or tempo-relative scaling of any of the above --
+can separate this phantom from a legitimate short note, because both
+produce indistinguishable input at every one of those layers. Left open,
+same as before; the groundwork above (particularly (e) and (f)'s
+prototypes, both matched-control-tested rather than merely reasoned
+about) is recorded so a future attempt doesn't re-spend effort
+re-discovering that these two don't work either.
+
 ## Barline drift, round 2: `_pad_center()` was padding to the wrong cell width for duration-glyph notes (issue #82)
 
 `d7d2ea0`'s fix (`_pad_center()` measuring cell text with `wcwidth.
