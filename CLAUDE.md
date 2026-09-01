@@ -155,7 +155,15 @@ virtualnote replay session.jsonl --speed 2                         # same, at 2x
 
 `virtualnote` (on PATH via `~/.local/bin/virtualnote`, added to `~/.zshrc`'s
 PATH) is the one entry point for every tool this project offers (issue
-#40), retiring the old per-tool `colorize` bash dispatcher. Bare
+#40), retiring the old per-tool `colorize` bash dispatcher. `pyproject.toml`
+(architecture-modernization-plan.md §5) declares the same entry point as a
+standard `[project.scripts]` console script, so `pip install -e .` also
+works for local development instead of relying solely on the hand-written
+`~/.local/bin/virtualnote` shim's hardcoded absolute paths; `librosa`/
+`music21` (batch-only, never on the live path — see Key design decisions)
+live in an optional `[project.optional-dependencies] batch` extra,
+`pip install -e .[batch]` for `virtualnote transcribe`/`--write-score`.
+Bare
 `virtualnote` opens an animated ANSI menu (`menu_display.py`, issue #42's
 design, built in #51) to pick a tool live — a spinning ASCII donut
 re-skinned with the circle-of-fifths palette (rim letters in full mode)
