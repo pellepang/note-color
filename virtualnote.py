@@ -126,6 +126,16 @@ def build_parser():
                            help="also play the session back live through an oscillator+ADSR synth (map #24's "
                                 "playback engine), one note per column as it's pushed on screen -- scales with "
                                 "--speed the same way the visual pacing does")
+    replay_p.add_argument("--time-signature", type=_parse_time_signature, default=config.DEFAULT_TIME_SIGNATURE,
+                           help="N/D time signature stamped into a --write-score export (default 4/4) -- a "
+                                "session log never records barlines (v1 scope, see session_recorder.py), so "
+                                "this has no effect on the replay's on-screen rendering, only on the exported "
+                                "score's <time> field")
+    replay_p.add_argument("--write-score", nargs="?", const="", default=None,
+                           help="also write a MusicXML score file (issue #89) built straight from this session "
+                                "log's own already-finalized note timings, no non-causal rhythm re-refinement -- "
+                                "omit entirely to skip score export (default), pass bare for a default path "
+                                "(score_<timestamp>.musicxml next to main.py), or give an explicit path")
     # No _add_common_flags(replay_p) -- same reasoning as transcribe: no
     # live audio, so --color-scheme/--sensitivity/--source don't apply.
 
@@ -148,7 +158,8 @@ def main(argv=None):
     # 'replay' likewise never touches SessionState/audio -- it re-drives
     # TabDisplay from an already-recorded .jsonl log, not live capture.
     if args.view == "replay":
-        run_replay_session(args.file, args.dump_file, args.speed, play=args.play)
+        run_replay_session(args.file, args.dump_file, args.speed, play=args.play,
+                            write_score_path=args.write_score, time_signature=args.time_signature)
         return
 
     # 'circle' is colorize's old name for the wheel view -- kept as a
