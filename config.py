@@ -43,7 +43,7 @@ YIN_SUBHARMONIC_SKIP_CMND = 0.01   # skip the check when the candidate is alread
 # sensitivity=1.0. Both scale down (more permissive) as sensitivity rises;
 # see NoteSmoother.set_sensitivity(). Adjustable at launch via --sensitivity
 # and live via the [ / ] hotkeys in every display mode.
-RMS_SILENCE_THRESHOLD = 0.01
+RMS_SILENCE_THRESHOLD = 0.005
 CONFIDENCE_THRESHOLD = 0.5
 DEFAULT_SENSITIVITY = 1.0
 MEDIAN_WINDOW = 5
