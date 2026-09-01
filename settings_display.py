@@ -38,6 +38,8 @@ KEYBIND_ACTIONS = [
     "freeze_toggle",
     "rhythm_reanalysis",
     "session_record_toggle",
+    "mark_range_start",
+    "mark_range_end",
 ]
 
 _KEYBIND_LABELS = {
@@ -48,6 +50,8 @@ _KEYBIND_LABELS = {
     "freeze_toggle": "Freeze view (tab view)",
     "rhythm_reanalysis": "Rhythm re-analysis (tab view)",
     "session_record_toggle": "Session recording (opt-in .jsonl log)",
+    "mark_range_start": "Loop marker: range start (tab view, frozen)",
+    "mark_range_end": "Loop marker: range end (tab view, frozen)",
 }
 
 # A generic numeric preference row -- key is the config.toml [preferences]

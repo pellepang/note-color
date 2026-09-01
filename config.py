@@ -192,6 +192,8 @@ DEFAULT_KEYBINDS = {
     "freeze_toggle": " ",
     "rhythm_reanalysis": "r",
     "session_record_toggle": "s",
+    "mark_range_start": "[",
+    "mark_range_end": "]",
 }
 
 # --- Credits & donation (issue #44) ---

@@ -345,6 +345,20 @@ happened while frozen, same convention freeze itself already follows).
 See Key design decisions for the threading approach and Known
 limitations for what's out of scope.
 
+**Loop/section markers, `tab`-view-only, freeze-mode-only.** While
+frozen, `[`/`]` (remappable, `[keybinds].mark_range_start`/
+`mark_range_end`, default `"["`/`"]"`) each mark one end of a range at
+"the point in history currently being looked at" — i.e. respecting
+whatever `Left`/`Right` scrollback position is active when the key is
+pressed, not always the live tail — and, once both ends are set, scope a
+subsequent `R`-key reanalysis to just that marked range instead of the
+whole rolling buffer. Order-independent (`]` before `[` normalizes the
+same as `[` before `]`); the current range (or a single placed end) shows
+in the status line (`mark=[1.20s,3.45s]`, or `mark=[1.20s,...]` with only
+one end set) whenever at least one mark is placed. Resets on unfreeze,
+same "no catch-up" convention scroll_offset/the reanalysis-corrected
+tempo already follow.
+
 `--source {mic,loopback}` (default `mic`) selects the input: `loopback`
 listens to the computer's own audio output instead of the microphone, via
 the PipeWire/PulseAudio monitor of the default sink (Linux only — errors
@@ -365,16 +379,19 @@ An optional TOML file at `$XDG_CONFIG_HOME/note-color/config.toml`
 exact behavior. Covers three things today, all hot-reloaded live (edit the
 file while the app is running, no restart needed):
 
-- `[keybinds]` — remap any of the seven terminal hotkeys (`source_toggle`,
+- `[keybinds]` — remap any of the nine terminal hotkeys (`source_toggle`,
   `chord_mode_toggle`, `notehead_style_toggle`, `legend_toggle`,
-  `freeze_toggle`, `rhythm_reanalysis`, `session_record_toggle`) to a
-  different single character, e.g. `source_toggle = "x"`.
-  `rhythm_reanalysis` (default `"r"`) is the tab view's freeze-mode-only
-  non-causal rhythm re-analysis trigger (issue #77); `session_record_toggle`
-  (default `"s"`) is the opt-in live session-log recorder toggle, available
-  in every terminal view. The status line's hotkey hints (`(m)`, `(p)`,
-  etc.) reflect the remap. Editable live from the menu's Settings screen
-  (below), or by hand.
+  `freeze_toggle`, `rhythm_reanalysis`, `session_record_toggle`,
+  `mark_range_start`, `mark_range_end`) to a different single character,
+  e.g. `source_toggle = "x"`. `rhythm_reanalysis` (default `"r"`) is the
+  tab view's freeze-mode-only non-causal rhythm re-analysis trigger
+  (issue #77); `session_record_toggle` (default `"s"`) is the opt-in live
+  session-log recorder toggle, available in every terminal view;
+  `mark_range_start`/`mark_range_end` (default `"["`/`"]"`) are the tab
+  view's freeze-mode-only loop/section markers that scope a subsequent
+  `rhythm_reanalysis` press to just the marked range. The status line's
+  hotkey hints (`(m)`, `(p)`, etc.) reflect the remap. Editable live from
+  the menu's Settings screen (below), or by hand.
 - `[colors]` — override a note's hue (degrees, 0–360) by name, either
   sharp or flat spelling, e.g. `C = 200` or `"F#" = 45`. Saturation and
   octave-driven lightness are untouched by the override. Also editable
@@ -869,6 +886,24 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   since they already fall back to the same `DEFAULT_DURATION_CLASS` the
   live path uses when no bpm is available -- applying them is never worse
   than what's already displayed.
+- Loop/section markers (`mark_range_start`/`mark_range_end`) store
+  timestamps, not `scroll_offset` counts or entry indices -- a timestamp
+  stays meaningful as `scroll_offset` itself keeps changing across further
+  Left/Right presses, where an index captured at mark-time would silently
+  point at the wrong column once the view scrolls further. Captured via
+  `TabDisplay.timestamp_at_offset()`, the same truncation `render(
+  scroll_offset=N)` itself applies, so a mark lands on whatever column is
+  actually on screen at the moment the key is pressed, not the live tail.
+  `main._handle_reanalysis_key()`'s `mark_range=` param filters the
+  `ReanalysisBuffer` snapshot down to that `[lo, hi]` window (via
+  `main._filter_hop_records_to_range()`) *before* calling `rhythm_
+  reanalysis.recompute()`, rather than teaching `recompute()` itself about
+  ranges -- `recompute()` already treats an empty `hop_records` list as
+  its existing "nothing to reanalyze" no-op, so a marked range with no
+  hops inside it is handled for free, no new case to add there.
+  Order-independent (`main._mark_range()` normalizes whichever end was
+  pressed second into `(lo, hi)`) since there's no reason to require the
+  user press start before end.
 - `virtualnote replay` renders live (`main.run_replay_session()`) rather
   than following `run_batch_transcribe()`'s silent-sweep-then-dump shape,
   even though both are otherwise "build `TabDisplay` columns from

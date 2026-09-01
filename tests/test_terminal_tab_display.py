@@ -668,6 +668,44 @@ def test_default_scrollback_seconds_matches_config(monkeypatch):
     assert display.scrollback_seconds == config.TAB_SCROLLBACK_SECONDS
 
 
+# --- timestamp_at_offset() (loop/section markers) ---
+
+def test_timestamp_at_offset_empty_display_is_none():
+    display = TabDisplay(fps=20)
+    assert display.timestamp_at_offset(0) is None
+
+
+def test_timestamp_at_offset_zero_is_the_newest_entry():
+    display = TabDisplay(fps=20)
+    display.push(0, 4, (200, 50, 50), "C4", t=0.0)
+    display.push(2, 4, (200, 50, 50), "D4", t=1.0)
+    assert display.timestamp_at_offset(0) == 1.0
+
+
+def test_timestamp_at_offset_matches_render_scroll_offset_truncation():
+    # Same entry render(scroll_offset=N) would treat as "the newest
+    # visible column" -- offset 1 hides the newest push, landing on the
+    # one before it.
+    display = TabDisplay(fps=20)
+    display.push(0, 4, (200, 50, 50), "C4", t=0.0)
+    display.push(2, 4, (200, 50, 50), "D4", t=1.0)
+    display.push(4, 4, (200, 50, 50), "E4", t=2.0)
+    assert display.timestamp_at_offset(1) == 1.0
+    assert display.timestamp_at_offset(2) == 0.0
+
+
+def test_timestamp_at_offset_beyond_history_is_none():
+    # Mirrors render(scroll_offset=N)'s own truncation exactly (see there)
+    # -- an offset this large truncates all_entries to empty. Unreachable
+    # via the real Left/Right-arrow path (_handle_scroll_keys clamps
+    # scroll_offset to len(display.entries) - 1), but this method has no
+    # internal clamp of its own, so it's worth pinning the behavior.
+    display = TabDisplay(fps=20)
+    display.push(0, 4, (200, 50, 50), "C4", t=0.0)
+    display.push(2, 4, (200, 50, 50), "D4", t=1.0)
+    assert display.timestamp_at_offset(50) is None
+
+
 # --- render(scroll_offset=...) ---
 
 def test_scroll_offset_zero_matches_default_render(monkeypatch):
