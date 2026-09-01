@@ -1,41 +1,77 @@
-"""virtualnote's Prototypes screen: browse `prototypes/` from inside the
-running app, so a throwaway prototype's own README write-up (this repo's
-existing convention -- see every `prototypes/*/README.md` and
-`docs/research/project-retrospective-and-alternatives.md`'s Part 3 table)
-can be skimmed and assessed without leaving the terminal or hunting
-through the tree by hand. Reached as its own menu entry
-(menu_display.MENU_ITEMS), same tier as Settings/Credits.
+"""virtualnote's Prototypes screen: browse and *run* `prototypes/` from
+inside the running app, so a throwaway prototype can actually be watched
+working -- its own real, colored terminal output -- instead of only being
+read about. Reached as its own menu entry (menu_display.MENU_ITEMS), same
+tier as Settings/Credits.
 
-Two-level list/detail viewer, both read-only: a list of every prototype
-that has a README.md, and a scrollable full-text view of the selected
-one's README. Static content, raw ANSI, no user-editable state -- same
-"scoped exception only for Settings' form controls" reasoning
-credits_display.py already documents (#37/#39): this screen only ever
-reads files, so it doesn't need Settings' `blessed` dependency either.
+Enter is the primary action: it hands the real terminal to the selected
+prototype's own no-argument demo/harness script as a subprocess (stdio
+inherited, so its raw ANSI/color output renders exactly as if launched by
+hand from a shell -- these are the same scripts each README's own "How to
+run it" section already documents running standalone), waits for it to
+exit, then waits for one keypress before returning to the list. `i`/Right
+opens a secondary, scrollable README view for whichever context/write-up
+a prototype's own README carries beyond its bare output -- this is the
+list/detail viewer an earlier version of this screen used as its *only*
+action; execution is more useful for "watch it work" but the README is
+still worth keeping one key-press away.
 
-Never executes any prototype's code -- prototypes are throwaway,
-standalone scripts with their own ad hoc CLI usage (each README's own
-"How to run it" section). This screen is purely for reading the
-write-up; actually running one is still a manual
-`.venv/bin/python prototypes/<name>/<script>.py` outside virtualnote,
-same as always.
+Two-level loop, both driven by this repo's raw-ANSI convention (`|`
+returns to the menu from either level; the running-a-subprocess step is
+the one place this screen briefly hands the terminal back to cooked mode
+-- see run_prototypes_screen()'s docstring). No `blessed` dependency,
+same "no editable state beyond selection" reasoning credits_display.py
+documents (#37/#39).
 
-Per this repo's test convention: the pure listing/wrapping/pagination
-helpers below (list_prototypes(), _wrap_readme(), _visible_slice()) are
-unit-tested; the interactive poll-and-render loop itself
-(run_prototypes_screen) is smoke-tested manually, same as
-menu_display's/credits_display's own render loops.
+Per this repo's test convention: the pure listing/entry-script-resolution/
+wrapping/pagination helpers below (list_prototypes(), _find_entry_script(),
+_wrap_readme(), _visible_slice()) are unit-tested; the interactive
+poll-and-render loop itself (run_prototypes_screen) is smoke-tested
+manually, same as menu_display's/credits_display's own render loops.
 """
 
 import os
 import shutil
+import subprocess
 import sys
 import textwrap
 import time
 
 import config
 
-PROTOTYPES_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prototypes")
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROTOTYPES_ROOT = os.path.join(REPO_ROOT, "prototypes")
+
+# The no-argument demo entry point every existing prototype's own README
+# "How to run it" section documents follows one of these common demo-
+# script names, checked in this order. A prototype with no file matching
+# any of these (piano-roll-view/piano_roll.py, tracker-grid-view/
+# tracker_grid.py -- both single-script prototypes with no separate
+# demo/harness wrapper) falls back to "the one .py file in this
+# directory" in _find_entry_script() below, rather than guessing a
+# name-derived filename (dropping "-view"/"-mode"/etc. suffixes from the
+# directory name isn't a real, generalizable rule -- a directory with
+# more than one non-candidate .py file has no unambiguous entry point
+# this way, so it just isn't offered a 'run' action; its README is still
+# browsable via 'i').
+_ENTRY_SCRIPT_CANDIDATES = ("demo.py", "run_demo.py", "harness.py")
+
+
+def _find_entry_script(prototype_dir, name):
+    """The no-argument script list_prototypes() should offer to run for
+    the prototype at `prototype_dir`, or None if nothing matches this
+    repo's established naming convention (see module docstring). `name`
+    is accepted for a consistent signature with list_prototypes()'s other
+    per-entry helpers but isn't otherwise used. Pure filesystem lookup, no
+    execution -- unit-tested directly."""
+    for candidate in _ENTRY_SCRIPT_CANDIDATES:
+        path = os.path.join(prototype_dir, candidate)
+        if os.path.isfile(path):
+            return path
+    py_files = sorted(f for f in os.listdir(prototype_dir) if f.endswith(".py"))
+    if len(py_files) == 1:
+        return os.path.join(prototype_dir, py_files[0])
+    return None
 
 
 def list_prototypes(root=None):
@@ -47,15 +83,18 @@ def list_prototypes(root=None):
     see docstring above), so a missing one signals scratch/incomplete
     content, not a real prototype ready to assess.
 
-    Returns a list of {"name", "title", "readme_path"} dicts -- `title`
-    is the README's first non-blank line with a leading '#'/whitespace
-    stripped (its H1), falling back to `name` if the file has none."""
+    Returns a list of {"name", "title", "readme_path", "script_path"}
+    dicts -- `title` is the README's first non-blank line with a leading
+    '#'/whitespace stripped (its H1), falling back to `name` if the file
+    has none; `script_path` is `_find_entry_script()`'s result, or None
+    if this prototype has no runnable entry point by that convention."""
     root = root or PROTOTYPES_ROOT
     entries = []
     if not os.path.isdir(root):
         return entries
     for name in sorted(os.listdir(root)):
-        readme_path = os.path.join(root, name, "README.md")
+        prototype_dir = os.path.join(root, name)
+        readme_path = os.path.join(prototype_dir, "README.md")
         if not os.path.isfile(readme_path):
             continue
         title = name
@@ -65,7 +104,12 @@ def list_prototypes(root=None):
                 if stripped:
                     title = stripped
                     break
-        entries.append({"name": name, "title": title, "readme_path": readme_path})
+        entries.append({
+            "name": name,
+            "title": title,
+            "readme_path": readme_path,
+            "script_path": _find_entry_script(prototype_dir, name),
+        })
     return entries
 
 
@@ -104,12 +148,13 @@ def _visible_slice(lines, scroll, height):
 def _render_list(entries, selected, status):
     size = shutil.get_terminal_size(fallback=(80, 24))
     cols, rows = size
-    lines = ["Prototypes -- browse prototypes/ (read-only)", ""]
+    lines = ["Prototypes -- run or read prototypes/ (from note-color's own repo)", ""]
     if not entries:
         lines.append("(no prototypes with a README.md found)")
     for i, entry in enumerate(entries):
         marker = "> " if i == selected else "  "
-        line = f"{marker}{entry['name']} -- {entry['title']}"
+        tag = " [run]" if entry["script_path"] else " [no runnable demo]"
+        line = f"{marker}{entry['name']} -- {entry['title']}{tag}"
         if i == selected:
             line = f"\033[7m{line}\033[0m"
         lines.append(line)
@@ -129,7 +174,7 @@ def _render_detail(entry, wrapped_lines, scroll, rows_available):
     cols, rows = size
     visible, scroll = _visible_slice(wrapped_lines, scroll, rows_available)
 
-    header = f"Prototypes / {entry['name']}"
+    header = f"Prototypes / {entry['name']}  (README)"
     shown_through = min(scroll + rows_available, len(wrapped_lines))
     status = (f"Up/Down=scroll  Left/Backspace=back to list  |=back to menu"
               f"  ({shown_through}/{len(wrapped_lines)} lines)")
@@ -143,11 +188,36 @@ def _render_detail(entry, wrapped_lines, scroll, rows_available):
     return scroll
 
 
+def _run_prototype(keys, entry):
+    """Hands the real terminal over to `entry`'s demo script for the
+    duration of one subprocess run -- this screen's own raw/cbreak stdin
+    mode is restored to cooked first (`keys.restore()`) since a child
+    script expects an ordinary terminal, not this screen's single-key
+    polling mode; the caller re-enters raw mode via a fresh RawKeys()
+    once this returns. stdout/stderr are inherited (no capture) so the
+    prototype's raw ANSI/color output renders directly, the same as
+    running it by hand per its own README's "How to run it" section.
+    Blocks until the subprocess exits, then waits for one real keypress
+    (a plain blocking `input()`, since stdin is back in cooked/line mode
+    here) before returning control to the list."""
+    keys.restore()
+    sys.stdout.write("\033[0m\033[2J\033[H\033[?25h")
+    sys.stdout.flush()
+    print(f"Running {entry['name']}: {os.path.relpath(entry['script_path'], REPO_ROOT)}\n")
+    subprocess.run([sys.executable, entry["script_path"]], cwd=REPO_ROOT)
+    try:
+        input("\n-- prototype exited. Press Enter to return to Prototypes. --")
+    except EOFError:
+        pass
+
+
 def run_prototypes_screen():
-    """Interactive list/detail loop -- Up/Down moves the list selection or
-    scrolls the open detail view (one line at a time); Enter/Right opens
-    the selected prototype's README; Left/Backspace closes it back to the
-    list; `|` returns to the menu from either level, same global
+    """Interactive list/detail loop. In the list: Up/Down moves the
+    selection; Enter runs the selected prototype's own demo script live
+    (see _run_prototype()) if it has one, falling back to the README view
+    when it doesn't; `i`/Right always opens the README view regardless.
+    In the README view: Up/Down scrolls, Left/Backspace closes back to
+    the list. `|` returns to the menu from either level, same global
     convention every other screen follows. Inert (returns immediately)
     when stdin isn't a real TTY, same graceful-degradation rationale as
     credits_display.run_credits_screen()."""
@@ -159,6 +229,7 @@ def run_prototypes_screen():
     detail_entry = None
     detail_lines = []
     detail_scroll = 0
+    list_status = "Up/Down=select  Enter=run  i/Right=info(readme)  |=back to menu"
 
     sys.stdout.write("\033[?25l")
     sys.stdout.flush()
@@ -166,7 +237,7 @@ def run_prototypes_screen():
     try:
         if not keys.active:
             return
-        _render_list(entries, selected, "Up/Down=select  Enter/Right=view  |=back to menu")
+        _render_list(entries, selected, list_status)
         while True:
             key = keys.poll()
             if key is None:
@@ -177,22 +248,32 @@ def run_prototypes_screen():
 
             # Handle the keypress first, then render whichever mode it
             # left us in -- a single render dispatch at the bottom (rather
-            # than one per branch above) is what makes Enter open the
-            # detail view on the very same keypress instead of a frame
-            # late (an earlier version rendered the list unconditionally
-            # here, so opening a README only actually appeared on the
-            # *next* keypress).
+            # than one per branch above) is what makes an action take
+            # effect on the very same keypress instead of a frame late.
             if mode == "list":
                 if key == "UP" and entries:
                     selected = (selected - 1) % len(entries)
                 elif key == "DOWN" and entries:
                     selected = (selected + 1) % len(entries)
-                elif entries and (key in ("\r", "\n") or key == "RIGHT"):
+                elif entries and key in ("i", "I", "RIGHT"):
                     detail_entry = entries[selected]
                     size = shutil.get_terminal_size(fallback=(80, 24))
                     detail_lines = _wrap_readme(detail_entry["readme_path"], size.columns)
                     detail_scroll = 0
                     mode = "detail"
+                elif entries and key in ("\r", "\n"):
+                    entry = entries[selected]
+                    if entry["script_path"]:
+                        _run_prototype(keys, entry)
+                        keys = RawKeys()
+                        sys.stdout.write("\033[?25l")
+                        sys.stdout.flush()
+                    else:
+                        detail_entry = entry
+                        size = shutil.get_terminal_size(fallback=(80, 24))
+                        detail_lines = _wrap_readme(detail_entry["readme_path"], size.columns)
+                        detail_scroll = 0
+                        mode = "detail"
             else:
                 if key == "UP":
                     detail_scroll -= 1
@@ -202,7 +283,7 @@ def run_prototypes_screen():
                     mode = "list"
 
             if mode == "list":
-                _render_list(entries, selected, "Up/Down=select  Enter/Right=view  |=back to menu")
+                _render_list(entries, selected, list_status)
             else:
                 size = shutil.get_terminal_size(fallback=(80, 24))
                 rows_available = max(size.lines - 3, 1)

@@ -129,10 +129,10 @@ into an implicit `None` as before — see Key design decisions.
 | `menu_animation.py` | Animation math for the menu screen's donut (issues #42/#51), ported from the throwaway prototype at `prototype/issue-42-menu-animation/{donut_fifths.py,autodetect.py}`: `render_frame()` — NumPy-vectorized torus point-projection (`_project()`) + a painter's-algorithm z-buffer via ascending-depth-sort fancy-indexing (no per-point Python loop) — re-skinned with the circle-of-fifths palette (`band_color()`/`FIFTHS_LABELS`), full mode shaded/lettered, perf mode flat/letterless/half-raster. `detect_perf_mode()`/`_decide_perf_mode()` — issue #46's auto-detect heuristic (core-count floor, then a real self-timed `render_frame()` probe against the full-mode frame budget), split into a real-timing wrapper and a pure decision function for testability. |
 | `settings_display.py` | `run_settings_screen()` — `virtualnote`'s interactive Settings screen (issue #43): edits `config_store`'s keybind remaps, per-note hue overrides, and generic numeric preferences live, using `blessed` for field navigation and "press a key to capture this remap"/"type a clamped number" input (the one deliberate exception to raw-ANSI chrome elsewhere in the shell, per #37/#39). `FIELDS` (three kinds: `"keybind"`/`"color"`/`"numeric"`) / `NUMERIC_FIELDS` (spec list: key, label, min, max, step, default — today covers `rhythm_reanalysis_window_seconds` and `tab_scrollback_seconds`) / `move()` / `keybind_value()`/`color_value()`/`numeric_value()` / `is_valid_remap_key()` / `parse_hue_input()` (wraps modulo 360) / `parse_numeric_input()` (clamps into `[min, max]`, the correct behavior for a bounded quantity unlike hue's circular wrap) / `apply_field_edit()` / `clear_field()` are the pure, unit-tested logic; `run_settings_screen()`'s render/edit-capture loop itself (including `_capture_numeric()`, modeled on `_capture_hue()`) is smoke-tested manually, same convention as every `run_terminal_*` loop. |
 | `credits_display.py` | `run_credits_screen()` — `virtualnote`'s static Credits screen (issue #44): author, Claude/AI-assistance credit, and third-party library attribution (`THIRD_PARTY_LIBRARIES`), raw ANSI (no editable state, so no need for `settings_display`'s `blessed` exception). `credits_lines()` is the pure, unit-tested text builder; the render/wait-for-any-keypress loop itself is smoke-tested manually. |
-| `prototypes_display.py` | `run_prototypes_screen()` — `virtualnote`'s Prototypes screen: a read-only two-level list/detail browser over every `prototypes/*/README.md`, so a throwaway prototype's own write-up can be skimmed and assessed from inside the app instead of hunting through the tree by hand. `list_prototypes()` (pure, sorted by name, skips a subdirectory with no `README.md`) supplies the list; Enter/`RIGHT` opens the selected one's README, wrapped to terminal width by `_wrap_readme()` and paginated by `_visible_slice()` (both pure, unit-tested); `LEFT`/Backspace closes back to the list, `|` returns to the menu from either level. Raw ANSI, no editable state, same `blessed`-free reasoning as `credits_display.py`. Never executes a prototype's own code — reading only; running one is still a manual `.venv/bin/python prototypes/<name>/<script>.py` outside virtualnote. |
+| `prototypes_display.py` | `run_prototypes_screen()` — `virtualnote`'s Prototypes screen: lets a prototype under `prototypes/` actually be *run*, live, from inside the app — Enter hands the real terminal to the selected prototype's own no-argument demo/harness script as a subprocess (stdio inherited, so its raw ANSI/color output renders exactly as running it by hand would), waits for it to exit, then a keypress returns to the list. `list_prototypes()` (pure, sorted by name, skips a subdirectory with no `README.md`) supplies the list, each entry's `script_path` resolved by `_find_entry_script()` (checks `demo.py`/`run_demo.py`/`harness.py` in order, then falls back to "the one `.py` file in this directory" if unambiguous — see that function's docstring for why a name-derived guess isn't used) — an entry with no resolvable script just isn't offered a `[run]` action. `i`/`RIGHT` always opens a secondary README view (wrapped by `_wrap_readme()`, paginated by `_visible_slice()`, both pure/unit-tested); `LEFT`/Backspace closes it back to the list, `|` returns to the menu from either level. Raw ANSI, no editable state, same `blessed`-free reasoning as `credits_display.py`. |
 | `shell.py` | `run_menu_loop(session)` — `virtualnote`'s unified in-process orchestrator (issue #40): shows the menu, dispatches a pick to `main.run_session()`, loops back to the menu on a `"menu"` sentinel, exits the process on `"quit"`. `_handle_menu_key()` is the pure keypress-to-selection logic. `"settings"`/`"credits"`/`"prototypes"` picks are special-cased via `_NON_SESSION_SCREENS` straight to `settings_display.run_settings_screen()`/`credits_display.run_credits_screen()`/`prototypes_display.run_prototypes_screen()` instead of `run_session()` (issues #43, #44, and the Prototypes browser) — none touches audio, so all three always return straight back to the menu. |
 | `virtualnote.py` | CLI entry point for the unified shell (issue #40): `build_parser()` (bare menu vs. `<view> [flags]`, replicating every flag the retired `colorize` dispatcher forwarded; `--menu-perf-mode {auto,full,perf}`, top-level-only, issue #51's CLI override for the menu donut; `tab`'s `--time-signature`, the standalone `transcribe <file> [--dump-file] [--time-signature]` subcommand (issue #55), and the standalone `replay <file> [--dump-file] [--speed]` subcommand (session recording + playback)) + `main()`, which builds one `main.SessionState` and hands off to `shell.run_menu_loop()` or `main.run_session()` directly — except `transcribe`/`replay`, handled and returned before `SessionState` is even constructed, since neither touches live audio. |
-| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content), `test_menu_animation.py` (projection/shading helpers, `render_frame()` shape/smoke checks, the auto-detect decision function), `test_menu_display.py` (`_layout()`'s donut/text-pane column split, `_resolve_perf_mode()`'s override precedence, `_text_lines()`'s content), `test_onset_detect.py`/`test_duration_tracker.py`/`test_tempo_tracker.py`/`test_batch_transcribe.py` (issue #55: synthetic spectra/chroma/magnitude-envelope/periodic-impulse fixtures, same "synthesize the signal, no binary fixtures" convention `test_chroma.py`'s `make_tone()` set), `test_rhythm_reanalysis.py` (issue #77: synthesized `HopRecord` sequences exercising `rhythm_reanalysis.recompute()` directly — corrected durations, chord-onset-on-reappearance, tempo recovery from a periodic novelty signal, barline placement, the empty-buffer `None` case — same convention, not `main.py`'s threaded `R`-key wiring itself, which is smoke-tested manually per this repo's existing `run_terminal_*` convention), `test_session_recorder.py` (mono-pairs-with-previous-hop/chord-tone-via-note_stack event shape, the not-armed no-op, idempotent close), `test_session_player.py` (`load_events()`'s sort, `group_columns()`'s chord-tone grouping and note-before-barline tie-break), `test_prototypes_display.py` (`list_prototypes()`'s sort/title-from-H1/no-README-skip, `_wrap_readme()`'s wrapping, `_visible_slice()`'s pagination/clamping — not `run_prototypes_screen()` itself, smoke-tested manually per this repo's existing `run_terminal_*`/`run_credits_screen`/`run_settings_screen` convention). |
+| `tests/` | `test_pitch_detect.py`, `test_note_smoother.py`, `test_color_map.py`, `test_staff_map.py`, `test_chroma.py`, `test_chord_templates.py`, `test_multipitch.py`, `test_chord_smoother.py`, `test_terminal_tab_display.py`, `test_config_store.py`, `test_shell.py` (the new global key handlers/legend builder, `MenuDisplay` selection state, `shell._handle_menu_key`, `virtualnote.build_parser()` — not the threaded/interactive loops themselves, per this repo's existing test convention), `test_settings_display.py` (field layout/formatting/parsing/edit helpers, each test isolated onto its own `tmp_path` config file via a monkeypatched `settings_display.store` — never the real `~/.config/note-color/config.toml`), `test_credits_display.py` (`credits_lines()` text content), `test_menu_animation.py` (projection/shading helpers, `render_frame()` shape/smoke checks, the auto-detect decision function), `test_menu_display.py` (`_layout()`'s donut/text-pane column split, `_resolve_perf_mode()`'s override precedence, `_text_lines()`'s content), `test_onset_detect.py`/`test_duration_tracker.py`/`test_tempo_tracker.py`/`test_batch_transcribe.py` (issue #55: synthetic spectra/chroma/magnitude-envelope/periodic-impulse fixtures, same "synthesize the signal, no binary fixtures" convention `test_chroma.py`'s `make_tone()` set), `test_rhythm_reanalysis.py` (issue #77: synthesized `HopRecord` sequences exercising `rhythm_reanalysis.recompute()` directly — corrected durations, chord-onset-on-reappearance, tempo recovery from a periodic novelty signal, barline placement, the empty-buffer `None` case — same convention, not `main.py`'s threaded `R`-key wiring itself, which is smoke-tested manually per this repo's existing `run_terminal_*` convention), `test_session_recorder.py` (mono-pairs-with-previous-hop/chord-tone-via-note_stack event shape, the not-armed no-op, idempotent close), `test_session_player.py` (`load_events()`'s sort, `group_columns()`'s chord-tone grouping and note-before-barline tie-break), `test_prototypes_display.py` (`list_prototypes()`'s sort/title-from-H1/no-README-skip/`script_path` resolution, `_find_entry_script()`'s candidate-name/sole-.py-file/ambiguous-None cases, `_wrap_readme()`'s wrapping, `_visible_slice()`'s pagination/clamping — not `run_prototypes_screen()` itself, smoke-tested manually per this repo's existing `run_terminal_*`/`run_credits_screen`/`run_settings_screen` convention). |
 
 ## Running it
 
@@ -162,12 +162,12 @@ re-skinned with the circle-of-fifths palette (rim letters in full mode)
 beside the tool list: the four audio tools above, a `Settings` entry
 (issue #43) for editing keybind remaps and per-note color overrides live
 (see the Config file section below), a `Credits` entry (issue #44)
-with full attribution, and a `Prototypes` entry for browsing every
-`prototypes/*/README.md` from inside the app (see `prototypes_display.py`
-in the Files table above) — a read-only list/detail viewer meant for
-skimming and assessing a throwaway prototype's write-up, not for running
-its code (still a manual `.venv/bin/python prototypes/<name>/<script>.py`
-outside virtualnote); the menu screen itself also names the author and a
+with full attribution, and a `Prototypes` entry for running or reading
+every `prototypes/*/` entry from inside the app (see `prototypes_display.py`
+in the Files table above) — Enter runs the selected prototype's own
+demo/harness script live, right in the terminal, so it can actually be
+watched working instead of only read about; `i` opens its README for
+context; the menu screen itself also names the author and a
 clickable donation link (`config.AUTHOR_NAME`/`DONATION_URL`) right below
 the title, regardless of which entry is selected. A performance-mode
 fallback (half raster, coarser sampling, no letters, half framerate) is
@@ -887,18 +887,52 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   conceptually placed just after the note that crossed it, the same order
   `run_batch_transcribe()` itself pushes them in (`push_notes()` then
   `push_barline()` within one onset_hop's iteration).
-- The Prototypes screen (`prototypes_display.py`) never executes a
-  prototype's own code, only reads its `README.md` -- prototypes are
-  throwaway, standalone scripts with their own ad hoc CLI usage (each
-  README's own "How to run it" section covers wildly different args:
-  audio files, synthetic fixtures, no args at all), so there's no single
-  safe/generic "run it" action this screen could offer without either
-  guessing wrong or building a bespoke launcher per prototype -- reading
-  the write-up to decide whether a prototype is worth adopting (this
-  screen's actual stated purpose) doesn't need execution at all, the same
-  "assess before adopting" use case
-  `docs/research/project-retrospective-and-alternatives.md`'s own Part 3
-  table already serves in text form.
+- The Prototypes screen (`prototypes_display.py`) runs a prototype's own
+  demo/harness script exactly as its README's "How to run it" section
+  already documents doing by hand (`.venv/bin/python
+  prototypes/<name>/<script>.py`, no arguments) -- every existing
+  prototype's demo is deliberately self-contained and argument-free (see
+  each README), so "the no-arg script this convention already
+  established" is a real, safe, generic "run it" action, not a guess;
+  `_find_entry_script()` only ever resolves to that convention (a known
+  demo-script name, or the sole `.py` file when unambiguous) and leaves
+  an entry unrunnable rather than guessing when a prototype doesn't match
+  it. Reading the README (`i`) stays available for context, but running
+  the thing live -- watching its actual colored/staff output -- is now
+  the primary action, since that's what "assess whether a prototype is
+  worth adopting" actually benefits from over prose alone.
+- Running a prototype hands the real terminal to it as a subprocess with
+  stdio inherited (`_run_prototype()`), rather than capturing its output
+  to redisplay inside this screen's own ANSI chrome -- a prototype's
+  color/cursor-positioning output is meant to be seen exactly as it
+  renders standalone (that's the whole point of watching it work), and
+  re-parsing/re-emitting captured ANSI bytes through this screen's own
+  rendering would risk exactly the kind of column-desync bug this
+  project's `scripts/terminal_screenshot.py` (`docs/research/
+  terminal-visual-capture-for-agents.md`) exists to catch, for zero
+  benefit here. `RawKeys.restore()` drops this screen's own cbreak mode
+  first (a subprocess expects an ordinary cooked terminal, not this
+  screen's single-key polling), and a fresh `RawKeys()` re-enters it once
+  the subprocess exits -- the same "construct a new instance to resume
+  raw mode" pattern `run_menu_loop()` already uses per menu round-trip.
+- `session-log-and-practice-mode/_repo_paths.py` appends `REPO_ROOT` to
+  `sys.path` instead of inserting it at the front -- a real bug found
+  while wiring up live prototype execution: this prototype's own local
+  `session_recorder.py`/`session_player.py` (what the real, same-named
+  repo-root modules were ported *from*) got shadowed the moment those
+  real modules actually shipped, since inserting at index 0 put
+  `REPO_ROOT` ahead of the script's own directory (which Python already
+  puts at `sys.path[0]` automatically for a directly-run script).
+  `demo.py`'s `from session_player import SessionPlayer` silently
+  resolved to the real module (no `SessionPlayer` class there) instead of
+  this prototype's own, crashing with an `ImportError`. Appending instead
+  keeps a prototype's own same-named files authoritative for itself,
+  falling back to the real repo only for names it doesn't define
+  (`config`, `color_map`, `duration_tracker`). Every other prototype still
+  inserts `REPO_ROOT` at the front of `sys.path` (harmless there -- none
+  of them has a local file sharing a name with a real repo-root module),
+  so this fix is scoped to this one prototype's own bootstrap file rather
+  than a change to the convention every prototype follows.
 
 ## Known limitations / things learned
 
