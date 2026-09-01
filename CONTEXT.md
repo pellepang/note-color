@@ -1,8 +1,10 @@
 # note-color
 
-Real-time audio-to-color visualizer. This glossary covers the vocabulary introduced by the chord-mode effort (see wayfinder map [#1](https://github.com/pellepang/note-color/issues/1)) — the monophonic pipeline's terms (note, pitch, onset) are covered by code comments and `docs/DECISIONS.md`, not repeated here.
+Real-time audio-to-color visualizer. This glossary covers vocabulary introduced by feature efforts that isn't already self-evident from code comments and `docs/DECISIONS.md` — the monophonic pipeline's own terms (note, pitch, onset) are covered there, not repeated here.
 
 ## Language
+
+### Chord mode (wayfinder map [#1](https://github.com/pellepang/note-color/issues/1))
 
 **Chroma vector**:
 A 12-element vector folding all spectral energy in an analysis window into the 12 pitch classes (C, C♯, D, ... B), discarding octave. The input to chord matching.
@@ -33,3 +35,18 @@ _Avoid_: Chord label — "label" already denotes the per-note name drawn in `tab
 
 **Slash chord**:
 A chord whose sounding bass note (per **Bass chroma**) differs from its own root — an inversion, or a chord voiced over a foreign bass. Rendered in a chord name as "<name>/<bass>" (e.g. "C/E"); a chord in root position omits the slash.
+
+### Score editor (wayfinder map [#85](https://github.com/pellepang/note-color/issues/85))
+
+**Column** (editor sense):
+One time-slot in a loaded score — the simultaneous group of zero-or-more sounding notes (or a **Rest**) at one position in the piece, addressed as a unit by the editor's cursor's left/right movement. Distinct from `tab`'s own live-scrolling `TabEntry` column (same underlying idea — one moment's worth of notes — but the editor's is a fixed, random-access slot in an already-loaded score, not a column arriving in real time).
+
+**Rest** (editor sense):
+A column deliberately marked as silence, with its own duration like any note. Created only via a dedicated action, never an incidental side effect of deleting a column's last note — the editor refuses to let ordinary note removal empty a column to zero notes for exactly this reason, so "empty" is never ambiguous with "rest."
+_Avoid_: Empty column — a column mid-edit with zero notes isn't a valid state; it's either got notes or it's a Rest.
+
+**Chord builder**:
+The dedicated screen reached by drilling into a column (from the main editor view), for constructing or editing that column's chord via independently adjustable **Reels**. Distinct from the main editor view's own inline pitch/duration editing, which needs no drill-in.
+
+**Reel**:
+One independently spinnable, typeahead-able component of the **Chord builder** — root, quality (a preset shortcut), or one of the third/fifth/seventh degrees. Spinning or typing into a reel updates the column's notes live, with no separate confirm step.
