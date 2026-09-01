@@ -808,6 +808,29 @@ def _tab_note_label(pitch_class, octave):
     return f"{NOTE_NAMES_FIFTHS[pitch_class]}{octave}"
 
 
+def _hop_beats(beats_values):
+    """The number of beats to credit toward `beats_accumulated` for one
+    hop, taking the max across every note-duration finalization this hop
+    rather than summing them (issue #76). The mono and chord/multipitch
+    DurationTrackers both always run every hop (this codebase's
+    always-on-pipeline convention) and routinely finalize the *same*
+    underlying acoustic note independently -- e.g. an ordinary single note
+    is tracked by both the mono smoother and multipitch's one-note
+    "chord". Summing both trackers' contributions into `beats_accumulated`
+    double-counted that shared note, roughly halving real barline spacing;
+    taking the max instead mirrors run_batch_transcribe()'s already-correct
+    per-onset `max()` over simultaneous notes at one column -- the beat
+    position should advance once per hop's worth of music, not once per
+    tracker that happened to notice it. `beats_values` is the list of
+    `beats` values computed for whatever notes finalized this hop (mono's,
+    if any, plus one per note_stack entry); an entry may itself be `None`
+    (bpm_estimate was unknown at finalization time), treated as 0.0."""
+    hop_beats = 0.0
+    for beats in beats_values:
+        hop_beats = max(hop_beats, beats or 0.0)
+    return hop_beats
+
+
 def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state,
                       reanalysis_buffer, time_signature=config.DEFAULT_TIME_SIGNATURE):
     from terminal_tab_display import TabDisplay
@@ -929,12 +952,12 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                     # "chord". Summing both trackers' beats into
                     # beats_accumulated double-counted that shared note,
                     # roughly halving real barline spacing (issue #76).
-                    # `hop_beats` takes the max across every finalization
+                    # `_hop_beats()` takes the max across every finalization
                     # this hop instead, mirroring run_batch_transcribe()'s
                     # per-onset `max()` over simultaneous notes -- the beat
                     # position should advance once per hop's worth of
                     # music, not once per tracker that happened to notice it.
-                    hop_beats = 0.0
+                    hop_beats_values = []
 
                     # Monophonic duration finalization belongs to the note
                     # displayed *before* this hop's update (see above).
@@ -942,7 +965,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                         beats = (duration_hops * hop_seconds * bpm_estimate / 60.0) if bpm_estimate else None
                         dclass = duration_class_for_beats(beats)
                         display.finalize_duration(prev_pitch_class, prev_octave, dclass)
-                        hop_beats = max(hop_beats, beats or 0.0)
+                        hop_beats_values.append(beats)
 
                     # Chord-mode duration tracking runs every hop regardless
                     # of the current chord_mode display toggle -- same
@@ -956,9 +979,9 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                         ) if bpm_estimate else None
                         dclass = duration_class_for_beats(beats)
                         display.finalize_duration(entry["pitch_class"], entry["octave"], dclass)
-                        hop_beats = max(hop_beats, beats or 0.0)
+                        hop_beats_values.append(beats)
 
-                    beats_accumulated += hop_beats
+                    beats_accumulated += _hop_beats(hop_beats_values)
 
                     # A while, not an if, so a hop that somehow crosses more
                     # than one bar boundary (e.g. after a long freeze)
