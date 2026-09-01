@@ -154,6 +154,51 @@ could feed directly into issue #70's known "short note's own 20ms attack
 fade... straddle a hop boundary" limitation, since better timing precision
 at the actual attack instant is exactly what that limitation needs.
 
+## Real `--source loopback` validation (closes downside 3 below)
+
+`real_loopback_validation.py` (added for issue #78's resolution) reruns
+this exact comparison over a REAL PortAudio round trip -- the same
+muted-unattended `--source loopback` methodology
+`scripts/acoustic_pipeline_test.py` itself uses -- instead of pure
+in-memory synthetic arrays. Same 4-onset note sequence, but captured
+through the actual audio stack (real resampling, real timing jitter, a
+real ring buffer fed by `AudioCapture`), computing all three novelty
+measures per real hop straight off `compute_spectrum(ring)`.
+
+```
+.venv/bin/python prototypes/onset-novelty-hfc/real_loopback_validation.py
+```
+
+**Result at production's actual fixed threshold (`config.ONSET_FLUX_THRESHOLD
+= 0.3`, not an adaptively-swept one)** -- the realistic comparison, since
+that's how the app actually decides an onset, not via a per-run MAD sweep:
+
+```
+method             threshold  hits  misses  false_pos  mean_err_ms
+spectral_flux (current)  0.30     4       0          5         61.0
+hfc                      0.30     4       0         16         79.7
+complex_domain           0.30     4       0         22         84.4
+```
+
+**This reverses the synthetic harness's apparent `complex_domain` timing
+advantage.** On real captured audio, at the exact threshold production
+uses, both `hfc` and `complex_domain` are substantially noisier than the
+currently-shipped `spectral_flux()` -- 3.2x and 4.4x more false positives
+respectively, not fewer. This is exactly the "synthetic/loopback-clean
+result doesn't survive real testing" pattern this project has already hit
+twice (issues #69, #71) -- reported plainly rather than cherry-picking the
+earlier synthetic result. `spectral_flux()` itself still shows 5 false
+positives even on this idealized muted round trip (no physical mic
+coloration) -- a known, already-documented limitation (issue #70's
+real-audio-timing-jitter case), not new.
+
+**Conclusion: do not wire `hfc_novelty()`/`complex_domain_novelty()` into
+`note_smoother.py`'s onset gate.** Both are ported into `onset_detect.py`
+(matching this prototype's `novelty.py` near-verbatim) as tested,
+available-but-unused functions -- issue #78's own scope explicitly allows
+"not worth the churn" as a valid outcome, and the real-hardware evidence
+now points that way for both candidates, not just `hfc` alone.
+
 ## Honest downside / risk
 
 1. **`hfc_novelty` is not production-ready as implemented** (finding 3) —
