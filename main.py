@@ -1286,7 +1286,7 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
                               session.session_recorder)
 
 
-def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None):
+def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None, export_abc_path=None):
     """Offline transcription entry point (issue #55, `virtualnote
     transcribe`): loads `file_path`, runs batch_transcribe.transcribe()
     over the whole array, then builds TabDisplay columns from the result
@@ -1308,7 +1308,12 @@ def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=
     is used verbatim as the output path. `result` -- the same
     `batch_transcribe.TranscriptionResult` already computed above for the
     `TabDisplay` columns -- is reused as-is; `score_writer.write_score()`
-    consumes it directly, no recomputation.
+    consumes it directly, no recomputation. `export_abc_path` (the ABC
+    export feature) follows the exact same `None`/`""`/explicit-path
+    convention as `write_score_path`, defaulting to
+    `transcription_<timestamp>.abc` next to `main.py` -- `abc_export.py`
+    is imported locally the same way, and reuses this same `result`
+    object via `abc_export.from_transcription_result()`.
 
     Column-building choice: batch_transcribe.transcribe()'s polyphonic
     `notes` list (each NoteEvent already carries a resolved chord_name at
@@ -1386,6 +1391,22 @@ def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=
             f"score_{time.strftime('%Y%m%d_%H%M%S')}.musicxml",
         )
         score_writer.write_score(result, resolved_write_score_path, time_signature=time_signature)
+
+    if export_abc_path is not None:
+        # Local import mirrors write_score_path's own pattern above, though
+        # abc_export has no heavy/deferred dependency of its own (no
+        # music21 -- see that module's docstring) -- kept local anyway for
+        # symmetry with the sibling export path and to avoid paying even
+        # abc_export's own import cost on a `transcribe` run that never
+        # asked for ABC output.
+        import abc_export
+
+        resolved_export_abc_path = export_abc_path or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            f"transcription_{time.strftime('%Y%m%d_%H%M%S')}.abc",
+        )
+        columns = abc_export.from_transcription_result(result, time_signature=time_signature)
+        abc_export.write_abc(columns, resolved_export_abc_path, time_signature=time_signature)
 
 
 def run_replay_session(file_path, dump_file, speed=1.0):

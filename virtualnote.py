@@ -104,6 +104,10 @@ def build_parser():
                                help="also write a MusicXML score file (issue #65) -- omit entirely to skip "
                                     "score export (default), pass bare for a default path "
                                     "(score_<timestamp>.musicxml next to main.py), or give an explicit path")
+    transcribe_p.add_argument("--export-abc", nargs="?", const="", default=None,
+                               help="also write a hand-rolled ABC notation text file -- omit entirely to skip "
+                                    "ABC export (default), pass bare for a default path "
+                                    "(transcription_<timestamp>.abc next to main.py), or give an explicit path")
     # No _add_common_flags(transcribe_p) -- batch has no live audio, so
     # --color-scheme/--sensitivity/--source don't apply.
 
@@ -129,7 +133,7 @@ def main(argv=None):
     # constructed, mirroring how shell.py's "settings"/"credits" screens
     # bypass it entirely (see main.py's Key design decisions).
     if args.view == "transcribe":
-        run_batch_transcribe(args.file, args.time_signature, args.dump_file, args.write_score)
+        run_batch_transcribe(args.file, args.time_signature, args.dump_file, args.write_score, args.export_abc)
         return
 
     # 'replay' likewise never touches SessionState/audio -- it re-drives
