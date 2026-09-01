@@ -133,3 +133,129 @@ def test_filter_range_with_no_matching_hops_is_empty_not_a_crash():
     records = [_hop(i) for i in range(5)]  # timestamps 0.0 .. 0.4
     kept = _filter_hop_records_to_range(records, (10.0, 20.0), hop_seconds)
     assert kept == []
+
+
+# --- VIEWS display dispatch table (architecture-modernization-plan.md
+# §3.3) ---------------------------------------------------------------
+
+def test_views_covers_exactly_the_four_terminal_and_gui_tools_in_order():
+    # Order matters -- menu_display.TOOLS derives its menu/digit-key order
+    # directly from this dict's insertion order (fill, wheel, tab, gui,
+    # unchanged from before this table existed).
+    assert list(main.VIEWS.keys()) == ["fill", "wheel", "tab", "gui"]
+
+
+def test_views_run_entries_are_the_real_run_functions():
+    assert main.VIEWS["fill"]["run"] is main.run_terminal_fill
+    assert main.VIEWS["wheel"]["run"] is main.run_terminal_wheel
+    assert main.VIEWS["tab"]["run"] is main.run_terminal_tab
+    assert main.VIEWS["gui"]["run"] is main.run_gui
+
+
+def test_views_transcribe_and_replay_are_not_entries():
+    # Neither is a SessionState-driven live view (see CLAUDE.md's
+    # Architecture / run_batch_transcribe()'s and run_replay_session()'s
+    # own docstrings) -- folding them in here would misrepresent them as
+    # another run_session()-launchable tool.
+    assert "transcribe" not in main.VIEWS
+    assert "replay" not in main.VIEWS
+
+
+def test_views_only_wheel_has_a_circle_alias():
+    assert main.VIEWS["wheel"]["aliases"] == ["circle"]
+    for name in ("fill", "tab", "gui"):
+        assert "aliases" not in main.VIEWS[name]
+
+
+def test_views_only_tab_and_gui_declare_extra_cli_args():
+    assert "extra_args" not in main.VIEWS["fill"]
+    assert "extra_args" not in main.VIEWS["wheel"]
+    assert main.VIEWS["tab"]["extra_args"] is main._tab_extra_args
+    assert main.VIEWS["gui"]["extra_args"] is main._gui_extra_args
+
+
+def test_views_menu_labels_match_the_original_hand_written_tools_list():
+    # menu_display.TOOLS is derived from these -- pinning the exact text
+    # here documents that the derivation is a pure refactor, not a
+    # user-visible wording change.
+    assert main.VIEWS["fill"]["menu_label"] == "Fill -- full-terminal color fill"
+    assert main.VIEWS["wheel"]["menu_label"] == "Wheel -- circle-of-fifths ring"
+    assert main.VIEWS["tab"]["menu_label"] == "Tab -- scrolling sheet-music staff"
+    assert main.VIEWS["gui"]["menu_label"] == "GUI -- native color window"
+
+
+class _FakeSession:
+    """Just enough of SessionState's shape for dispatch wrapper tests --
+    no real AudioCapture/analysis thread involved."""
+
+    def __init__(self):
+        self.result_queue = "the-result-queue"
+        self.sensitivity = "the-sensitivity"
+        self.capture = "the-capture"
+        self.source_state = "the-source-state"
+        self.reanalysis_buffer = "the-reanalysis-buffer"
+        self.session_recorder = "the-session-recorder"
+        self.started = False
+
+    def ensure_started(self):
+        self.started = True
+
+
+def test_dispatch_fill_forwards_session_fields_only(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "run_terminal_fill", lambda *a: calls.append(a))
+    session = _FakeSession()
+    main._dispatch_fill(session, "onset", "/dump", True, True, (3, 4))
+    assert calls == [(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                       session.session_recorder)]
+
+
+def test_dispatch_wheel_forwards_session_fields_only(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "run_terminal_wheel", lambda *a: calls.append(a))
+    session = _FakeSession()
+    main._dispatch_wheel(session, "onset", "/dump", True, True, (3, 4))
+    assert calls == [(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                       session.session_recorder)]
+
+
+def test_dispatch_tab_forwards_scroll_mode_dump_file_and_time_signature(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "run_terminal_tab", lambda *a, **kw: calls.append((a, kw)))
+    session = _FakeSession()
+    main._dispatch_tab(session, "onset", "/dump", True, True, (3, 4))
+    (args, kwargs) = calls[0]
+    assert args == (session.result_queue, "onset", "/dump", session.sensitivity, session.capture,
+                     session.source_state, session.reanalysis_buffer, session.session_recorder)
+    assert kwargs == {"time_signature": (3, 4)}
+
+
+def test_dispatch_gui_forwards_fullscreen_and_debug_not_scroll_or_dump_file(monkeypatch):
+    calls = []
+    monkeypatch.setattr(main, "run_gui", lambda *a: calls.append(a))
+    session = _FakeSession()
+    main._dispatch_gui(session, "onset", "/dump", True, False, (3, 4))
+    assert calls == [(session.result_queue, True, False, session.sensitivity)]
+
+
+def test_run_session_starts_the_session_then_dispatches_through_views(monkeypatch):
+    calls = []
+    fake_views = {"fill": {"dispatch": lambda session, *rest: calls.append((session, rest)) or "quit"}}
+    monkeypatch.setattr(main, "VIEWS", fake_views)
+    session = _FakeSession()
+    result = main.run_session("fill", "onset", "/dump", False, False, session, time_signature=(3, 4))
+    assert session.started is True
+    assert calls == [(session, ("onset", "/dump", False, False, (3, 4)))]
+    assert result == "quit"
+
+
+def test_run_session_unrecognized_view_falls_back_to_fill(monkeypatch):
+    # Defensive fallback only -- both real callers (main() and
+    # virtualnote.py's argparse subparsers) only ever pass a name VIEWS
+    # actually has.
+    calls = []
+    fake_views = {"fill": {"dispatch": lambda session, *rest: calls.append((session, rest))}}
+    monkeypatch.setattr(main, "VIEWS", fake_views)
+    session = _FakeSession()
+    main.run_session("not-a-real-view", "onset", None, False, False, session)
+    assert len(calls) == 1

@@ -23,16 +23,17 @@ import sys
 import config
 import menu_animation
 from config_store import store
+from main import VIEWS
 
 # (view name passed to main.run_session, one-line description). Order here
 # is also menu order and digit-key order (1-indexed) -- see shell.py's
-# _handle_menu_key.
-TOOLS = [
-    ("fill", "Fill -- full-terminal color fill"),
-    ("wheel", "Wheel -- circle-of-fifths ring"),
-    ("tab", "Tab -- scrolling sheet-music staff"),
-    ("gui", "GUI -- native color window"),
-]
+# _handle_menu_key. Derived from main.VIEWS (architecture-modernization-
+# plan.md §3.3) rather than a separate literal list, so this menu and
+# run_session()/virtualnote.build_parser() can't drift out of sync about
+# which views exist -- VIEWS's own dict order (fill, wheel, tab, gui) is
+# preserved (insertion-ordered since Python 3.7), so menu/digit-key order
+# is unchanged from before this table existed.
+TOOLS = [(name, entry["menu_label"]) for name, entry in VIEWS.items()]
 
 # TOOLS plus the non-audio screens (issue #43's Settings, issue #44's
 # Credits, Prototypes, and the Feature-4 Play Stats screen below) that

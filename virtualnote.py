@@ -26,8 +26,8 @@ have a consistent way back to the menu without restarting the process."
 import argparse
 
 import config
-from main import (SessionState, _positive_float, _parse_time_signature, run_batch_transcribe, run_replay_session,
-                   run_session)
+from main import (SessionState, VIEWS, _positive_float, _parse_time_signature, run_batch_transcribe,
+                   run_replay_session, run_session)
 from shell import run_menu_loop
 
 
@@ -72,26 +72,23 @@ def build_parser():
     _add_menu_flags(parser)
     sub = parser.add_subparsers(dest="view")
 
-    fill_p = sub.add_parser("fill", help="full-terminal color fill")
-    _add_common_flags(fill_p)
-
-    wheel_p = sub.add_parser("wheel", aliases=["circle"], help="circle-of-fifths ring diagram")
-    _add_common_flags(wheel_p)
-
-    tab_p = sub.add_parser("tab", help="scrolling grand-staff sheet-music note history")
-    tab_p.add_argument("scroll", choices=["fix", "onset"],
-                        help="'fix' pushes a new column every tick; 'onset' pushes one only on a new note-attack")
-    tab_p.add_argument("--dump-file", default=None,
-                        help="path for the ANSI session note-history dump written on quit "
-                             "(default: note_history_<timestamp>.txt next to main.py)")
-    tab_p.add_argument("--time-signature", type=_parse_time_signature, default=config.DEFAULT_TIME_SIGNATURE,
-                        help="N/D time signature for barline placement (default 4/4)")
-    _add_common_flags(tab_p)
-
-    gui_p = sub.add_parser("gui", help="native pygame color window")
-    gui_p.add_argument("--fullscreen", action="store_true", help="start fullscreen")
-    gui_p.add_argument("--debug", action="store_true", help="show the debug overlay on start")
-    _add_common_flags(gui_p)
+    # fill/wheel/tab/gui subparsers are all built from main.VIEWS
+    # (architecture-modernization-plan.md §3.3) instead of hand-writing
+    # each one here -- "help"/"aliases" (wheel's "circle") come straight
+    # from the table, and a view's own flags beyond _add_common_flags()
+    # (tab's scroll positional/--dump-file/--time-signature, gui's
+    # --fullscreen/--debug) are added via its "extra_args" callable, if it
+    # has one. transcribe/replay stay hand-written below -- see VIEWS's
+    # own docstring in main.py for why they're deliberately not table
+    # entries.
+    for name, entry in VIEWS.items():
+        kwargs = {"help": entry["help"]}
+        if "aliases" in entry:
+            kwargs["aliases"] = entry["aliases"]
+        view_p = sub.add_parser(name, **kwargs)
+        if "extra_args" in entry:
+            entry["extra_args"](view_p)
+        _add_common_flags(view_p)
 
     transcribe_p = sub.add_parser("transcribe", help="offline rhythm/tempo transcription of an audio file")
     transcribe_p.add_argument("file", help="path to the audio file to transcribe")
