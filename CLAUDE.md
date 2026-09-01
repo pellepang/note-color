@@ -108,6 +108,7 @@ into an implicit `None` as before — see Key design decisions.
 | `chroma.py` | `fold()`/`fold_bass()` — 12-bin chroma vector via a precomputed Gaussian log-frequency weighting matrix summing 1st–4th harmonics per pitch class; `fold_bass()` restricts to <~250Hz for bass/inversion detection. |
 | `chord_templates.py` | ~360-template dictionary (30 qualities × 12 roots) + `match()` — cosine-similarity chord recognition, bass-chroma-gated slash/inversion naming and rotational-tie-breaking. |
 | `multipitch.py` | `detect()` — spectral peak-picking (own Hann-windowed FFT, not the shared one — see Key design decisions) + harmonic-consistency pruning, up to 6 simultaneous notes with confidence, candidate peaks bounded to `min_freq_hz`/`max_freq_hz` (issue #74, default `DEFAULT_MIN_FREQ_HZ`/`DEFAULT_MAX_FREQ_HZ` matching `config.FMIN`/`FMAX` — real callers pass those config values explicitly) so out-of-range broadband/percussive noise content can't be peak-picked into a phantom note. `select_window()` (issue #63) picks which ring buffer a hop's `detect()` call should analyze — the app's normal live `config.WINDOW_SIZE` window, or a longer `config.MULTIPITCH_LOW_WINDOW_SIZE` one the caller (`main.py`/`batch_transcribe.py`) also maintains, gated on `chroma.fold_bass()` showing real low-frequency content — see Key design decisions for why the short window alone garbles close-together bass notes. |
+| `detection_backends.py` | The pluggable seam between `analysis_loop()` and the two detection functions above (per `docs/research/architecture-modernization-plan.md` §3.1): `MonoPitchBackend`/`PolyphonicBackend` `typing.Protocol`s mirroring `pitch_detect.detect_pitch()`'s `(freq_hz \| None, confidence)` and `multipitch.detect()`'s `list[NoteCandidate]` return shapes exactly — nothing algorithm-specific in the Protocol itself, since `NoteSmoother`/`ChordSmoother`/`DurationTracker` already only depend on those shapes, not on how they were produced. `YinBackend`/`SpectralPeakBackend` wrap today's two functions as adapter classes, capturing all algorithm-specific config (fmin/fmax/threshold/subharmonic params, max_notes/min_mag_ratio/harmonic_tolerance_cents/etc.) once at `__init__` time instead of threading it through every call — the part that actually buys pluggability, since it moves "which config constants this algorithm needs" out of `analysis_loop()`'s body. `default_pitch_backend()`/`default_poly_backend()` build the two default backends from `config.*` exactly as `analysis_loop()` called `detect_pitch()`/`multipitch.detect()` directly before this seam existed — see Key design decisions for why `multipitch.select_window()`'s bass-gated window logic deliberately stays outside this Protocol. |
 | `chord_smoother.py` | `ChordSmoother` — mirrors `NoteSmoother`'s shape for chord mode: chroma rolling-average + chord-name debounce, plus asymmetric attack/release hysteresis per note-stack slot. |
 | `onset_detect.py` | (issue #55) `spectral_flux()`/`chroma_flux()` — pure, `None`-safe half-wave-rectified positive-magnitude-difference novelty measures between two consecutive `pitch_detect.compute_spectrum()`/`chroma.fold()` frames. `spectral_flux()` feeds `note_smoother.py`'s onset gate; `chroma_flux()` feeds `tempo_tracker.py`. |
 | `duration_tracker.py` | (issue #55) `DurationTracker` — mirrors `ChordSmoother.note_states`' dict-of-state shape, but for *measuring* how long a note sounded rather than debouncing its display. `.update()` (live, causal, keyed by `(pitch_class, octave)`, `is_onset`-aware re-attack preemption) and `.finalize_noncausal()` (batch, centered-smoothed envelope, static method) share one off-threshold definition (`DURATION_DECAY_RATIO`). `duration_class_for_beats()`/`DEFAULT_DURATION_CLASS` — nearest-standard-note-value snapping (incl. dotted), used by both live and batch. `require_onset_for_new_note` (constructor, issue #70) — mono's tracker sets this `True` so a key with no existing state only opens one when `is_onset` is genuinely `True` for it, since `NoteSmoother` otherwise echoes a just-finalized note's key with `is_onset=False` for a couple more hops (its own silence grace period) that would otherwise misread as a spurious new note; chord mode keeps the default `False` since it has no reliable per-note onset signal at all and relies on appear/absence alone. `.update()`'s `onset_backdate` parameter (issue #70) backdates a freshly-opened state's `onset_hop`, fed from `NoteSmoother.onset_backdate_hops` for mono. |
@@ -155,7 +156,15 @@ virtualnote replay session.jsonl --speed 2                         # same, at 2x
 
 `virtualnote` (on PATH via `~/.local/bin/virtualnote`, added to `~/.zshrc`'s
 PATH) is the one entry point for every tool this project offers (issue
-#40), retiring the old per-tool `colorize` bash dispatcher. Bare
+#40), retiring the old per-tool `colorize` bash dispatcher. `pyproject.toml`
+(architecture-modernization-plan.md §5) declares the same entry point as a
+standard `[project.scripts]` console script, so `pip install -e .` also
+works for local development instead of relying solely on the hand-written
+`~/.local/bin/virtualnote` shim's hardcoded absolute paths; `librosa`/
+`music21` (batch-only, never on the live path — see Key design decisions)
+live in an optional `[project.optional-dependencies] batch` extra,
+`pip install -e .[batch]` for `virtualnote transcribe`/`--write-score`.
+Bare
 `virtualnote` opens an animated ANSI menu (`menu_display.py`, issue #42's
 design, built in #51) to pick a tool live — a spinning ASCII donut
 re-skinned with the circle-of-fifths palette (rim letters in full mode)
@@ -603,6 +612,26 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   Known limitations). The `chords`/`density` suites' legitimate-chord
   accuracy was unaffected (100%/0 phantom, same as the pre-existing
   baseline) — see docs/DECISIONS.md for the full before/after numbers.
+- `analysis_loop()` calls its two detection functions through
+  `detection_backends.py`'s `MonoPitchBackend`/`PolyphonicBackend`
+  Protocols (`SessionState.pitch_backend`/`poly_backend`) rather than
+  calling `pitch_detect.detect_pitch()`/`multipitch.detect()` directly —
+  a pure extraction, zero behavior change by default (`SessionState`
+  still builds `YinBackend`/`SpectralPeakBackend` from `config.*` exactly
+  as the old direct calls did). This is the seam
+  `docs/research/architecture-modernization-plan.md`'s §3.1 identified as
+  the actual prerequisite for any of the sibling algorithm-research docs
+  (pYIN, NNLS-chroma, SwiftF0, ...) to land a finding without hand-editing
+  `analysis_loop()`'s shared ~160-line body — before this, trying an
+  alternative algorithm meant risking the chord/rhythm pipeline that
+  shares that same function. `multipitch.select_window()`'s bass-gated
+  long-window logic (issue #63) deliberately stays a plain call in
+  `analysis_loop()`, not folded into `PolyphonicBackend.detect()` or the
+  Protocol itself — it's YIN/spectral-peak-picking-specific window
+  selection with no equivalent in any algorithm this codebase actually
+  has yet, and the architecture doc explicitly warns against padding the
+  Protocol with speculative params before a second real backend exists to
+  design against.
 - `chord_templates._resolve_tie()` falls back to `lowest_pc` — the pitch
   class of whichever detected note is lowest in frequency this hop, no
   bass-register requirement — before falling back further to an arbitrary

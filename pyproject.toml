@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "note-color"
+version = "0.1.0"
+description = "Real-time audio-to-color visualizer -- listens to the microphone, detects the musical note currently being played, and displays a corresponding color."
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "pygame-ce>=2.4.1",
+    "blessed>=1.20",
+    "wcwidth>=0.2",  # terminal_tab_display.py -- display-width-aware cell padding for combining duration glyphs
+]
+
+# librosa/music21 are isolated to batch_transcribe.py/rhythm_reanalysis.py
+# and score_writer.py respectively (see CLAUDE.md's Key design decisions
+# -- "librosa is isolated to..."), neither ever imported by the live/
+# Pi-constrained path. Split into this extra so a bare `pip install -e .`
+# doesn't pull either onto a Pi-class install that only needs the live
+# tools; `pip install -e .[batch]` for `virtualnote transcribe`/
+# `--write-score`.
+[project.optional-dependencies]
+batch = [
+    "librosa>=0.10",  # batch_transcribe.py, rhythm_reanalysis.py only -- never imported by the live pipeline (issue #55)
+    "music21>=9.1",   # score_writer.py only -- issue #65, MusicXML export (--write-score)
+]
+
+[project.scripts]
+virtualnote = "virtualnote:main"
+
+[tool.setuptools]
+py-modules = [
+    "animation",
+    "audio_capture",
+    "batch_transcribe",
+    "chord_smoother",
+    "chord_templates",
+    "chroma",
+    "color_map",
+    "config",
+    "config_store",
+    "credits_display",
+    "detection_backends",
+    "display",
+    "duration_tracker",
+    "main",
+    "menu_animation",
+    "menu_display",
+    "multipitch",
+    "note_smoother",
+    "onset_detect",
+    "pitch_detect",
+    "prototypes_display",
+    "rhythm_reanalysis",
+    "score_writer",
+    "session_player",
+    "session_recorder",
+    "settings_display",
+    "shell",
+    "staff_map",
+    "tempo_tracker",
+    "terminal_display",
+    "terminal_tab_display",
+    "terminal_wheel_display",
+    "virtualnote",
+]
