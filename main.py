@@ -1336,31 +1336,145 @@ class SessionState:
         self.capture.stop()
 
 
+def _dispatch_fill(session, scroll_mode, dump_file, fullscreen, debug, time_signature):
+    return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                              session.session_recorder)
+
+
+def _dispatch_wheel(session, scroll_mode, dump_file, fullscreen, debug, time_signature):
+    return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                               session.session_recorder)
+
+
+def _dispatch_tab(session, scroll_mode, dump_file, fullscreen, debug, time_signature):
+    return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
+                             session.capture, session.source_state, session.reanalysis_buffer,
+                             session.session_recorder, time_signature=time_signature)
+
+
+def _dispatch_gui(session, scroll_mode, dump_file, fullscreen, debug, time_signature):
+    return run_gui(session.result_queue, fullscreen, debug, session.sensitivity)
+
+
+def _tab_extra_args(parser):
+    """virtualnote.py's 'tab' subparser needs beyond _add_common_flags() --
+    the required scroll-mode positional, --dump-file, and --time-signature
+    (issue #55's barline placement). Lives here, next to VIEWS, rather than
+    in virtualnote.py, so VIEWS stays the single place a new view's whole
+    CLI/dispatch/menu wiring is described (architecture-modernization-
+    plan.md §3.3) -- main.py already owns argparse-facing helpers in this
+    style (_positive_float, _parse_time_signature, main()'s own standalone
+    parser below), so this isn't a new kind of thing for this module to
+    hold."""
+    parser.add_argument("scroll", choices=["fix", "onset"],
+                         help="'fix' pushes a new column every tick; 'onset' pushes one only on a new "
+                              "note-attack")
+    parser.add_argument("--dump-file", default=None,
+                         help="path for the ANSI session note-history dump written on quit "
+                              "(default: note_history_<timestamp>.txt next to main.py)")
+    parser.add_argument("--time-signature", type=_parse_time_signature, default=config.DEFAULT_TIME_SIGNATURE,
+                         help="N/D time signature for barline placement (default 4/4)")
+
+
+def _gui_extra_args(parser):
+    """virtualnote.py's 'gui' subparser needs beyond _add_common_flags()."""
+    parser.add_argument("--fullscreen", action="store_true", help="start fullscreen")
+    parser.add_argument("--debug", action="store_true", help="show the debug overlay on start")
+
+
+# Display dispatch table (architecture-modernization-plan.md §3.3): the one
+# place a view's whole "how do I run, what do I call it, what CLI flags
+# does it need" story lives, read by run_session() below, menu_display.TOOLS
+# (menu list), and virtualnote.build_parser() (subcommand construction) --
+# replacing what used to be three separately hand-maintained spots naming
+# the same four views. Adding a 5th view becomes "write run_terminal_foo +
+# one VIEWS entry" instead of three separate hand-edits.
+#
+# Each entry's "dispatch" callable is deliberately NOT a uniform
+# run_*(session, **kwargs) signature imposed on run_terminal_fill/
+# run_terminal_wheel/run_terminal_tab/run_gui themselves -- per the plan
+# doc, this table is about *dispatch*, not about forcing a shared call
+# shape onto four functions with genuinely different real argument needs
+# (tab alone needs scroll_mode/dump_file/reanalysis_buffer/time_signature;
+# gui needs fullscreen/debug; fill/wheel need neither). "dispatch" is just
+# the one place that knows how to pick session's/run_session()'s common
+# argument bundle apart for that particular view, so run_session() itself
+# can call any of them the same uniform way; "run" is kept too (the plain,
+# un-wrapped function) since that's the thing a test or another caller
+# might reasonably want to reach directly. "extra_args" (virtualnote.py's
+# hook only) builds the CLI flags a view needs beyond _add_common_flags();
+# fill/wheel have none, so their entries just omit it. "menu_label" is
+# menu_display.py's exact, unchanged display text (kept verbatim rather
+# than derived from "help", since the CLI's --help wording and the menu's
+# fixed-width-pane wording are genuinely different audiences/lengths, not
+# the same string twice).
+#
+# Deliberately NOT proposed and NOT built here: a shared Display/render()
+# Protocol across TerminalDisplay/WheelDisplay/TabDisplay/Display -- the
+# plan doc explicitly warns against that scope creep (TabDisplay.render()
+# alone takes 7 params with no fill/wheel equivalent); this table only
+# replaces the *dispatch* branching, never render() itself.
+#
+# `transcribe`/`replay` are deliberately NOT entries here, even though
+# virtualnote.py also builds subparsers for them -- neither is a
+# SessionState-driven live view at all (see CLAUDE.md's Architecture and
+# run_batch_transcribe()/run_replay_session()'s own docstrings): both are
+# standalone, offline, never touch the mic/analysis thread, and are
+# dispatched directly by virtualnote.main() before a SessionState even
+# exists. Folding them into VIEWS would misrepresent them as another
+# run_session()-launchable tool, which they structurally aren't.
+VIEWS = {
+    "fill": {
+        "run": run_terminal_fill,
+        "dispatch": _dispatch_fill,
+        "help": "full-terminal color fill",
+        "menu_label": "Fill -- full-terminal color fill",
+    },
+    "wheel": {
+        "run": run_terminal_wheel,
+        "dispatch": _dispatch_wheel,
+        "help": "circle-of-fifths ring diagram",
+        "menu_label": "Wheel -- circle-of-fifths ring",
+        "aliases": ["circle"],
+    },
+    "tab": {
+        "run": run_terminal_tab,
+        "dispatch": _dispatch_tab,
+        "help": "scrolling grand-staff sheet-music note history",
+        "menu_label": "Tab -- scrolling sheet-music staff",
+        "extra_args": _tab_extra_args,
+    },
+    "gui": {
+        "run": run_gui,
+        "dispatch": _dispatch_gui,
+        "help": "native pygame color window",
+        "menu_label": "GUI -- native color window",
+        "extra_args": _gui_extra_args,
+    },
+}
+
+
 def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
                  time_signature=config.DEFAULT_TIME_SIGNATURE):
     """Dispatches to the right run_* function for `view` ('fill', 'wheel',
-    'tab', or 'gui'), starting `session`'s capture/analysis thread first if
-    this is the first tool entered this process. Returns whatever the
-    run_* function returns: "quit" (Ctrl+C / window-close-or-Esc) or
-    "menu" (the '|' / backslash back-to-menu keybind) -- the caller (either
-    main(), which has no menu to return to, or shell.py's menu loop, which
-    does) decides what to do with that sentinel. This is the extracted
-    body of what used to be main()'s single-shot try/finally, made
-    reusable so shell.py's menu loop can call it repeatedly against the
-    same session (issue #40). `time_signature` is 'tab'-view-only (issue
-    #55's barline placement) -- every other view ignores it."""
+    'tab', or 'gui', per VIEWS above), starting `session`'s capture/
+    analysis thread first if this is the first tool entered this process.
+    Returns whatever the run_* function returns: "quit" (Ctrl+C /
+    window-close-or-Esc) or "menu" (the '|' / backslash back-to-menu
+    keybind) -- the caller (either main(), which has no menu to return to,
+    or shell.py's menu loop, which does) decides what to do with that
+    sentinel. This is the extracted body of what used to be main()'s
+    single-shot try/finally, made reusable so shell.py's menu loop can
+    call it repeatedly against the same session (issue #40). `time_
+    signature` is 'tab'-view-only (issue #55's barline placement) -- every
+    other view's dispatch wrapper ignores it. An unrecognized `view`
+    falls back to 'fill', same as the original if/elif chain's implicit
+    final branch (defensive only -- both real callers, main() and
+    virtualnote.py's argparse subparsers, only ever pass a name VIEWS
+    actually has)."""
     session.ensure_started()
-    if view == "gui":
-        return run_gui(session.result_queue, fullscreen, debug, session.sensitivity)
-    if view == "wheel":
-        return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state,
-                                   session.session_recorder)
-    if view == "tab":
-        return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
-                                 session.capture, session.source_state, session.reanalysis_buffer,
-                                 session.session_recorder, time_signature=time_signature)
-    return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state,
-                              session.session_recorder)
+    entry = VIEWS.get(view, VIEWS["fill"])
+    return entry["dispatch"](session, scroll_mode, dump_file, fullscreen, debug, time_signature)
 
 
 def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None, export_abc_path=None,
