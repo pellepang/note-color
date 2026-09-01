@@ -24,12 +24,15 @@ from main import RawKeys, run_session
 from menu_display import MenuDisplay, MENU_ITEMS
 from settings_display import run_settings_screen
 from credits_display import run_credits_screen
+from prototypes_display import run_prototypes_screen
 
 # Menu entries handled directly by this module instead of main.run_session
-# -- neither touches audio/SessionState (issues #43, #44).
+# -- none of the three touches audio/SessionState (issues #43, #44, and
+# the Prototypes browser).
 _NON_SESSION_SCREENS = {
     "settings": run_settings_screen,
     "credits": run_credits_screen,
+    "prototypes": run_prototypes_screen,
 }
 
 
