@@ -25,6 +25,7 @@ class TempoTracker:
         self.max_bpm = cfg.TEMPO_MAX_BPM
         self.update_interval_hops = cfg.TEMPO_UPDATE_INTERVAL_HOPS
         self.min_confidence = cfg.TEMPO_MIN_CONFIDENCE
+        self.octave_lock_margin = cfg.TEMPO_OCTAVE_LOCK_MARGIN
         history_len = max(1, int(cfg.TEMPO_HISTORY_SECONDS / hop_seconds))
         self.history = deque(maxlen=history_len)
         self._hops_since_update = 0
@@ -86,5 +87,56 @@ class TempoTracker:
         if confidence < self.min_confidence:
             return self._last_estimate
 
+        best_lag = self._resolve_octave_lock(acf, best_lag, peak, confidence, lag_max)
+
         bpm = 60.0 / (best_lag * self.hop_seconds)
         return float(min(max(bpm, self.min_bpm), self.max_bpm))
+
+    def _resolve_octave_lock(self, acf, best_lag, peak, confidence, lag_max):
+        """Issue #79: `acf` (the full autocorrelation array) is already in
+        memory once `best_lag` has been picked by argmax -- checking
+        `acf[2*best_lag]` mirrors pitch_detect.py's YIN sub-harmonic check
+        (applied to tempo instead of pitch) and catches the single most
+        common causal-beat-tracker failure mode named in the literature
+        (docs/research/oss-landscape-rhythm-tempo.md): locking onto a
+        strong subdivision (e.g. eighth notes) instead of the true, slower
+        beat -- argmax alone has no way to prefer the musically-plausible
+        slower reading over a subdivision that happens to autocorrelate
+        marginally taller.
+
+        A genuinely non-alternating periodic novelty signal's acf decays
+        *linearly* with lag multiple -- `acf[k*L]/acf[0] == (periods - k) /
+        periods` for a delta train, confirmed empirically to hold exactly
+        regardless of tempo or window length (see docs/DECISIONS.md) -- so
+        `2*acf[best_lag] - acf[0]` is what a plain, non-alternating signal's
+        acf at `2*best_lag` *should* measure. Real alternating structure (a
+        stronger beat every other subdivision, i.e. best_lag is actually a
+        subdivision of a genuine slower beat) shows up as `acf[2*best_lag]`
+        measuring meaningfully *higher* than that linear prediction --
+        that gap, normalized by acf[0], is `excess` below. Only correcting
+        towards the *slower* (2x) reading, never the faster (0.5x) one, is
+        deliberate: argmax already returns the single tallest candidate in
+        the whole search window, so a same-window faster candidate can
+        never be more confident than what argmax already picked -- the only
+        exploitable asymmetry is a slower candidate whose own autocorrelation
+        support isn't fully captured by "is it the single tallest peak."
+
+        Raw additive noise inflates `acf[0]` (its own zero-lag energy)
+        without inflating acf at any nonzero lag, which biases `excess`
+        upward even for a plain, non-alternating signal -- subtracting
+        `(1 - confidence)` cancels that bias empirically (see
+        config.TEMPO_OCTAVE_LOCK_MARGIN's comment for the calibration data).
+        """
+        double_lag = 2 * best_lag
+        if double_lag > lag_max or acf[0] <= 0:
+            return best_lag
+        double_peak = float(acf[double_lag])
+        double_confidence = double_peak / acf[0]
+        if double_confidence < self.min_confidence:
+            return best_lag
+        expected_double_peak = 2.0 * peak - float(acf[0])
+        excess = (double_peak - expected_double_peak) / float(acf[0])
+        adjusted = excess - (1.0 - confidence)
+        if adjusted >= self.octave_lock_margin:
+            return double_lag
+        return best_lag

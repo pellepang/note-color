@@ -275,6 +275,28 @@ TEMPO_UPDATE_INTERVAL_HOPS = 20  # ~0.46s at BLOCK_SIZE=512/SAMPLE_RATE=22050 --
 # non-periodic content, >=0.41 for real periodic content anywhere in the
 # tested data).
 TEMPO_MIN_CONFIDENCE = 0.3
+# Issue #79: TempoTracker._resolve_octave_lock()'s threshold for the
+# noise-adjusted "excess" measure of whether acf[2*best_lag] shows real
+# alternating structure beyond what a plain, non-alternating periodic
+# signal's linear lag-decay would predict (see that function's docstring
+# for the derivation). Calibrated on synthetic novelty signals (delta-
+# impulse trains, both plain and genuinely alternating at various tempos,
+# with additive Gaussian noise at several SNRs): a plain, non-alternating
+# signal's adjusted excess stayed <= ~0.05 across every tested tempo
+# (90-200bpm) and noise level (sigma 0-0.25 against unit-amplitude
+# impulses); a genuinely alternating signal (a real, sounding beat every
+# other subdivision, >=30% amplitude difference between the two) measured
+# >= ~0.03-0.19 depending on how pronounced the alternation was. 0.08 sits
+# with real margin above the plain-signal ceiling while still catching
+# clearly alternating structure -- a subtle/mild alternation (a "ghost"
+# note only ~10% quieter than the true beat) is deliberately NOT corrected
+# (adjusted excess ~-0.06 in that case), since that's musically closer to
+# a genuinely ambiguous case than a clear octave-lock error. Only
+# validated against synthetic signals so far -- a real-mic/loopback
+# re-verification via scripts/rhythm_accuracy_test.py is still pending
+# (same provisional posture as issue #69/#71's synthetic-first fixes; see
+# docs/DECISIONS.md).
+TEMPO_OCTAVE_LOCK_MARGIN = 0.08
 RHYTHM_REANALYSIS_WINDOW_SECONDS = 60.0  # how many seconds of recent audio/data the tab
                                   # view's 'R' offline-style rhythm re-analysis reaches
                                   # back over -- editable live via the Settings screen's
