@@ -8,3 +8,5 @@ acoustic_test_results/
 rhythm_test_results/
 .claude/
 research/*/output/
+prototypes/*/output/
+prototypes/session-log-and-practice-mode/demo_session.jsonl
