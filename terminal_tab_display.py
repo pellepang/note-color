@@ -106,6 +106,7 @@ import bisect
 import shutil
 import sys
 import time
+import unicodedata
 from collections import deque, namedtuple
 
 import wcwidth
@@ -168,24 +169,33 @@ DOT_GLYPH = "\U0001D16D"           # MUSICAL SYMBOL COMBINING AUGMENTATION DOT
 # (spacing combining mark) codepoints meant to visually combine onto the
 # preceding notehead glyph rather than occupy their own column -- but a
 # real terminal doesn't render that composition (no font here actually
-# fuses notehead+stem+flag+dot into one glyph), so per `wcwidth` (the same
-# width table virtually every terminal emulator's own cursor-advance logic
-# is built on), a notehead followed by one of these renders as a ~2-cell
-# grapheme cluster, not the 1 cell a single glyph would take nor the 4+
-# cells naively summing each codepoint's own width would suggest (most of
-# them measure 0 in isolation, since they're not meant to stand alone).
-# `_note_cell()` must measure/pad cell text with `_pad_center()`'s
-# `wcwidth.wcswidth()` call, not Python's code-point-counting
-# `str.center()`/`str[:width]` -- either kind of naive count (assuming
-# every codepoint is 1 column, or assuming a combining mark is always 0)
-# gets a duration-glyph-bearing note cell's real width wrong, so every
-# column drawn after it on that screen row -- including barline columns --
-# lands somewhere other than where it should. Since different screen rows
-# carry different note content (a "whole" note has no stem at all; a
-# "dotted-sixteenth" note pulls in three of these glyphs), the miscount
-# varies row to row, which is what made barlines -- meant to be one
-# continuous straight vertical divider -- visibly drift into different
-# columns depending on the row.
+# fuses notehead+stem+flag+dot into one glyph); it renders a notehead
+# followed by one of these as two side-by-side glyphs in the same cell
+# cluster.
+#
+# Issue #82 (following up on d7d2ea0's first fix attempt): `wcwidth.
+# wcswidth()` has a deliberate heuristic that forces a base+Mc-mark
+# grapheme cluster to measure exactly 2 columns, regardless of how many
+# further Mc marks follow -- d7d2ea0 built `_pad_center()` on that
+# assumption. But a real terminal's own cursor-advance model (confirmed
+# via `pyte`, and per docs/research/terminal-rendering-performance.md's
+# `ucs-detect` survey, most real terminal emulators too) is different: any
+# codepoint with `wcwidth(ch) == 0` and a nonzero `unicodedata.
+# combining()` class is a true zero-advance combining mark that merges
+# into the *previous* cell -- so a notehead + any number of these marks
+# consumes exactly 1 real column, not 2, regardless of how many marks
+# (1, 2, or 3) follow. `_pad_center()`/`_clip_to_width()` therefore
+# measure with `_display_width()` (defined below), a per-codepoint sum
+# using that same zero-advance rule, not `wcwidth.wcswidth()`'s
+# cluster-forcing heuristic -- `str.center()`'s naive code-point count
+# (every codepoint 1 column) is wrong in the other direction. Getting a
+# duration-glyph-bearing note cell's real width wrong desyncs every column
+# drawn after it on that screen row -- including barline columns -- which
+# is what made barlines -- meant to be one continuous straight vertical
+# divider -- visibly drift depending on which row's note content preceded
+# them. See docs/DECISIONS.md's issue #82 entry for the full evidence
+# trail (this fix is validated against `pyte` + prior `ucs-detect`
+# research, not a live sweep of real terminal emulators).
 
 # Duration suffix for *name* style -- composed as f"{letter}·{suffix}"
 # (middle dot, U+00B7), e.g. "Bb·8th". Kept as short text rather than a
@@ -633,22 +643,54 @@ def _sorted_insert(container, entry):
     container.insert(idx, entry)
 
 
+def _char_display_width(ch):
+    """One codepoint's real terminal display width, using the same
+    zero-advance rule `pyte`'s `Screen.draw()` (and, per docs/research/
+    terminal-rendering-performance.md's `ucs-detect` survey, most real
+    terminal emulators) applies: a codepoint that `wcwidth.wcwidth()`
+    itself already measures as 0 *and* that Unicode classifies as a
+    combining mark (`unicodedata.combining(ch) != 0`) is a true
+    zero-advance character that merges into the previous cell, so it
+    counts for nothing here -- unlike `wcwidth.wcswidth()`, which forces a
+    base+combining-mark cluster to measure exactly 2 regardless of how
+    many marks follow (issue #82; see the STEM_GLYPH/FLAG_GLYPHS/DOT_GLYPH
+    comment above). Anything else falls back to `wcwidth.wcwidth()`'s own
+    per-codepoint answer, with a negative ("unprintable") result floored
+    to 0 rather than allowed to subtract from the running total."""
+    w = wcwidth.wcwidth(ch)
+    if w == 0 and unicodedata.combining(ch):
+        return 0
+    return max(w, 0)
+
+
+def _display_width(text):
+    """`text`'s real terminal display width: the sum of `_char_display_
+    width()` over every codepoint. This module's replacement for
+    `wcwidth.wcswidth()` as the measurement `_pad_center()`/
+    `_clip_to_width()` pad/clip against -- see `_char_display_width()`
+    and the STEM_GLYPH/FLAG_GLYPHS/DOT_GLYPH comment above for why a
+    per-codepoint sum with a true zero-advance rule, not `wcswidth()`'s
+    grapheme-cluster heuristic, matches how a real terminal actually
+    advances its cursor for this module's duration glyphs."""
+    return sum(_char_display_width(ch) for ch in text)
+
+
 def _clip_to_width(text, width):
     """Truncate `text` to at most `width` real terminal display columns
-    (wcwidth-aware, same convention as `_pad_center()`'s own clip loop) --
-    used for the status/help_legend trailing rows, which build up to
-    ~150-225 characters in real usage (mode/reanalysis/scrollback hints all
-    concatenated) and easily exceed any terminal narrower than that. Without
-    clipping, the terminal's own line-wrap silently consumes an extra row
-    `text_rows`/`usable_rows` never accounted for, forcing an unwanted
-    scroll every frame -- the visible symptom being the whole staff's
-    content drifting upward by one row per overflowing line, discovered via
-    `research/terminal-capture/`'s pyte-based capture tool (see its
-    FINDINGS.md)."""
+    (`_display_width()`-aware, same convention as `_pad_center()`'s own
+    clip loop) -- used for the status/help_legend trailing rows, which
+    build up to ~150-225 characters in real usage (mode/reanalysis/
+    scrollback hints all concatenated) and easily exceed any terminal
+    narrower than that. Without clipping, the terminal's own line-wrap
+    silently consumes an extra row `text_rows`/`usable_rows` never
+    accounted for, forcing an unwanted scroll every frame -- the visible
+    symptom being the whole staff's content drifting upward by one row per
+    overflowing line, discovered via `research/terminal-capture/`'s
+    pyte-based capture tool (see its FINDINGS.md)."""
     if not text:
         return text
     clipped = text
-    while clipped and wcwidth.wcswidth(clipped) > width:
+    while clipped and _display_width(clipped) > width:
         clipped = clipped[:-1]
     return clipped
 
@@ -656,23 +698,25 @@ def _clip_to_width(text, width):
 def _pad_center(text, width):
     """Center `text` into exactly `width` real terminal display columns.
     Unlike `str.center(width)`/`text[:width]` (which count Python code
-    points), this measures with `wcwidth.wcswidth()` -- grapheme-cluster
-    aware, so e.g. a notehead followed by its combining stem/flag/dot
-    (this module's symbol-style duration glyphs, see the STEM_GLYPH/
-    FLAG_GLYPHS/DOT_GLYPH comment above) is sized as the ~2-cell cluster a
-    real terminal renders it as, rather than double-counted per code point
-    (the original bug: naive length-based centering treated a duration-
-    glyph-heavy cell's text as wider than it actually renders) or naively
-    assumed zero-width instead (which undercounts it just as wrongly).
-    Either kind of miscount desyncs every column drawn after it on the
-    same screen row -- which is what let a barline column drift out of
-    vertical alignment depending on which row's note content preceded
-    it."""
+    points), this measures with `_display_width()` -- so e.g. a notehead
+    followed by its combining stem/flag/dot (this module's symbol-style
+    duration glyphs, see the STEM_GLYPH/FLAG_GLYPHS/DOT_GLYPH comment
+    above) is sized as the 1-column cluster a real terminal renders it as
+    (the notehead itself, plus zero-advance for any number of trailing
+    combining marks), rather than double-counted per code point (the
+    original bug `d7d2ea0` fixed: naive length-based centering treated a
+    duration-glyph-heavy cell's text as wider than it actually renders) or
+    over-counted per `wcwidth.wcswidth()`'s cluster-forced-to-2 heuristic
+    (issue #82: correct for `wcswidth()`'s own internal bookkeeping, but
+    not what a real terminal's cursor actually does). Any miscount here
+    desyncs every column drawn after it on the same screen row -- which is
+    what let a barline column drift out of vertical alignment depending on
+    which row's note content preceded it."""
     text = text or ""
     clipped = text
-    while clipped and wcwidth.wcswidth(clipped) > width:
+    while clipped and _display_width(clipped) > width:
         clipped = clipped[:-1]
-    used = max(wcwidth.wcswidth(clipped), 0)
+    used = max(_display_width(clipped), 0)
     pad = max(width - used, 0)
     left = pad // 2
     right = pad - left

@@ -17,6 +17,8 @@ from terminal_tab_display import (
     TabDisplay,
     _aged_lightness,
     _column_note_rgb,
+    _display_width,
+    _pad_center,
 )
 
 
@@ -252,21 +254,57 @@ def test_rapid_reattack_supersedes_older_open_note(monkeypatch):
 
 def test_pad_center_measures_display_width_not_code_point_count():
     # A notehead plus its combining stem/flag/dot (symbol-style duration
-    # glyphs) is one ~2-cell grapheme cluster on a real terminal -- str.
-    # center()'s code-point count would see 4+ "characters" here and either
-    # truncate the glyphs away (at a narrow width) or, when they fit,
-    # still pad the field to the wrong total display width. _pad_center()
-    # must land on exactly `width` real display columns and must not have
-    # truncated away any of the glyphs.
-    from terminal_tab_display import _pad_center
-
+    # glyphs) is one 1-cell grapheme cluster on a real terminal (issue #82:
+    # the notehead itself, plus true zero-advance for its trailing
+    # combining marks -- see `_display_width()`) -- str.center()'s
+    # code-point count would see 4+ "characters" here and either truncate
+    # the glyphs away (at a narrow width) or, when they fit, still pad the
+    # field to the wrong total display width. _pad_center() must land on
+    # exactly `width` real display columns (per this module's own
+    # `_display_width()` measurement) and must not have truncated away any
+    # of the glyphs.
     heavy = NOTEHEAD_GLYPH + STEM_GLYPH + FLAG_GLYPHS["sixteenth"] + DOT_GLYPH
     out = _pad_center(heavy, config.TAB_COLUMN_WIDTH)
 
-    assert wcwidth.wcswidth(out) == config.TAB_COLUMN_WIDTH
+    assert _display_width(out) == config.TAB_COLUMN_WIDTH
     assert STEM_GLYPH in out
     assert FLAG_GLYPHS["sixteenth"] in out
     assert DOT_GLYPH in out
+
+
+def test_display_width_treats_duration_glyphs_as_zero_advance():
+    # Issue #82: a base notehead's real display width must not change no
+    # matter how many of STEM_GLYPH/FLAG_GLYPHS/DOT_GLYPH follow it --
+    # `wcwidth.wcswidth()`'s own cluster-forcing heuristic (used pre-fix)
+    # would instead report width 1 for the bare notehead and width 2 for
+    # every combining-mark-bearing variant, which is what let
+    # `_pad_center()` under/over-pad a cell relative to how a real
+    # terminal (confirmed via `pyte`) actually advances its cursor for
+    # these codepoints.
+    bare = _display_width(NOTEHEAD_GLYPH)
+    variants = [
+        NOTEHEAD_GLYPH + STEM_GLYPH,
+        NOTEHEAD_GLYPH + STEM_GLYPH + FLAG_GLYPHS["eighth"],
+        NOTEHEAD_GLYPH + STEM_GLYPH + FLAG_GLYPHS["sixteenth"] + DOT_GLYPH,
+    ]
+    for variant in variants:
+        assert _display_width(variant) == bare
+
+
+def test_pad_center_output_width_identical_across_duration_glyph_counts():
+    # Direct regression test for issue #82's reproduction: notes with 0, 1,
+    # 2, and 3 combining duration-glyph marks must all pad to exactly the
+    # same real display width, so a barline column drawn after any of them
+    # lands in the same real terminal column regardless of which duration
+    # class preceded it.
+    variants = [
+        NOTEHEAD_GLYPH,                                              # whole: 0 marks
+        NOTEHEAD_GLYPH + STEM_GLYPH,                                 # quarter: 1 mark
+        NOTEHEAD_GLYPH + STEM_GLYPH + FLAG_GLYPHS["eighth"],         # eighth: 2 marks
+        NOTEHEAD_GLYPH + STEM_GLYPH + FLAG_GLYPHS["sixteenth"] + DOT_GLYPH,  # dotted-16th: 3 marks
+    ]
+    widths = {_display_width(_pad_center(v, config.TAB_COLUMN_WIDTH)) for v in variants}
+    assert widths == {config.TAB_COLUMN_WIDTH}
 
 
 def test_barline_column_stays_aligned_across_rows_with_mixed_duration_glyphs(monkeypatch):
@@ -299,7 +337,7 @@ def test_barline_column_stays_aligned_across_rows_with_mixed_duration_glyphs(mon
             continue
         before = line.split(BARLINE_GLYPH)[0]
         plain = re.sub(r"\033\[[\d;]*[A-Za-z]", "", before)  # strip CSI codes (color + cursor-address)
-        offsets.append(wcwidth.wcswidth(plain))
+        offsets.append(_display_width(plain))
 
     assert len(offsets) >= 2  # the barline spans multiple staff rows
     assert len(set(offsets)) == 1  # every row places it at the same real column
