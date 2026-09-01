@@ -325,3 +325,21 @@ KEY_GUESS_CONFIDENCE_THRESHOLD = 0.65  # Krumhansl-Schmuckler correlation (-1..1
                                         # the written score falls back to C major/no key signature rather
                                         # than a confidently-wrong guess -- provisional starting value,
                                         # same "retune later" convention as CHORD_MATCH_THRESHOLD.
+
+# --- Playback synthesis (map #24, decision #32: oscillator+ADSR synth) ---
+PLAYBACK_SAMPLE_RATE = 44100     # independent of the live pipeline's SAMPLE_RATE (22050) -- playback is
+                                  # output-only, no FFT-window/latency-budget constraint drives this choice,
+                                  # so it defaults to a standard audio-output rate instead of piggybacking
+                                  # on a value picked for a different purpose.
+PLAYBACK_BLOCK_SIZE = 512        # OutputStream callback block size -- 512/44100 =~ 11.6ms upper bound on
+                                  # trigger_note()-to-audible latency (see playback.py's LiveScheduler docstring).
+PLAYBACK_ATTACK_SECONDS = 0.01
+PLAYBACK_DECAY_SECONDS = 0.08
+PLAYBACK_SUSTAIN_LEVEL = 0.65    # 0..1, fraction of peak amplitude held during a note's sustain segment
+PLAYBACK_RELEASE_SECONDS = 0.15  # also the length of the audible tail appended after a note's own
+                                  # detected/notated duration, so it fades out rather than cutting off
+PLAYBACK_HARMONIC_WEIGHTS = (1.0, 0.4, 0.15)  # fundamental + 2nd + 3rd partial weights (descending) --
+                                                # a small fixed harmonic stack instead of a bare sine, per
+                                                # issue #28's "a few adjustable waveforms is the ceiling
+                                                # without real modelling work" framing. Picked by ear, not
+                                                # measured -- revisit freely, not a tuned/load-bearing constant.

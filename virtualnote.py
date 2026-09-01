@@ -104,6 +104,10 @@ def build_parser():
                                help="also write a MusicXML score file (issue #65) -- omit entirely to skip "
                                     "score export (default), pass bare for a default path "
                                     "(score_<timestamp>.musicxml next to main.py), or give an explicit path")
+    transcribe_p.add_argument("--play", action="store_true",
+                               help="play the transcription back through an oscillator+ADSR synth (map #24's "
+                                    "playback engine) after transcribing -- offline pre-rendered, so it starts "
+                                    "once the whole file has been transcribed, not incrementally")
     # No _add_common_flags(transcribe_p) -- batch has no live audio, so
     # --color-scheme/--sensitivity/--source don't apply.
 
@@ -114,6 +118,10 @@ def build_parser():
                                 "(default: note_history_<timestamp>.txt next to main.py)")
     replay_p.add_argument("--speed", type=_positive_float, default=1.0,
                            help="playback speed multiplier (default 1.0, real time; 2.0 replays twice as fast)")
+    replay_p.add_argument("--play", action="store_true",
+                           help="also play the session back live through an oscillator+ADSR synth (map #24's "
+                                "playback engine), one note per column as it's pushed on screen -- scales with "
+                                "--speed the same way the visual pacing does")
     # No _add_common_flags(replay_p) -- same reasoning as transcribe: no
     # live audio, so --color-scheme/--sensitivity/--source don't apply.
 
@@ -129,13 +137,13 @@ def main(argv=None):
     # constructed, mirroring how shell.py's "settings"/"credits" screens
     # bypass it entirely (see main.py's Key design decisions).
     if args.view == "transcribe":
-        run_batch_transcribe(args.file, args.time_signature, args.dump_file, args.write_score)
+        run_batch_transcribe(args.file, args.time_signature, args.dump_file, args.write_score, play=args.play)
         return
 
     # 'replay' likewise never touches SessionState/audio -- it re-drives
     # TabDisplay from an already-recorded .jsonl log, not live capture.
     if args.view == "replay":
-        run_replay_session(args.file, args.dump_file, args.speed)
+        run_replay_session(args.file, args.dump_file, args.speed, play=args.play)
         return
 
     # 'circle' is colorize's old name for the wheel view -- kept as a
