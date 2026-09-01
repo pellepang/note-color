@@ -399,6 +399,83 @@ def test_unfinalized_note_renders_like_default_duration_class(monkeypatch):
     assert out_unfinalized == out_default
 
 
+# --- issue #83: mono *name* style needs a wider column for duration suffixes ---
+
+def _note_cell_texts(out):
+    """Every rendered note cell's inner text (background+foreground-wrapped
+    content, the shape `_note_cell()` produces) -- lets a test check the
+    exact, unclipped string a column rendered, not just substring presence
+    (which could pass even if surrounding cells also happen to contain the
+    same characters)."""
+    return re.findall(r"\033\[48;2;\d+;\d+;\d+m\033\[38;2;\d+;\d+;\d+m(.*?)\033\[0m", out)
+
+
+def test_mono_name_style_whole_note_suffix_renders_unclipped(monkeypatch):
+    # Before the #83 fix, mono name-style columns rendered at
+    # TAB_COLUMN_WIDTH (3) -- _pad_center() clipped "C·whole" down to the
+    # unreadable stub "C·w". Mono name-style-with-duration now gets its own
+    # wider TAB_COLUMN_WIDTH_NAME column (mirroring TAB_COLUMN_WIDTH_CHORD's
+    # existing precedent for chord mode), so the full suffix must survive.
+    def setup(display):
+        display.push(0, 4, (200, 50, 50), "C4")
+        display.finalize_duration(0, 4, "whole")
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, notehead_style="name", setup=setup)
+    cells = [c.strip() for c in _note_cell_texts(out) if "C" in c]
+    assert cells == ["C·whole"]
+
+
+def test_mono_name_style_dotted_sixteenth_suffix_renders_unclipped(monkeypatch):
+    # The longest suffix in _NAME_STYLE_DURATION_SUFFIXES ("16th.", 5 chars)
+    # combined with a 1-char natural-note letter -- must not clip to "A·1"
+    # the way it did at the old TAB_COLUMN_WIDTH (3).
+    def setup(display):
+        display.push(9, 4, (200, 50, 50), "A4")  # pitch_class 9 == A, natural
+        display.finalize_duration(9, 4, "dotted-sixteenth")
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, notehead_style="name", setup=setup)
+    cells = [c.strip() for c in _note_cell_texts(out) if "A" in c]
+    assert cells == ["A·16th."]
+
+
+def test_mono_name_style_flat_letter_and_suffix_both_fit(monkeypatch):
+    # The worst case: a 2-char accidental letter ("Bb") plus the longest
+    # suffix ("whole") -- 8 display columns total, right at the edge of
+    # TAB_COLUMN_WIDTH_NAME (9).
+    def setup(display):
+        display.push(10, 4, (200, 50, 50), "Bb4")  # pitch_class 10 == Bb
+        display.finalize_duration(10, 4, "whole")
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, notehead_style="name", setup=setup)
+    cells = [c.strip() for c in _note_cell_texts(out) if "B" in c]
+    assert cells == ["Bb·whole"]
+
+
+def test_mono_name_style_note_cell_uses_wide_column_width(monkeypatch):
+    def setup(display):
+        display.push(0, 4, (200, 50, 50), "C4")
+        display.finalize_duration(0, 4, "whole")
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, notehead_style="name", setup=setup)
+    cells = [c for c in _note_cell_texts(out) if "C" in c]
+    assert cells
+    assert wcwidth.wcswidth(cells[0]) == config.TAB_COLUMN_WIDTH_NAME
+
+
+def test_mono_symbol_style_keeps_narrow_column_width(monkeypatch):
+    # Symbol style's duration glyphs are combining marks composed onto the
+    # notehead, not extra text -- its column must stay at the original
+    # narrow TAB_COLUMN_WIDTH, unaffected by the #83 fix above.
+    def setup(display):
+        display.push(0, 4, (200, 50, 50), "C4")
+        display.finalize_duration(0, 4, "whole")
+
+    out, _ = _render_display(monkeypatch, rows=30, cols=100, notehead_style="symbol", setup=setup)
+    cells = [c for c in _note_cell_texts(out) if NOTEHEAD_GLYPH in c]
+    assert cells
+    assert wcwidth.wcswidth(cells[0]) == config.TAB_COLUMN_WIDTH
+
+
 # --- R-key non-causal recompute / Left-Right scrollback support ---
 
 def test_correct_duration_updates_specific_occurrence_not_others(monkeypatch):
