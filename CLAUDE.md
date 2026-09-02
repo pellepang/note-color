@@ -15,7 +15,7 @@ fast enough to feel live during actual music.
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
-245 tests), and detection has been confirmed with a real speaker→mic
+599 tests), and detection has been confirmed with a real speaker→mic
 acoustic round-trip test — both the original monophonic pipeline and
 chord mode (see below). Pitch-tracking accuracy on real audio varies
 run-to-run with room/mic conditions — inherent to monophonic pitch

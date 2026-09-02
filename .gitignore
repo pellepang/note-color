@@ -11,3 +11,4 @@ rhythm_test_results/
 research/*/output/
 prototypes/*/output/
 prototypes/session-log-and-practice-mode/demo_session.jsonl
+*.musicxml
