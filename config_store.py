@@ -18,6 +18,14 @@ Schema (all tables optional):
     notehead_style_toggle = "n"
     legend_toggle = "l"
     freeze_toggle = " "
+    # Score editor (issue #98, `virtualnote edit <path>`) -- sixteen more
+    # remappable actions across the main editor view and the Chord
+    # builder/Score properties screens; see config.DEFAULT_KEYBINDS for the
+    # full set/defaults and score_editor_display.py's module docstring for
+    # what each does. undo ("u") / redo ("U") are matched case-sensitively
+    # by main.run_score_editor() (unlike every other keybind here, matched
+    # case-insensitively) specifically so the two share a letter but stay
+    # two distinct actions -- see docs/DECISIONS.md.
 
     [colors]
     # Note name (sharp or flat spelling both accepted on read; write-back

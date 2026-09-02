@@ -20,7 +20,7 @@ import sys
 import time
 
 import config
-from main import RawKeys, run_session
+from main import RawKeys, run_score_editor, run_session
 from menu_display import MenuDisplay, MENU_ITEMS
 from settings_display import run_settings_screen
 from credits_display import run_credits_screen
@@ -98,6 +98,35 @@ def run_menu_loop(session, fps=None, perf_mode_override=None):
             return
         keys.restore()
         menu.quit()
+
+        if selection == "edit":
+            # The score editor (issue #98) doesn't fit _NON_SESSION_SCREENS'
+            # shape: unlike Settings/Credits/Prototypes/Stats, actually
+            # running it (main.run_score_editor()) returns the same
+            # "menu"/"quit" sentinel every real run_session tool does (it's
+            # also directly reachable as `virtualnote edit <path>`), so its
+            # result has to be handled the same way run_session's is below
+            # -- but it still never touches SessionState/audio, so it can't
+            # go through run_session() either. score_editor_picker.
+            # run_score_editor_picker() shows the file picker first (an
+            # existing score, or "New score..."); a cancelled picker (no
+            # path chosen) just loops back to the menu, same as backing out
+            # of any other menu entry.
+            from score_editor_picker import run_score_editor_picker
+
+            try:
+                path = run_score_editor_picker()
+            except KeyboardInterrupt:
+                return
+            if path is None:
+                continue
+            try:
+                result = run_score_editor(path)
+            except KeyboardInterrupt:
+                return
+            if result == "quit":
+                return
+            continue
 
         if selection in _NON_SESSION_SCREENS:
             # Settings/Credits are menu entries, not run_session tools

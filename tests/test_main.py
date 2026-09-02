@@ -5,11 +5,12 @@ rather than the loops themselves (smoke-tested manually)."""
 
 import pytest
 
+import config
 from config_store import ConfigStore
 from rhythm_reanalysis import HopRecord
 
 import main
-from main import _filter_hop_records_to_range, _handle_mark_keys, _hop_beats, _mark_range
+from main import _filter_hop_records_to_range, _handle_mark_keys, _hop_beats, _mark_range, resolve_editor_action
 
 
 @pytest.fixture(autouse=True)
@@ -133,3 +134,83 @@ def test_filter_range_with_no_matching_hops_is_empty_not_a_crash():
     records = [_hop(i) for i in range(5)]  # timestamps 0.0 .. 0.4
     kept = _filter_hop_records_to_range(records, (10.0, 20.0), hop_seconds)
     assert kept == []
+
+
+# --- resolve_editor_action() (issue #98, score editor) --------------------
+
+class _FakeKeybindStore:
+    """A minimal stand-in for config_store.ConfigStore exposing just the
+    one method resolve_editor_action() needs -- lets these tests inject
+    specific bindings directly rather than writing through a real
+    ConfigStore/tmp_path config file."""
+
+    def __init__(self, overrides=None):
+        self._keybinds = dict(config.DEFAULT_KEYBINDS)
+        if overrides:
+            self._keybinds.update(overrides)
+
+    def keybind(self, action):
+        return self._keybinds[action]
+
+
+def test_resolve_editor_action_arrow_keys_are_hardcoded():
+    fake = _FakeKeybindStore()
+    for arrow in ("LEFT", "RIGHT", "UP", "DOWN"):
+        assert resolve_editor_action(arrow, fake) == arrow
+
+
+def test_resolve_editor_action_enter_is_hardcoded():
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action("\r", fake) == "ENTER"
+    assert resolve_editor_action("\n", fake) == "ENTER"
+
+
+def test_resolve_editor_action_matches_default_keybinds():
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action(" ", fake) == "note_toggle"
+    assert resolve_editor_action("+", fake) == "transpose_up"
+    assert resolve_editor_action("-", fake) == "transpose_down"
+    assert resolve_editor_action(",", fake) == "duration_shorten"
+    assert resolve_editor_action(".", fake) == "duration_lengthen"
+    assert resolve_editor_action("r", fake) == "clear_to_rest"
+    assert resolve_editor_action("i", fake) == "insert_column"
+    assert resolve_editor_action("x", fake) == "delete_column"
+    assert resolve_editor_action("z", fake) == "zoom_cycle"
+    assert resolve_editor_action("c", fake) == "chords_only_toggle"
+    assert resolve_editor_action("w", fake) == "save"
+    assert resolve_editor_action("t", fake) == "score_properties"
+
+
+def test_resolve_editor_action_none_for_an_unbound_key():
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action("q", fake) is None
+    assert resolve_editor_action(None, fake) is None
+
+
+def test_resolve_editor_action_most_actions_match_case_insensitively():
+    fake = _FakeKeybindStore()
+    # 'r' (clear_to_rest) also fires on 'R' -- same case-insensitive
+    # convention every other remappable keybind in this app already uses.
+    assert resolve_editor_action("R", fake) == "clear_to_rest"
+
+
+def test_resolve_editor_action_undo_redo_are_case_sensitive():
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action("u", fake) == "undo"
+    assert resolve_editor_action("U", fake) == "redo"
+    # Lowercase 'u' must never also resolve to redo (its default is the
+    # uppercase 'U') -- if it did, undo/redo couldn't coexist as distinct
+    # actions sharing one letter.
+    assert resolve_editor_action("u", fake) != "redo"
+
+
+def test_resolve_editor_action_honors_remapped_keybinds():
+    fake = _FakeKeybindStore({"save": "y"})
+    assert resolve_editor_action("y", fake) == "save"
+    assert resolve_editor_action("w", fake) is None
+
+
+def test_resolve_editor_action_defaults_to_module_level_store(monkeypatch):
+    fresh = ConfigStore(path="/nonexistent/path/should/not/be/read.toml")
+    monkeypatch.setattr(main, "store", fresh)
+    assert resolve_editor_action(" ") == "note_toggle"
