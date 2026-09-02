@@ -40,6 +40,25 @@ KEYBIND_ACTIONS = [
     "session_record_toggle",
     "mark_range_start",
     "mark_range_end",
+    # Score editor (issue #98, `virtualnote edit <path>`) -- main editor
+    # view + Chord builder/Score properties screens. See
+    # score_editor_display.py's module docstring for what each does.
+    "note_toggle",
+    "transpose_up",
+    "transpose_down",
+    "duration_shorten",
+    "duration_lengthen",
+    "clear_to_rest",
+    "insert_column",
+    "delete_column",
+    "undo",
+    "redo",
+    "zoom_cycle",
+    "chords_only_toggle",
+    "chord_builder_exit",
+    "save",
+    "score_properties",
+    "score_properties_exit",
 ]
 
 _KEYBIND_LABELS = {
@@ -52,6 +71,22 @@ _KEYBIND_LABELS = {
     "session_record_toggle": "Session recording (opt-in .jsonl log)",
     "mark_range_start": "Loop marker: range start (tab view, frozen)",
     "mark_range_end": "Loop marker: range end (tab view, frozen)",
+    "note_toggle": "Score editor: place/remove note",
+    "transpose_up": "Score editor: transpose note up",
+    "transpose_down": "Score editor: transpose note down",
+    "duration_shorten": "Score editor: shorten column duration",
+    "duration_lengthen": "Score editor: lengthen column duration",
+    "clear_to_rest": "Score editor: clear column to rest",
+    "insert_column": "Score editor: insert column",
+    "delete_column": "Score editor: delete column",
+    "undo": "Score editor: undo",
+    "redo": "Score editor: redo",
+    "zoom_cycle": "Score editor: cycle zoom level",
+    "chords_only_toggle": "Score editor: chords-only view",
+    "chord_builder_exit": "Score editor: leave Chord builder",
+    "save": "Score editor: save",
+    "score_properties": "Score editor: open Score properties",
+    "score_properties_exit": "Score editor: leave Score properties",
 }
 
 # A generic numeric preference row -- key is the config.toml [preferences]

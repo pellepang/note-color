@@ -46,6 +46,7 @@ MENU_ITEMS = TOOLS + [
     ("credits", "Credits -- author & attribution"),
     ("prototypes", "Prototypes -- browse prototypes/ READMEs"),
     ("stats", "Stats -- historical play stats"),
+    ("edit", "Edit -- score editor (load/create MusicXML)"),
 ]
 
 

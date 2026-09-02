@@ -27,7 +27,7 @@ import argparse
 
 import config
 from main import (SessionState, _positive_float, _parse_time_signature, run_batch_transcribe, run_replay_session,
-                   run_session)
+                   run_score_editor, run_session)
 from shell import run_menu_loop
 
 
@@ -129,6 +129,12 @@ def build_parser():
     # No _add_common_flags(replay_p) -- same reasoning as transcribe: no
     # live audio, so --color-scheme/--sensitivity/--source don't apply.
 
+    edit_p = sub.add_parser("edit", help="terminal score editor -- load or create a MusicXML file")
+    edit_p.add_argument("file", help="path to a MusicXML file to edit; created as a blank score if it "
+                                      "doesn't exist yet")
+    # No _add_common_flags(edit_p) -- same reasoning as transcribe/replay:
+    # no live audio, so --color-scheme/--sensitivity/--source don't apply.
+
     return parser
 
 
@@ -149,6 +155,18 @@ def main(argv=None):
     # TabDisplay from an already-recorded .jsonl log, not live capture.
     if args.view == "replay":
         run_replay_session(args.file, args.dump_file, args.speed, play=args.play)
+        return
+
+    # 'edit' (issue #98) likewise never touches SessionState/audio -- the
+    # score editor loads/creates a MusicXML file and drives its own
+    # interactive loop against it, same early-return shape as
+    # transcribe/replay above. Unlike those two, it does still return the
+    # "menu"/"quit" sentinel (run_score_editor is reachable from
+    # shell.py's live-menu 'edit' entry too) -- standalone here, though,
+    # there's no menu to fall back to, so the sentinel is just ignored,
+    # same as main()'s own standalone dispatch below.
+    if args.view == "edit":
+        run_score_editor(args.file)
         return
 
     # 'circle' is colorize's old name for the wheel view -- kept as a

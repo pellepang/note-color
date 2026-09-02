@@ -62,6 +62,7 @@ from color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES, NOTE
 from animation import ColorAnimator
 from session_recorder import SessionRecorder
 from session_player import load_events, group_columns
+from staff_map import staff_row
 
 try:
     import termios
@@ -554,6 +555,52 @@ def _legend_line(view_hints):
     a UI framework -- issue #40 owns only the toggle plumbing; the visual
     design of the whole shell (including this line) is #42's job."""
     return "  ".join(["|=menu", "h=legend"] + view_hints)
+
+
+_EDITOR_ACTIONS = [
+    "note_toggle", "transpose_up", "transpose_down", "duration_shorten", "duration_lengthen",
+    "clear_to_rest", "insert_column", "delete_column", "undo", "redo", "zoom_cycle",
+    "chords_only_toggle", "save", "score_properties",
+]
+# undo/redo (issue #98) intentionally share a letter ('u'/'U' by default) --
+# matched case-sensitively below, unlike every other remappable action in
+# this codebase (matched case-insensitively, e.g. 'M' also toggles source
+# the same as 'm'). See docs/DECISIONS.md.
+_EDITOR_CASE_SENSITIVE_ACTIONS = ("undo", "redo")
+
+
+def _match_editor_action(key, action, keybind_store):
+    if key is None:
+        return False
+    bound = keybind_store.keybind(action)
+    if action in _EDITOR_CASE_SENSITIVE_ACTIONS:
+        return key == bound
+    return key.lower() == bound.lower()
+
+
+def resolve_editor_action(key, keybind_store=None):
+    """Pure keypress-to-action mapping for the score editor's main view
+    (issue #98, run_score_editor). Left/Right/Up/Down (cursor movement)
+    and Enter (open the Chord builder) are hardcoded, never remappable --
+    same tier as every other view's arrow-key cursor handling; every
+    other action goes through config_store's remappable [keybinds] table
+    (config.DEFAULT_KEYBINDS' score-editor entries). Returns the matched
+    action name ('LEFT'/'RIGHT'/'UP'/'DOWN'/'ENTER', or one of
+    _EDITOR_ACTIONS), or None if `key` doesn't match anything.
+
+    `keybind_store` defaults to the module-level config_store.store
+    singleton; a test can pass any object exposing a compatible
+    `.keybind(action)` method instead, without needing to monkeypatch
+    the module attribute."""
+    keybind_store = keybind_store if keybind_store is not None else store
+    if key in ("LEFT", "RIGHT", "UP", "DOWN"):
+        return key
+    if key in ("\r", "\n"):
+        return "ENTER"
+    for action in _EDITOR_ACTIONS:
+        if _match_editor_action(key, action, keybind_store):
+            return action
+    return None
 
 
 def _handle_freeze_key(key, frozen):
@@ -1592,6 +1639,275 @@ def run_replay_session(file_path, dump_file, speed=1.0, play=False):
             f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
         )
         display.dump_ansi(resolved_dump_path)
+
+
+def _run_chord_builder(keys, column):
+    """Score editor (issue #98): the Chord builder screen's interactive
+    loop -- opened by Enter on a column, closed by `chord_builder_exit`
+    ('b' by default, matched case-sensitively so typing an uppercase 'B'
+    on the ROOT reel -- a real root letter -- doesn't also exit the
+    screen; see docs/DECISIONS.md). Mutates `column.notes` in place only
+    on exit (chord_builder_display.notes_from_state()), never mid-edit --
+    the caller (run_score_editor) already recorded an undo snapshot of
+    the whole score before opening this screen, so the column's prior
+    contents are always recoverable via `undo` regardless of what
+    happens in here. Smoke-tested manually only, same convention as
+    every other run_terminal_*/run_*_screen interactive loop."""
+    import chord_builder_display as cbd
+
+    state = cbd.state_from_column(column)
+    quality_index = 0
+    dt = 1.0 / config.TERMINAL_FPS
+    degree_options = {"third": cbd.THIRD_OPTIONS, "fifth": cbd.FIFTH_OPTIONS, "seventh": cbd.SEVENTH_OPTIONS}
+
+    while True:
+        cbd.render(state, quality_index, "Left/Right=reel  Up/Down=spin  type=jump  Enter=force-commit  b=done")
+        key = keys.poll()
+        if key is None:
+            time.sleep(dt)
+            continue
+
+        if key == store.keybind("chord_builder_exit"):
+            column.notes = cbd.notes_from_state(state)
+            return
+
+        slot_name = cbd.BUILDER_SLOTS[state.slot]
+        if key == "LEFT":
+            state.slot = cbd.move_slot(state.slot, -1)
+            state.typed = ""
+        elif key == "RIGHT":
+            state.slot = cbd.move_slot(state.slot, 1)
+            state.typed = ""
+        elif key in ("UP", "DOWN"):
+            delta = 1 if key == "UP" else -1
+            if slot_name == "root":
+                state.root_pc = cbd.spin_root(state.root_pc, delta)
+                state.root_just_jumped = False
+            elif slot_name == "quality":
+                quality_index, preset_key = cbd.spin_quality(quality_index, delta)
+                cbd.apply_quality_preset(state, preset_key)
+            elif slot_name in degree_options:
+                token_attr = f"{slot_name}_token"
+                setattr(state, token_attr, cbd.spin_degree(getattr(state, token_attr), degree_options[slot_name], delta))
+        elif key in ("\r", "\n"):
+            if slot_name == "quality":
+                resolved = cbd.force_commit_alias(state.typed, cbd.QUALITY_ALIASES)
+                if resolved is not None:
+                    quality_index = next(i for i, p in enumerate(cbd.QUALITY_PRESETS) if p[0] == resolved)
+                    cbd.apply_quality_preset(state, resolved)
+                    state.typed = ""
+            elif slot_name in degree_options:
+                resolved = cbd.force_commit_alias(state.typed, cbd.degree_alias_map(degree_options[slot_name]))
+                if resolved is not None:
+                    setattr(state, f"{slot_name}_token", resolved)
+                    state.typed = ""
+        elif len(key) == 1 and key.isprintable():
+            if slot_name == "root":
+                state.root_pc, state.root_just_jumped = cbd.step_root_typeahead(
+                    state.root_pc, state.root_just_jumped, key
+                )
+            elif slot_name == "quality":
+                state.typed, resolved = cbd.step_alias_typeahead(state.typed, key, cbd.QUALITY_ALIASES)
+                if resolved is not None:
+                    quality_index = next(i for i, p in enumerate(cbd.QUALITY_PRESETS) if p[0] == resolved)
+                    cbd.apply_quality_preset(state, resolved)
+            elif slot_name in degree_options:
+                state.typed, resolved = cbd.step_alias_typeahead(state.typed, key, cbd.degree_alias_map(
+                    degree_options[slot_name]))
+                if resolved is not None:
+                    setattr(state, f"{slot_name}_token", resolved)
+
+
+def _run_score_properties(keys, score):
+    """Score editor (issue #98): the Score properties screen's
+    interactive loop -- opened by `score_properties` ('t'), closed by
+    `score_properties_exit` ('b' by default, matched case-sensitively,
+    same reasoning as _run_chord_builder's exit check). Mutates `score`'s
+    time_signature/key_fifths/tempo_bpm fields directly as each reel
+    spins (no separate commit step -- see score_properties_display.py's
+    module docstring for why that's fine for three independent scalar
+    fields). Smoke-tested manually only."""
+    import score_properties_display as spd
+
+    slot = 0
+    dt = 1.0 / config.TERMINAL_FPS
+    while True:
+        spd.render(score, slot, "Left/Right=reel  Up/Down=spin  b=done")
+        key = keys.poll()
+        if key is None:
+            time.sleep(dt)
+            continue
+
+        if key == store.keybind("score_properties_exit"):
+            return
+        if key == "LEFT":
+            slot = spd.move_slot(slot, -1)
+        elif key == "RIGHT":
+            slot = spd.move_slot(slot, 1)
+        elif key in ("UP", "DOWN"):
+            delta = 1 if key == "UP" else -1
+            slot_name = spd.PROPERTY_SLOTS[slot]
+            if slot_name == "time_signature":
+                score.time_signature = spd.spin_time_signature(score.time_signature, delta)
+            elif slot_name == "key_signature":
+                score.key_fifths = spd.spin_key_fifths(score.key_fifths, delta)
+            elif slot_name == "tempo":
+                score.tempo_bpm = spd.spin_tempo(score.tempo_bpm, delta)
+
+
+def run_score_editor(path):
+    """`virtualnote edit <path>` (issue #98): loads `path` via
+    score_editor_state.load_score() if it already exists, otherwise
+    starts a brand-new blank score (new_blank_score()) to be saved to
+    `path` later. Drives its own interactive loop (own RawKeys instance,
+    mirroring every other run_terminal_* function) over
+    score_editor_display.py's pure mutation/render layer, with
+    EditHistory backing undo/redo -- never touches SessionState/audio, so
+    virtualnote.py's 'edit' subcommand handles and returns before
+    SessionState is even constructed, same shape as transcribe/replay.
+    Returns the "quit"/"menu" sentinel convention every other
+    run_terminal_* function does, so shell.py's menu loop can dispatch it
+    exactly like a real session tool despite that.
+
+    Quitting (| or Ctrl+C) while there are unsaved changes (saved=no in
+    the status line) needs a second confirming press of the same key --
+    the one editor view in this app where quitting can lose real work,
+    unlike every other terminal view's purely ephemeral render state.
+    The first press just arms `quit_pending` and shows an inline warning;
+    any other keypress in between (including a real edit) disarms it
+    again, so a user has to deliberately press the same quit key twice in
+    a row to actually discard changes. Undo/redo don't attempt to track
+    whether the score has returned to exactly its last-saved content --
+    dirty stays True after either, a conservative "warn even if you
+    undid your way back to the saved state" simplification (see
+    docs/DECISIONS.md)."""
+    import score_editor_display as sed
+    from score_editor_state import EditHistory, load_score, new_blank_score, save_score
+
+    score = load_score(path) if os.path.exists(path) else new_blank_score()
+    history = EditHistory()
+    dirty = False
+    cursor_col = 0
+    first_column = score.columns[0]
+    cursor_row = (
+        staff_row(first_column.notes[0].pitch_class, first_column.notes[0].octave)
+        if first_column.notes else 10  # no note to anchor to -- land on middle C, a sane default
+    )
+    zoom_level = 0
+    chords_only = False
+    help_legend_on = True
+    quit_pending = False
+    dt = 1.0 / config.TERMINAL_FPS
+    keys = RawKeys()
+
+    def _record():
+        history.record(score)
+
+    try:
+        while True:
+            try:
+                key = keys.poll()
+                quit_requested, quit_result = (key == "|"), "menu"
+            except KeyboardInterrupt:
+                key, quit_requested, quit_result = None, True, "quit"
+
+            if quit_requested:
+                if dirty and not quit_pending:
+                    quit_pending = True
+                else:
+                    return quit_result
+            else:
+                if key is not None:
+                    quit_pending = False
+                action = resolve_editor_action(key)
+
+                if action == "LEFT":
+                    cursor_col = sed.clamp_column(cursor_col - 1, len(score.columns))
+                elif action == "RIGHT":
+                    cursor_col = sed.clamp_column(cursor_col + 1, len(score.columns))
+                elif action == "UP":
+                    cursor_row = sed.clamp_row(cursor_row + 1)
+                elif action == "DOWN":
+                    cursor_row = sed.clamp_row(cursor_row - 1)
+                elif action == "note_toggle":
+                    _record()
+                    if sed.toggle_note_at_cursor(score.columns[cursor_col], cursor_row):
+                        dirty = True
+                elif action in ("transpose_up", "transpose_down"):
+                    _record()
+                    direction = 1 if action == "transpose_up" else -1
+                    new_row = sed.transpose_note_at_cursor(score.columns[cursor_col], cursor_row, direction)
+                    if new_row is not None:
+                        cursor_row = new_row
+                        dirty = True
+                elif action in ("duration_shorten", "duration_lengthen"):
+                    _record()
+                    sed.cycle_duration(score.columns[cursor_col], 1 if action == "duration_shorten" else -1)
+                    dirty = True
+                elif action == "clear_to_rest":
+                    _record()
+                    sed.clear_to_rest(score.columns[cursor_col])
+                    dirty = True
+                elif action == "insert_column":
+                    _record()
+                    sed.insert_column_at(score, cursor_col)
+                    dirty = True
+                elif action == "delete_column":
+                    _record()
+                    if sed.delete_column_at(score, cursor_col):
+                        cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                        dirty = True
+                elif action == "undo":
+                    previous = history.undo(score)
+                    if previous is not None:
+                        score = previous
+                        cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                        dirty = True
+                elif action == "redo":
+                    next_score = history.redo(score)
+                    if next_score is not None:
+                        score = next_score
+                        cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                        dirty = True
+                elif action == "zoom_cycle":
+                    zoom_level = sed.cycle_zoom(zoom_level)
+                elif action == "chords_only_toggle":
+                    chords_only = not chords_only
+                elif action == "ENTER":
+                    _record()
+                    _run_chord_builder(keys, score.columns[cursor_col])
+                    dirty = True
+                elif action == "score_properties":
+                    _record()
+                    _run_score_properties(keys, score)
+                    dirty = True
+                elif action == "save":
+                    save_score(score, path)
+                    dirty = False
+                elif key is not None and key.lower() == "h":
+                    help_legend_on = not help_legend_on
+
+            zoom_name, _width = sed.ZOOM_LEVELS[zoom_level]
+            status = (f"saved={'no' if dirty else 'yes'}  col={cursor_col + 1}/{len(score.columns)}  "
+                      f"zoom={zoom_name}({_key_hint('zoom_cycle')})  "
+                      f"chords={'on' if chords_only else 'off'}({_key_hint('chords_only_toggle')})  "
+                      f"({_key_hint('save')})save  legend(h)")
+            if quit_pending:
+                status += "  [unsaved changes -- press quit again to discard, any other key to cancel]"
+            help_legend = _legend_line([
+                "left/right=column", "up/down=pitch", f"{_key_hint('note_toggle')}=note",
+                f"{_key_hint('transpose_up')}/{_key_hint('transpose_down')}=transpose",
+                f"{_key_hint('duration_shorten')}/{_key_hint('duration_lengthen')}=duration",
+                f"{_key_hint('clear_to_rest')}=rest", f"{_key_hint('insert_column')}=insert",
+                f"{_key_hint('delete_column')}=delete", f"{_key_hint('undo')}/{_key_hint('redo')}=undo/redo",
+                f"{_key_hint('zoom_cycle')}=zoom", f"{_key_hint('chords_only_toggle')}=chords",
+                "enter=chordbuilder", f"{_key_hint('score_properties')}=properties",
+                f"{_key_hint('save')}=save",
+            ]) if help_legend_on else ""
+            sed.render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_legend)
+            time.sleep(dt)
+    finally:
+        keys.restore()
 
 
 def main():

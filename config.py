@@ -194,6 +194,27 @@ DEFAULT_KEYBINDS = {
     "session_record_toggle": "s",
     "mark_range_start": "[",
     "mark_range_end": "]",
+    # Score editor (issue #98) -- main editor view + Chord builder/Score
+    # properties screens, `virtualnote edit <path>`. Defaults per #98's
+    # spec; none collide with '|'/'h' (settings_display.is_valid_remap_key
+    # already enforces this generically for a remap, same as every
+    # existing keybind above).
+    "note_toggle": " ",
+    "transpose_up": "+",
+    "transpose_down": "-",
+    "duration_shorten": ",",
+    "duration_lengthen": ".",
+    "clear_to_rest": "r",
+    "insert_column": "i",
+    "delete_column": "x",
+    "undo": "u",
+    "redo": "U",
+    "zoom_cycle": "z",
+    "chords_only_toggle": "c",
+    "chord_builder_exit": "b",
+    "save": "w",
+    "score_properties": "t",
+    "score_properties_exit": "b",
 }
 
 # --- Credits & donation (issue #44) ---
