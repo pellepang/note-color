@@ -50,3 +50,6 @@ The dedicated screen reached by drilling into a column (from the main editor vie
 
 **Reel**:
 One independently spinnable, typeahead-able component of the **Chord builder** — root, quality (a preset shortcut), or one of the third/fifth/seventh degrees. Spinning or typing into a reel updates the column's notes live, with no separate confirm step.
+
+**Score properties screen**:
+A second, separate reel-based screen (same shape as the **Chord builder**: its own local keys, one key back to the main view) for editing the three score-level properties a blank score is seeded with — time signature, key signature, and tempo — via three independently spinnable **Reels** (time signature stepping through common signatures, key signature around the circle of fifths, tempo by BPM increment). Distinct from the **Chord builder**, which edits one column's notes rather than the whole score's properties.
