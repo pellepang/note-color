@@ -63,7 +63,7 @@ def _abc_length(duration_class):
     """duration_class name -> ABC length suffix relative to `L:1/4` (this
     module always emits `L:1/4`, i.e. one ABC unit == one quarter note ==
     one "beat" in this app's own existing convention -- see
-    score_writer.py's `_QUARTER_LENGTHS` comment). `"quarter"` (1 unit)
+    score_writer.py's `QUARTER_LENGTHS` comment). `"quarter"` (1 unit)
     maps to `""`, ABC's own implicit-default-length convention."""
     beats = _BEATS_BY_DURATION[duration_class]
     frac = Fraction(beats).limit_denominator(32)

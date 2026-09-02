@@ -1,17 +1,23 @@
 """MusicXML score writer (issue #65, batch-only, v1).
 
-The only module in this codebase permitted to import `music21` -- mirrors
-`batch_transcribe.py`'s sole-`librosa`-importer convention exactly (see
-that module's docstring for the rationale): `music21`'s import cost is
-real and one-time, and has no business landing on the live/Pi-constrained
-path, so it's isolated here and invoked only when a caller explicitly
-wants a written score (the CLI's `--write-score` flag, wired up in a
-follow-up ticket once this module's public API is stable).
+One of two modules in this codebase permitted to import `music21` (the
+other is `score_editor_state.py`, issue #98's second permitted importer --
+see that module's docstring) -- mirrors `batch_transcribe.py`'s
+sole-`librosa`-importer convention (see that module's docstring for the
+rationale): `music21`'s import cost is real and one-time, and has no
+business landing on the live/Pi-constrained path, so it's isolated to
+these two modules and invoked only when a caller explicitly wants a
+written/editable score.
 
 Public API: `write_score(result, path, time_signature=...)` and
 `guess_key_signature(chroma_histogram)`. Both take/build on
 `batch_transcribe.TranscriptionResult` -- nothing here touches live audio,
-`SessionState`, or any live-path module.
+`SessionState`, or any live-path module. `QUARTER_LENGTHS` (the
+duration_class -> music21 quarterLength lookup), `note_hex_color()`, and
+`pitch_for()` are also public -- promoted from private names for issue #98
+so `score_editor_state.py`'s own MusicXML save/load can reuse this
+module's per-note color and pitch-spelling logic and duration lookup table
+instead of duplicating them (see docs/DECISIONS.md for the rationale).
 """
 
 import numpy as np
@@ -31,7 +37,7 @@ from staff_map import staff_row
 # by nearest-beat distance. No tuplet handling needed here (issue #62):
 # every duration_class name is already a plain, possibly-dotted,
 # power-of-two note value.
-_QUARTER_LENGTHS = {
+QUARTER_LENGTHS = {
     "whole": 4.0,
     "dotted-half": 3.0,
     "half": 2.0,
@@ -111,7 +117,7 @@ def guess_key_signature(chroma_histogram):
     return m21key.Key(tonic_name, best_mode)
 
 
-def _note_hex_color(pitch_class):
+def note_hex_color(pitch_class):
     """A note's score color -- same fixed-lightness fifths-hue mapping
     `main.py`'s `_tab_note_rgb()` uses for the `tab` view, so a note reads
     as the same color in an exported score as it does live. Returns
@@ -124,7 +130,7 @@ def _note_hex_color(pitch_class):
     return f"#{r:02X}{g:02X}{b:02X}"
 
 
-def _pitch_for(pitch_class, octave):
+def pitch_for(pitch_class, octave):
     """`music21.pitch.Pitch` for a (pitch_class, octave) pair, spelled via
     NOTE_NAMES_FIFTHS -- this project's flat-biased root-spelling
     convention (see chord_templates.py's docstring / CLAUDE.md's
@@ -154,7 +160,7 @@ def _duration_quarter_length(note_event, result):
         (note_event.duration_hops * result.hop_seconds * result.bpm / 60.0) if result.bpm else None
     )
     duration_class = duration_class_for_beats(note_beats)
-    return _QUARTER_LENGTHS[duration_class]
+    return QUARTER_LENGTHS[duration_class]
 
 
 def write_score(result, path, time_signature=config.DEFAULT_TIME_SIGNATURE):
@@ -163,7 +169,7 @@ def write_score(result, path, time_signature=config.DEFAULT_TIME_SIGNATURE):
     bass `music21.stream.Part`s, see `_staff_for()`), one column per
     `onset_hop` in `result.notes` (the polyphonic list -- required to
     represent chord-mode's simultaneous notes as `<chord/>` groups, see
-    #30), each note colored via `_note_hex_color()`, time signature from
+    #30), each note colored via `note_hex_color()`, time signature from
     `time_signature` (a `(numerator, denominator)` tuple, same shape as
     `config.DEFAULT_TIME_SIGNATURE`), and a key signature guessed by
     `guess_key_signature(result.chroma_histogram)` -- left at music21's
@@ -215,21 +221,21 @@ def write_score(result, path, time_signature=config.DEFAULT_TIME_SIGNATURE):
 
             if len(group) == 1:
                 note_event = group[0]
-                m21_note = note.Note(_pitch_for(note_event.pitch_class, note_event.octave))
+                m21_note = note.Note(pitch_for(note_event.pitch_class, note_event.octave))
                 m21_note.duration.quarterLength = quarter_length
-                m21_note.style.color = _note_hex_color(note_event.pitch_class)
+                m21_note.style.color = note_hex_color(note_event.pitch_class)
                 part.insert(offset_beats, m21_note)
             else:
-                pitches = [_pitch_for(n.pitch_class, n.octave) for n in group]
+                pitches = [pitch_for(n.pitch_class, n.octave) for n in group]
                 m21_chord = chord.Chord(pitches)
                 m21_chord.duration.quarterLength = quarter_length
                 for chord_note, note_event in zip(m21_chord.notes, group):
-                    chord_note.style.color = _note_hex_color(note_event.pitch_class)
+                    chord_note.style.color = note_hex_color(note_event.pitch_class)
                 part.insert(offset_beats, m21_chord)
 
     # Quantize each part's note *offsets* (not durations -- those already
     # come from duration_class_for_beats(), so they're already snapped to
-    # one of _QUARTER_LENGTHS' clean, MusicXML-expressible values) to the
+    # one of QUARTER_LENGTHS' clean, MusicXML-expressible values) to the
     # nearest 32nd-note grid. Without this, a note's offset_beats (derived
     # straight from real, non-quantized onset_time/bpm above) lands on an
     # arbitrary fraction of a beat on real (non-synthetic) audio -- unlike
@@ -241,7 +247,7 @@ def write_score(result, path, time_signature=config.DEFAULT_TIME_SIGNATURE):
     # `MusicXMLExportException: Cannot convert inexpressible durations to
     # MusicXML` -- reproduced via a real (non-synthetic) `virtualnote
     # transcribe --write-score` run during issue #65's CLI-wiring
-    # integration test. (8,) matches _QUARTER_LENGTHS' finest grain
+    # integration test. (8,) matches QUARTER_LENGTHS' finest grain
     # (thirtysecond = 0.125 quarterLength = 1/8) so no real duration class
     # gets coarsened by the snap.
     treble.quantize(quarterLengthDivisors=(8,), processOffsets=True, processDurations=False,
