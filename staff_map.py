@@ -63,6 +63,33 @@ def row_note_name(row):
     return LETTER_NAMES[step % 7]
 
 
+# Standard order-of-sharps/order-of-flats, expressed as letter indices
+# (0=C..6=B, LETTER_NAMES' own order) rather than pitch classes -- a key
+# signature accidental applies to a *letter name* across every octave, not
+# one specific pitch class. key_fifths sharps adds the first `key_fifths`
+# entries of _SHARP_ORDER_LETTER_IDX; key_fifths flats (negative) adds the
+# first `abs(key_fifths)` entries of _FLAT_ORDER_LETTER_IDX. Issue #98
+# follow-up (direct user feedback after hands-on use): the editor's
+# legend/default note placement should reflect the active key signature
+# instead of always showing/placing a bare natural -- see docs/DECISIONS.md.
+_SHARP_ORDER_LETTER_IDX = [LETTER_NAMES.index(letter) for letter in "FCGDAEB"]
+_FLAT_ORDER_LETTER_IDX = [LETTER_NAMES.index(letter) for letter in "BEADGCF"]
+
+
+def key_signature_accidental(key_fifths, letter_idx):
+    """Whether `letter_idx` (0=C..6=B) is sharped, flatted, or left natural
+    under a key signature of `key_fifths` sharps (negative = flats) -- e.g.
+    key_fifths=1 (G major) sharps only F, the order-of-sharps' first entry.
+    Returns "sharp"/"flat"/"natural". Used by score_editor_display.py's
+    legend (a row's letter should read as spelled in the active key) and
+    `pitch_at_row()`'s key-aware default placement."""
+    if key_fifths > 0 and letter_idx in _SHARP_ORDER_LETTER_IDX[:key_fifths]:
+        return "sharp"
+    if key_fifths < 0 and letter_idx in _FLAT_ORDER_LETTER_IDX[:-key_fifths]:
+        return "flat"
+    return "natural"
+
+
 def ledger_rows(row):
     """Rows where a ledger line must be drawn for a note at `row`."""
     if 0 <= row <= 8 or 12 <= row <= 20:

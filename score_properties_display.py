@@ -1,27 +1,25 @@
-"""Score editor (issue #98): the Score properties screen -- opened by `t`
-(score_properties) from the main editor view, closed by `b`
-(score_properties_exit). Three independently spinnable Reels (Left/Right
-switches focus, Up/Down spins), per #90's resolution: time signature
-(steps through a small fixed set of common signatures), key signature
-(steps `EditorScore.key_fifths` +/-1 around the circle of fifths, same
-theming every other fifths-scheme view in this app already uses), tempo
-(steps `EditorScore.tempo_bpm` by a fixed BPM increment, clamped to a
-sane range).
+"""Score editor (issue #98, revised by a follow-up after #98's own
+hands-on session -- see docs/DECISIONS.md): the score-level properties --
+time signature, key signature, tempo -- editable via `score_properties`
+('t'). Originally a second, separate reel-based screen (own render loop,
+its own `b`-to-exit keybind), the same shape as the Chord builder; direct
+user feedback after hands-on use found leaving the main editor view for
+this unwanted, so the screen is gone -- `main.run_score_editor()` now
+edits these three fields inline, in the main view's own status line (see
+that function's `_property_field_texts()`/`_handle_property_key()`/
+`_parse_property_input()`).
 
-Unlike the Chord builder (chord_builder_display.py), which stages edits
-in its own working `BuilderState` until exit, this screen mutates the
-real `EditorScore` passed in directly, field by field, as each reel
-spins -- there's no "which notes should this become" staging ambiguity
-for three independent scalar fields the way there is for a chord's notes,
-so a separate working-copy/commit step would only add indirection.
+This module keeps only the pure logic those inline helpers reuse:
+`PROPERTY_SLOTS` (field order), `spin_time_signature()`/`spin_key_fifths()`/
+`spin_tempo()` (Up/Down's per-field stepping, exactly as before -- only the
+screen/mode plumbing around them changed), `key_fifths_label()` (the
+status-line key-signature label), and the three fields' fixed ranges/step
+sizes (`TIME_SIGNATURE_OPTIONS`, `KEY_FIFTHS_MIN`/`MAX`,
+`TEMPO_MIN_BPM`/`MAX_BPM`/`STEP_BPM`).
 
-Per this repo's test convention: the pure stepping functions below are
-unit-tested (tests/test_score_properties_display.py); `render()`'s actual
-screen layout is smoke-tested manually only.
+Per this repo's test convention: every function below is pure and
+unit-tested (tests/test_score_properties_display.py).
 """
-
-import shutil
-import sys
 
 PROPERTY_SLOTS = ["time_signature", "key_signature", "tempo"]
 
@@ -76,33 +74,3 @@ def key_fifths_label(fifths):
     if fifths > 0:
         return f"{fifths} sharp{'s' if fifths != 1 else ''}"
     return f"{-fifths} flat{'s' if fifths != -1 else ''}"
-
-
-def render(score, slot, status):
-    """Smoke-tested manually only, per this module's docstring."""
-    numerator, denominator = score.time_signature
-    rows_spec = [
-        ("time_signature", f"Time signature:  {numerator}/{denominator}"),
-        ("key_signature", f"Key signature:   {key_fifths_label(score.key_fifths)}"),
-        ("tempo", f"Tempo:           {score.tempo_bpm:.0f} BPM"),
-    ]
-    lines = [
-        "Score properties",
-        "Left/Right: switch reel  Up/Down: spin  b: done",
-        "",
-    ]
-    for slot_name, text in rows_spec:
-        marker = "> " if PROPERTY_SLOTS[slot] == slot_name else "  "
-        line = f"{marker}{text}"
-        if PROPERTY_SLOTS[slot] == slot_name:
-            line = f"\033[7m{line}\033[0m"
-        lines.append(line)
-    lines.append("")
-    lines.append(status)
-
-    size = shutil.get_terminal_size(fallback=(80, 24))
-    out = ["\033[2J"]
-    for i, line in enumerate(lines, start=1):
-        out.append(f"\033[{i};1H\033[K{line[:size.columns]}")
-    sys.stdout.write("".join(out))
-    sys.stdout.flush()

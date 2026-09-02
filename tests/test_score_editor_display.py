@@ -22,6 +22,45 @@ def test_pitch_at_row_is_inverse_of_staff_row_for_naturals():
             assert sed.pitch_at_row(row) == (pitch_class, octave)
 
 
+# --- pitch_at_row / _legend_letter key-signature awareness (issue #98
+# follow-up: default placement/legend should reflect the active key) ------
+
+def test_pitch_at_row_defaults_to_natural_with_no_key_signature():
+    row = staff_row(5, 4)  # F4
+    assert sed.pitch_at_row(row, key_fifths=0) == (5, 4)
+
+
+def test_pitch_at_row_sharps_the_implied_letter_in_g_major():
+    # G major (key_fifths=1) sharps F -- the F row's default placement
+    # should be F# (pitch class 6), same octave.
+    row = staff_row(5, 4)  # the F row
+    assert sed.pitch_at_row(row, key_fifths=1) == (6, 4)
+
+
+def test_pitch_at_row_flats_the_implied_letter_in_f_major():
+    # F major (key_fifths=-1) flats B -- the B row's default placement
+    # should be Bb (pitch class 10), same octave.
+    row = staff_row(11, 4)  # the B row
+    assert sed.pitch_at_row(row, key_fifths=-1) == (10, 4)
+
+
+def test_pitch_at_row_unaffected_letters_stay_natural():
+    # G major only sharps F -- every other row's default is still natural.
+    row = staff_row(0, 4)  # the C row
+    assert sed.pitch_at_row(row, key_fifths=1) == (0, 4)
+
+
+def test_legend_letter_shows_the_key_signature_accidental():
+    row = staff_row(5, 4)  # the F row
+    assert sed._legend_letter(row, key_fifths=0) == "F"
+    assert sed._legend_letter(row, key_fifths=1) == "F♯"
+
+
+def test_legend_letter_shows_flat_accidental():
+    row = staff_row(11, 4)  # the B row
+    assert sed._legend_letter(row, key_fifths=-1) == "B♭"
+
+
 # --- clamping ------------------------------------------------------------
 
 def test_clamp_row_stays_within_staff_bounds():
@@ -66,11 +105,25 @@ def test_toggle_note_removes_an_existing_note_when_column_has_others():
     assert [(n.pitch_class, n.octave) for n in column.notes] == [(0, 4)]
 
 
-def test_toggle_note_refuses_to_remove_the_last_note():
+def test_toggle_note_can_empty_a_column_to_zero_notes():
+    # Issue #98 follow-up (direct user feedback after hands-on use):
+    # Space used to refuse to remove a column's very last note, forcing a
+    # separate 'r'/clear_to_rest press -- that two-step flow was unwanted
+    # friction, so Space now empties a column all the way down to a Rest
+    # just like it removes any other note.
     column = _col((0, 4))
     row = staff_row(0, 4)
-    assert sed.toggle_note_at_cursor(column, row) is False
-    assert len(column.notes) == 1
+    assert sed.toggle_note_at_cursor(column, row) is True
+    assert column.notes == []
+
+
+def test_toggle_note_places_the_key_implied_spelling_by_default():
+    # Issue #98 follow-up: placing a new note in G major (key_fifths=1)
+    # on the F row should default to F#, not bare F.
+    column = _col()
+    row = staff_row(5, 4)  # the F row
+    assert sed.toggle_note_at_cursor(column, row, key_fifths=1) is True
+    assert [(n.pitch_class, n.octave) for n in column.notes] == [(6, 4)]
 
 
 def test_toggle_note_on_a_rest_column_creates_the_first_note():

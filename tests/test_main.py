@@ -10,7 +10,10 @@ from config_store import ConfigStore
 from rhythm_reanalysis import HopRecord
 
 import main
-from main import _filter_hop_records_to_range, _handle_mark_keys, _hop_beats, _mark_range, resolve_editor_action
+from main import (
+    _filter_hop_records_to_range, _handle_mark_keys, _handle_property_key, _hop_beats, _mark_range,
+    _parse_csi_params, _parse_property_input, _property_field_texts, resolve_editor_action,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -165,11 +168,29 @@ def test_resolve_editor_action_enter_is_hardcoded():
     assert resolve_editor_action("\n", fake) == "ENTER"
 
 
+def test_resolve_editor_action_shift_arrows_are_hardcoded_transpose():
+    # Issue #98 follow-up: transpose moved off a remappable '+'/'-' onto
+    # hardcoded Shift+Up/Shift+Down (the SHIFT_UP/SHIFT_DOWN tokens
+    # RawKeys.poll() returns for that CSI sequence) -- same tier as
+    # Left/Right/Up/Down/Enter, never consulting the keybind store at all.
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action("SHIFT_UP", fake) == "transpose_up"
+    assert resolve_editor_action("SHIFT_DOWN", fake) == "transpose_down"
+
+
+def test_resolve_editor_action_plusminus_no_longer_transpose():
+    # '+'/'-' were transpose_up/transpose_down's old default keybinds --
+    # confirms they're genuinely gone from the remappable table now, not
+    # just no longer the *default* (they're not in _EDITOR_ACTIONS at
+    # all, so no remap could bring them back onto '+'/'-' either).
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action("+", fake) is None
+    assert resolve_editor_action("-", fake) is None
+
+
 def test_resolve_editor_action_matches_default_keybinds():
     fake = _FakeKeybindStore()
     assert resolve_editor_action(" ", fake) == "note_toggle"
-    assert resolve_editor_action("+", fake) == "transpose_up"
-    assert resolve_editor_action("-", fake) == "transpose_down"
     assert resolve_editor_action(",", fake) == "duration_shorten"
     assert resolve_editor_action(".", fake) == "duration_lengthen"
     assert resolve_editor_action("r", fake) == "clear_to_rest"
@@ -214,3 +235,158 @@ def test_resolve_editor_action_defaults_to_module_level_store(monkeypatch):
     fresh = ConfigStore(path="/nonexistent/path/should/not/be/read.toml")
     monkeypatch.setattr(main, "store", fresh)
     assert resolve_editor_action(" ") == "note_toggle"
+
+
+# --- _parse_csi_params() (issue #98 follow-up: Shift+Up/Down transpose) ----
+
+def test_parse_csi_params_bare_arrow_returns_plain_direction():
+    # No parameter bytes at all -- 'ESC [ <letter>', today's original and
+    # by far most common case (an ordinary unmodified arrow press). Must
+    # keep working exactly as before this function existed.
+    assert _parse_csi_params("", "A") == "UP"
+    assert _parse_csi_params("", "B") == "DOWN"
+    assert _parse_csi_params("", "C") == "RIGHT"
+    assert _parse_csi_params("", "D") == "LEFT"
+
+
+def test_parse_csi_params_shift_modifier_returns_shift_tokens():
+    # 'ESC [ 1 ; 2 <letter>' -- xterm's standard Shift-modifier encoding.
+    assert _parse_csi_params("1;2", "A") == "SHIFT_UP"
+    assert _parse_csi_params("1;2", "B") == "SHIFT_DOWN"
+
+
+def test_parse_csi_params_unrecognized_params_falls_back_to_plain_direction():
+    # Some other modifier code (Alt/Ctrl/combinations) this app doesn't
+    # have a use for yet -- falls back to the plain direction rather than
+    # dropping the keystroke, same graceful-degradation posture as a
+    # laggy/multiplexed pty's arrow-burst handling.
+    assert _parse_csi_params("1;5", "A") == "UP"  # Ctrl+Up, unrecognized here
+    assert _parse_csi_params("1;2", "C") == "RIGHT"  # Shift+Right, not consumed by this app
+
+
+def test_parse_csi_params_unknown_final_byte_is_none():
+    assert _parse_csi_params("", "Z") is None
+    assert _parse_csi_params("1;2", "Z") is None
+
+
+# --- Inline header editor (score_properties, 't', issue #98 follow-up) ----
+
+class _FakeScore:
+    """A minimal stand-in for score_editor_state.EditorScore exposing just
+    the three fields the inline header editor touches -- avoids pulling
+    in music21 (a real EditorScore's module) just to test this dispatch
+    logic."""
+
+    def __init__(self, time_signature=(4, 4), key_fifths=0, tempo_bpm=90.0):
+        self.time_signature = time_signature
+        self.key_fifths = key_fifths
+        self.tempo_bpm = tempo_bpm
+
+
+def test_property_field_texts_reflects_current_score_values():
+    score = _FakeScore(time_signature=(3, 4), key_fifths=2, tempo_bpm=120.0)
+    texts = _property_field_texts(score)
+    assert texts["time_signature"] == "time=3/4"
+    assert texts["key_signature"] == "key=2 sharps"
+    assert texts["tempo"] == "tempo=120"
+
+
+def test_parse_property_input_tempo_clamps_into_range():
+    import score_properties_display as spd
+    assert _parse_property_input("tempo", "150") == 150.0
+    assert _parse_property_input("tempo", "9999") == spd.TEMPO_MAX_BPM
+    assert _parse_property_input("tempo", "0") == spd.TEMPO_MIN_BPM
+
+
+def test_parse_property_input_time_signature_parses_nd():
+    assert _parse_property_input("time_signature", "3/4") == (3, 4)
+    assert _parse_property_input("time_signature", "11/8") == (11, 8)
+
+
+def test_parse_property_input_time_signature_rejects_malformed_text():
+    with pytest.raises(ValueError):
+        _parse_property_input("time_signature", "not-a-signature")
+    with pytest.raises(ValueError):
+        _parse_property_input("time_signature", "0/4")
+
+
+def test_parse_property_input_empty_buffer_is_none():
+    assert _parse_property_input("tempo", "") is None
+    assert _parse_property_input("time_signature", "  ") is None
+
+
+def test_handle_property_key_left_right_move_the_highlighted_field():
+    import score_properties_display as spd
+    score = _FakeScore()
+    slot, buffer, still_editing = _handle_property_key("RIGHT", score, 0, "")
+    assert slot == spd.move_slot(0, 1)
+    assert buffer == ""
+    assert still_editing is True
+    slot, buffer, still_editing = _handle_property_key("LEFT", score, slot, "")
+    assert slot == 0
+
+
+def test_handle_property_key_up_down_spin_the_highlighted_fields_value():
+    import score_properties_display as spd
+    score = _FakeScore(tempo_bpm=100.0)
+    slot = spd.PROPERTY_SLOTS.index("tempo")
+    _handle_property_key("UP", score, slot, "")
+    assert score.tempo_bpm == 100.0 + spd.TEMPO_STEP_BPM
+    _handle_property_key("DOWN", score, slot, "")
+    assert score.tempo_bpm == 100.0
+
+
+def test_handle_property_key_digits_accumulate_into_buffer_on_typable_fields():
+    score = _FakeScore()
+    slot = 2  # tempo
+    _, buffer, still_editing = _handle_property_key("1", score, slot, "")
+    _, buffer, still_editing = _handle_property_key("2", score, slot, buffer)
+    _, buffer, still_editing = _handle_property_key("0", score, slot, buffer)
+    assert buffer == "120"
+    assert still_editing is True
+    # Not applied to the score until Enter.
+    assert score.tempo_bpm == 90.0
+
+
+def test_handle_property_key_key_signature_slot_ignores_typed_digits():
+    import score_properties_display as spd
+    score = _FakeScore()
+    slot = spd.PROPERTY_SLOTS.index("key_signature")
+    _, buffer, _ = _handle_property_key("5", score, slot, "")
+    assert buffer == ""
+
+
+def test_handle_property_key_backspace_trims_the_buffer():
+    score = _FakeScore()
+    _, buffer, _ = _handle_property_key("\x7f", score, 2, "120")
+    assert buffer == "12"
+
+
+def test_handle_property_key_enter_applies_a_pending_buffer_and_exits():
+    score = _FakeScore(tempo_bpm=90.0)
+    slot = 2  # tempo
+    _, buffer, still_editing = _handle_property_key("\r", score, slot, "140")
+    assert score.tempo_bpm == 140.0
+    assert buffer == ""
+    assert still_editing is False
+
+
+def test_handle_property_key_enter_with_no_buffer_just_exits():
+    score = _FakeScore(tempo_bpm=90.0)
+    _, _, still_editing = _handle_property_key("\r", score, 2, "")
+    assert score.tempo_bpm == 90.0
+    assert still_editing is False
+
+
+def test_handle_property_key_enter_with_unparseable_buffer_leaves_value_unchanged():
+    score = _FakeScore(time_signature=(4, 4))
+    slot = 0  # time_signature
+    _, _, still_editing = _handle_property_key("\r", score, slot, "garbage")
+    assert score.time_signature == (4, 4)
+    assert still_editing is False
+
+
+def test_handle_property_key_navigation_resets_the_buffer():
+    score = _FakeScore()
+    _, buffer, _ = _handle_property_key("LEFT", score, 2, "42")
+    assert buffer == ""
