@@ -32,6 +32,14 @@ _DURATION_CLASSES = [
 # A small, explicitly-accepted edge case (#55), not worth a separate ticket.
 DEFAULT_DURATION_CLASS = "quarter"
 
+# Public, importable-without-the-underscore ordering of duration_class
+# names, longest to shortest -- issue #98's score_editor_state.py cycles a
+# column's duration_class through this list (','/'.' duration_shorten/
+# lengthen), and score_writer.py's own quarter-length lookup shares the
+# same name set. Derived from _DURATION_CLASSES itself rather than
+# hand-duplicated, so the two can never drift apart.
+DURATION_CLASS_ORDER = [name for _, name in _DURATION_CLASSES]
+
 
 def duration_class_for_beats(beats):
     """Nearest standard note-value name (including dotted variants) for a

@@ -326,6 +326,12 @@ KEY_GUESS_CONFIDENCE_THRESHOLD = 0.65  # Krumhansl-Schmuckler correlation (-1..1
                                         # than a confidently-wrong guess -- provisional starting value,
                                         # same "retune later" convention as CHORD_MATCH_THRESHOLD.
 
+# --- Score editor (issue #98, score_editor_state.EditHistory) ---
+EDITOR_UNDO_MAX_DEPTH = 50  # how many EditHistory.record() snapshots are retained before the oldest
+                             # is dropped -- plain EditorScore dataclass snapshots are cheap (no music21
+                             # graph involved, see score_editor_state.py), so this is a generous, not a
+                             # tightly-tuned, bound; per #88's "multi-level, bounded" call.
+
 # --- Playback synthesis (map #24, decision #32: oscillator+ADSR synth) ---
 PLAYBACK_SAMPLE_RATE = 44100     # independent of the live pipeline's SAMPLE_RATE (22050) -- playback is
                                   # output-only, no FFT-window/latency-budget constraint drives this choice,

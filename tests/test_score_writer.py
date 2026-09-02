@@ -18,7 +18,7 @@ from music21 import chord as m21chord, converter
 import config
 from batch_transcribe import NoteEvent, TranscriptionResult
 from duration_tracker import duration_class_for_beats
-from score_writer import _QUARTER_LENGTHS, guess_key_signature, write_score
+from score_writer import QUARTER_LENGTHS, guess_key_signature, write_score
 
 HOP_SECONDS = config.BLOCK_SIZE / config.SAMPLE_RATE
 
@@ -34,7 +34,7 @@ def hops_for_beats(beats, bpm):
 
 def expected_quarter_length(duration_hops, bpm):
     beats = duration_hops * HOP_SECONDS * bpm / 60.0
-    return _QUARTER_LENGTHS[duration_class_for_beats(beats)]
+    return QUARTER_LENGTHS[duration_class_for_beats(beats)]
 
 
 # ---- guess_key_signature ----------------------------------------------
