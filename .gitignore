@@ -12,3 +12,4 @@ research/*/output/
 prototypes/*/output/
 prototypes/session-log-and-practice-mode/demo_session.jsonl
 *.musicxml
+graphify-out/
