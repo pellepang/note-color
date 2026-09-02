@@ -36,7 +36,7 @@ from duration_tracker import DEFAULT_DURATION_CLASS, DURATION_CLASS_ORDER
 from score_editor_state import EditorColumn, EditorNote
 from staff_map import (
     BASS_CLEF_ROW, BOTTOM_ROW, GRAND_STAFF_REF_STEP, LETTER_INDEX, STAFF_LINE_ROWS,
-    TOP_ROW, TREBLE_CLEF_ROW, ledger_rows, row_note_name, staff_row,
+    TOP_ROW, TREBLE_CLEF_ROW, key_signature_accidental, ledger_rows, row_note_name, staff_row,
 )
 
 NOTEHEAD_GLYPH = "\U0001D157"  # MUSICAL SYMBOL VOID NOTEHEAD -- same as terminal_tab_display.py
@@ -80,17 +80,31 @@ ZOOM_LEVELS = [
 _NATURAL_PC_BY_LETTER_IDX = {letter_idx: pc for pc, letter_idx in LETTER_INDEX.items()}
 
 
-def pitch_at_row(row):
-    """Inverse of `staff_map.staff_row()`: the *natural* note (no
-    accidental) that sits at a given staff row -- `note_toggle` always
-    places a natural there, matching `staff_map`'s own "an accidental
-    shares its natural neighbor's row" convention (there's no separate
-    row to place a sharp/flat on directly; `transpose_up`/`down` are how
-    a placed note becomes an accidental)."""
+def pitch_at_row(row, key_fifths=0):
+    """Inverse of `staff_map.staff_row()`: the note that sits at a given
+    staff row, by default the *natural* (no accidental) -- `note_toggle`
+    places whatever this returns, matching `staff_map`'s own "an
+    accidental shares its natural neighbor's row" convention (there's no
+    separate row to place a sharp/flat on directly; Shift+Up/Down are how
+    a placed note becomes a *different* accidental afterward).
+
+    `key_fifths` (issue #98 follow-up, direct user feedback after
+    hands-on use) makes the *default* spelling key-aware instead of
+    always-natural: in G major (key_fifths=1), the F-row's default is
+    F-sharp, not F natural -- `staff_map.key_signature_accidental()`
+    looks up whether this row's letter is sharped/flatted in the active
+    key, and the semitone shift is folded into the same
+    `octave*12+pitch_class` arithmetic `transpose_note_at_cursor()` uses,
+    so it wraps octaves correctly at the rare edge case of a sharped B or
+    flatted C. Only affects the *default* a fresh placement gets --
+    Shift+Up/Down still freely retunes any placed note afterward."""
     step = row + GRAND_STAFF_REF_STEP
     letter_idx = step % 7
     octave = step // 7
-    return _NATURAL_PC_BY_LETTER_IDX[letter_idx], octave
+    natural_pc = _NATURAL_PC_BY_LETTER_IDX[letter_idx]
+    delta = {"sharp": 1, "flat": -1, "natural": 0}[key_signature_accidental(key_fifths, letter_idx)]
+    combined = octave * 12 + natural_pc + delta
+    return combined % 12, combined // 12
 
 
 def clamp_row(row):
@@ -110,20 +124,26 @@ def note_index_at_row(column, row):
     return None
 
 
-def toggle_note_at_cursor(column, row):
-    """`note_toggle` (Space): places a natural note at `row` if nothing's
-    there, removes the one that is there otherwise -- refuses to remove
-    the column's very last note (use `clear_to_rest` for that; see
-    CONTEXT.md's Rest glossary entry for why "empty" is never an
-    incidental side effect of note removal). Returns True if the column
-    was actually mutated."""
+def toggle_note_at_cursor(column, row, key_fifths=0):
+    """`note_toggle` (Space): places a note at `row` if nothing's there
+    (spelled per the active key signature -- see `pitch_at_row()`),
+    removes the one that is there otherwise -- including a column's very
+    last note, emptying it to a Rest. Space used to refuse that last-note
+    case (forcing a separate `clear_to_rest` press), but direct user
+    feedback after hands-on use called the two-step flow unwanted
+    friction: the same key that places a note should be able to remove
+    it all the way down to zero, with no special case (see
+    docs/DECISIONS.md). `clear_to_rest` still has its own independent
+    value for a multi-note chord column -- clearing everything in one
+    press instead of one note at a time -- so it stays. Returns True if
+    the column was actually mutated (always True here; the return value
+    is kept for symmetry with this module's other mutation functions,
+    some of which do refuse)."""
     idx = note_index_at_row(column, row)
     if idx is not None:
-        if len(column.notes) <= 1:
-            return False
         column.notes.pop(idx)
         return True
-    pitch_class, octave = pitch_at_row(row)
+    pitch_class, octave = pitch_at_row(row, key_fifths)
     column.notes.append(EditorNote(pitch_class=pitch_class, octave=octave))
     column.notes.sort(key=lambda n: n.octave * 12 + n.pitch_class)
     return True
@@ -320,7 +340,7 @@ def render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_
             clef_cell = TREBLE_CLEF_GLYPH.center(config.TAB_CLEF_WIDTH)
         else:
             clef_cell = " " * config.TAB_CLEF_WIDTH
-        letter_cell = row_note_name(screen_row).center(config.TAB_LETTER_WIDTH)
+        letter_cell = _legend_letter(screen_row, score.key_fifths).center(config.TAB_LETTER_WIDTH)
         cells = [clef_cell + letter_cell]
 
         for i in range(start, end):
@@ -359,6 +379,20 @@ def render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_
         out.append(f"\033[{len(lines) + 2};1H\033[K{help_legend[:cols]}")
     sys.stdout.write("\033[2J" + "".join(out))
     sys.stdout.flush()
+
+
+def _legend_letter(row, key_fifths):
+    """Legend letter for a staff row, spelled as it appears in the active
+    key signature (issue #98 follow-up, direct user feedback) rather than
+    always bare-natural -- e.g. the F-row's legend reads 'F♯' in G major,
+    not 'F'. Reuses `staff_map.row_note_name()`'s own letter and the same
+    `(row + GRAND_STAFF_REF_STEP) % 7` letter-index math
+    `key_signature_accidental()` expects, rather than a second lookup
+    table."""
+    letter = row_note_name(row)
+    letter_idx = (row + GRAND_STAFF_REF_STEP) % 7
+    marker = {"sharp": "♯", "flat": "♭", "natural": ""}[key_signature_accidental(key_fifths, letter_idx)]
+    return letter + marker
 
 
 def ledger_rows_for(column, bottom, top):

@@ -18,14 +18,21 @@ Schema (all tables optional):
     notehead_style_toggle = "n"
     legend_toggle = "l"
     freeze_toggle = " "
-    # Score editor (issue #98, `virtualnote edit <path>`) -- sixteen more
-    # remappable actions across the main editor view and the Chord
-    # builder/Score properties screens; see config.DEFAULT_KEYBINDS for the
-    # full set/defaults and score_editor_display.py's module docstring for
-    # what each does. undo ("u") / redo ("U") are matched case-sensitively
-    # by main.run_score_editor() (unlike every other keybind here, matched
+    # Score editor (issue #98, `virtualnote edit <path>`) -- thirteen more
+    # remappable actions across the main editor view and the Chord builder
+    # screen; see config.DEFAULT_KEYBINDS for the full set/defaults and
+    # score_editor_display.py's module docstring for what each does.
+    # undo ("u") / redo ("U") are matched case-sensitively by
+    # main.run_score_editor() (unlike every other keybind here, matched
     # case-insensitively) specifically so the two share a letter but stay
-    # two distinct actions -- see docs/DECISIONS.md.
+    # two distinct actions -- see docs/DECISIONS.md. transpose_up/
+    # transpose_down and score_properties_exit are deliberately *not*
+    # here -- a post-#98 hands-on-feedback follow-up made transpose a
+    # hardcoded Shift+Up/Shift+Down (not remappable, same tier as Left/
+    # Right/Up/Down/Enter) and retired the separate Score properties
+    # screen score_properties_exit used to close (folded into an inline
+    # header editor within the main view instead) -- see
+    # docs/DECISIONS.md.
 
     [colors]
     # Note name (sharp or flat spelling both accepted on read; write-back

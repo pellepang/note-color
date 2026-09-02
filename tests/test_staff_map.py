@@ -1,6 +1,6 @@
 from staff_map import (
     staff_row, ledger_rows, row_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
-    BASS_CLEF_ROW, TREBLE_CLEF_ROW,
+    BASS_CLEF_ROW, TREBLE_CLEF_ROW, LETTER_NAMES, key_signature_accidental,
 )
 
 
@@ -85,6 +85,49 @@ def test_row_note_name_covers_ledger_line_rows_too():
     assert row_note_name(10) == "C"          # middle C
     assert row_note_name(BOTTOM_ROW) == "C"  # C2, 2 ledger lines below bass staff
     assert row_note_name(TOP_ROW) == "B"     # B5, 1 ledger line above treble staff
+
+
+# --- key_signature_accidental() (issue #98 follow-up) ---------------------
+
+def _idx(letter):
+    return LETTER_NAMES.index(letter)
+
+
+def test_key_signature_accidental_no_sharps_or_flats_is_all_natural():
+    for letter in LETTER_NAMES:
+        assert key_signature_accidental(0, _idx(letter)) == "natural"
+
+
+def test_key_signature_accidental_g_major_sharps_only_f():
+    assert key_signature_accidental(1, _idx("F")) == "sharp"
+    for letter in "CGDAEB":
+        assert key_signature_accidental(1, _idx(letter)) == "natural"
+
+
+def test_key_signature_accidental_d_major_sharps_f_and_c():
+    assert key_signature_accidental(2, _idx("F")) == "sharp"
+    assert key_signature_accidental(2, _idx("C")) == "sharp"
+    for letter in "GDAEB":
+        assert key_signature_accidental(2, _idx(letter)) == "natural"
+
+
+def test_key_signature_accidental_f_major_flats_only_b():
+    assert key_signature_accidental(-1, _idx("B")) == "flat"
+    for letter in "EADGCF":
+        assert key_signature_accidental(-1, _idx(letter)) == "natural"
+
+
+def test_key_signature_accidental_bb_major_flats_b_and_e():
+    assert key_signature_accidental(-2, _idx("B")) == "flat"
+    assert key_signature_accidental(-2, _idx("E")) == "flat"
+    for letter in "ADGCF":
+        assert key_signature_accidental(-2, _idx(letter)) == "natural"
+
+
+def test_key_signature_accidental_extreme_keys_sharp_or_flat_every_letter():
+    for letter in LETTER_NAMES:
+        assert key_signature_accidental(7, _idx(letter)) == "sharp"
+        assert key_signature_accidental(-7, _idx(letter)) == "flat"
 
 
 def test_row_note_name_matches_staff_row_for_every_pitch_class_octave():

@@ -194,14 +194,18 @@ DEFAULT_KEYBINDS = {
     "session_record_toggle": "s",
     "mark_range_start": "[",
     "mark_range_end": "]",
-    # Score editor (issue #98) -- main editor view + Chord builder/Score
-    # properties screens, `virtualnote edit <path>`. Defaults per #98's
-    # spec; none collide with '|'/'h' (settings_display.is_valid_remap_key
-    # already enforces this generically for a remap, same as every
-    # existing keybind above).
+    # Score editor (issue #98) -- main editor view + Chord builder screen,
+    # `virtualnote edit <path>`. Defaults per #98's spec; none collide
+    # with '|'/'h' (settings_display.is_valid_remap_key already enforces
+    # this generically for a remap, same as every existing keybind
+    # above). transpose_up/transpose_down were here too (default '+'/'-')
+    # until a post-#98 hands-on-feedback follow-up replaced them with
+    # hardcoded Shift+Up/Shift+Down -- see main.py's resolve_editor_action()
+    # and docs/DECISIONS.md; score_properties_exit was here until that same
+    # follow-up retired the separate Score properties screen it belonged
+    # to in favor of an inline header editor (score_properties, 't',
+    # still opens it -- there's just no separate screen left to exit from).
     "note_toggle": " ",
-    "transpose_up": "+",
-    "transpose_down": "-",
     "duration_shorten": ",",
     "duration_lengthen": ".",
     "clear_to_rest": "r",
@@ -214,7 +218,6 @@ DEFAULT_KEYBINDS = {
     "chord_builder_exit": "b",
     "save": "w",
     "score_properties": "t",
-    "score_properties_exit": "b",
 }
 
 # --- Credits & donation (issue #44) ---

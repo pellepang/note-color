@@ -264,7 +264,7 @@ def render(state, quality_index, status):
     """Smoke-tested manually only, per this module's docstring."""
     lines = [
         "Chord builder",
-        "Left/Right: switch reel  Up/Down: spin  type: jump  Enter: force-commit typed  b: done",
+        "Up/Down: switch reel  Left/Right: spin  type: jump  Enter: force-commit typed  b: done",
         "",
     ]
     root_label = NOTE_NAMES_FIFTHS[state.root_pc]
