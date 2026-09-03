@@ -74,6 +74,7 @@ class KittyRawKeys:
         self._pending = deque()
         self.kitty = False
         self.kitty_flags = None
+        self.kitty_flags_before = None
         self.negotiation = "skipped"
         if self._active and set_cbreak:
             self._old_settings = termios.tcgetattr(self._fd)
@@ -124,7 +125,15 @@ class KittyRawKeys:
             self._write(kk.push_sequence(self._flags))
             self._pushed = True
             self.kitty = True
-            self.kitty_flags = probe.flags
+            # The flags we *pushed*, not `probe.flags` -- the query reports
+            # the terminal's flags as they were *before* the push, which is
+            # 0 in a fresh kitty. Reporting that reads as "the protocol
+            # isn't on" when in fact reaching this branch at all proves it
+            # is: only a kitty-protocol terminal answers `CSI ? u`, and a
+            # terminal that doesn't settles as unsupported via the DA1
+            # sentinel instead. Confirmed live in real kitty (#101).
+            self.kitty_flags = self._flags
+            self.kitty_flags_before = probe.flags
 
     def _write(self, data):
         """Emit an escape sequence. Never raises -- a terminal that has
