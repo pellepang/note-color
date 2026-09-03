@@ -36,6 +36,27 @@ _Avoid_: Chord label — "label" already denotes the per-note name drawn in `tab
 **Slash chord**:
 A chord whose sounding bass note (per **Bass chroma**) differs from its own root — an inversion, or a chord voiced over a foreign bass. Rendered in a chord name as "<name>/<bass>" (e.g. "C/E"); a chord in root position omits the slash.
 
+### Sound engine (wayfinder map [#99](https://github.com/pellepang/note-color/issues/99))
+
+**Patch**:
+A file describing how to make sound — the unit a user loads, edits, saves and shares. One hand-editable TOML file per patch under `~/.config/note-color/patches/`. Every patch declares which engine renders it (`engine = "synth" | "sampler" | "sf2"`), so a subtractive-synth sound, a sampled drum kit, and an SF2 program selection are all patches rather than three unrelated file kinds — "load a patch" stays one code path and one browser UI regardless of what is inside.
+_Avoid_: Preset — an exact synonym for patch, deliberately rejected so the two can never drift apart in the code or the UI.
+
+**Kit**:
+A patch whose engine is the sampler and whose zones are each one key wide — the degenerate case of a sampler instrument, not a separate concept or file kind. What the synth tool's drum-pad mode displays; the pad grid is a *view* onto a kit, never its own engine.
+
+**Zone**:
+A sample mapped to a range of keys, with a root key it was recorded at. A range wider than one key is what lets a single recorded note play across an octave (a real sampler instrument); a kit's zones are one key wide each. Modelled on the SF2 zone concept, so the sampler and the SF2 player share one mapping vocabulary.
+
+**Voice**:
+One sounding note at runtime — the thing polyphony counts and voice stealing reclaims. Carries the per-note state that must survive across audio blocks (oscillator phase, filter state, envelope stage, LFO phase, velocity). Distinct from a **Patch**, which describes how voices are made; many voices can sound from one patch at once.
+
+**Program**:
+SF2's own term for a bank-plus-preset selection inside a soundfont. Used *only* when talking to FluidSynth — a patch that selects one is still called a patch everywhere else.
+
+**Sample**:
+An audio recording on disk that a **Zone** plays. Copied into `~/.config/note-color/samples/` on import and referenced by bare name, so a patch stays shareable rather than pointing into one machine's filesystem.
+
 ### Score editor (wayfinder map [#85](https://github.com/pellepang/note-color/issues/85))
 
 **Column** (editor sense):
