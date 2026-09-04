@@ -35,7 +35,11 @@ live-menu entry) — map #85 is shippable as of this feature, modulo the
 four things its own scope explicitly excluded from the start: foreign
 (non-`score_writer.py`-produced) MusicXML import fidelity, a print/
 engraving-quality formatter, music-theory analysis, and live audio
-playback from inside the editor. Verified via the full unit suite plus
+playback from inside the editor -- the last of which has since been
+delivered anyway by map [#99](https://github.com/pellepang/note-color/issues/99)'s
+ticket [#120](https://github.com/pellepang/note-color/issues/120)
+(audition, piano-mode entry, play-from-cursor with a playhead, metronome
+and a loop region), so only the first three remain out of scope. Verified via the full unit suite plus
 manual smoke-testing of the interactive loop (a real TTY isn't available
 in this environment — see the implementation PR/commit for what was and
 wasn't verified that way); not yet used for a real multi-session editing
