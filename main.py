@@ -2905,6 +2905,336 @@ def _editor_loop_status(mark_start, mark_end):
     return f"loop=[{span[0] + 1},{span[1] + 1}]  "
 
 
+def _synth_status(state, held_mode, engine, message):
+    """The synth tool's status line. `keys=` is the one field decision
+    #107 point 7 makes mandatory: on a terminal that reports no key
+    releases every note is a fixed length, and *saying so plainly* is
+    what keeps "why won't notes sustain?" from becoming a bug report
+    rather than a known, documented degradation."""
+    layout = state.layout
+    patch = state.panel_patch()
+    voices = engine.voices.active_count() if engine is not None else 0
+    parts = [
+        f"layout={layout.name}(tab)",
+        f"oct={state.octave_shift:+d}",
+        f"patch={patch.name}{'*' if state.patch_dirty else ''}",
+        f"kit={state.kit.name if state.kit is not None else '--'}",
+        f"voices={voices}",
+        f"keys={held_mode}",
+    ]
+    if message:
+        parts.append(message)
+    return "  ".join(parts)
+
+
+def _synth_legend(state):
+    parts = [
+        "letters/numbers=play", "tab=layout", "up/down=param", "left/right=value",
+        "shift+left/right=coarse", "shift+up/down=octave",
+        "shift+p=patches", "shift+w=save", "shift+i=import sample",
+        "shift+m=panic", "shift+h=legend",
+    ]
+    if not state.layout.builtin:
+        parts.extend(["shift+b=bind kind", "<|>=bind value", "shift+l=save layout"])
+    else:
+        parts.append("shift+n=custom layout")
+    return _legend_line(parts)
+
+
+def run_synth_tool(session=None):
+    """`virtualnote synth` / the menu's Synth entry (map #99, ticket #119,
+    decision #107): the standalone instrument.
+
+    Never opens the mic -- like `edit` (#98), which is why `shell.py`
+    gives it its own dispatch branch rather than routing it through
+    `run_session()`. It does use the process-wide `SoundEngine`
+    (`SessionState.ensure_sound_engine()`, decision #105) when a session
+    exists, so switching editor -> synth -> a live view never drops the
+    output device; called with no session (the CLI subcommand) it builds
+    its own, exactly as `transcribe --play` already does.
+
+    The keyboard is opened with `want_kitty=True` -- the one thing in
+    this app that genuinely needs key *releases*, since a held key must
+    sustain rather than machine-gun. On a terminal without the protocol
+    `kitty_keys.FixedDurationKeys` takes over and every note is
+    `config.SYNTH_FIXED_NOTE_SECONDS` long; the status line says which of
+    the two is in force (#107 point 7).
+
+    Returns the "quit"/"menu" sentinel every other interactive view
+    returns. Smoke-tested manually only, per this repo's convention --
+    `synth_tool.py`/`synth_params.py`/`synth_layout.py`/
+    `synth_display.py` hold every decision this loop makes, and those are
+    unit-tested directly."""
+    import synth_display
+    import synth_tool
+    from synth_engine import SynthUnavailable, require_scipy
+
+    try:
+        require_scipy()
+    except SynthUnavailable as exc:
+        # #111: the synth refuses to open rather than opening filterless,
+        # which is precisely the failure mode that makes the closest
+        # prior art read as a toy.
+        print(f"[virtualnote] {exc}", file=sys.stderr)
+        return "menu"
+
+    from sampler import SamplerEngine
+    from sound_engine import NoteOn
+    from synth_engine import SynthEngine
+
+    state = synth_tool.SynthToolState()
+    router = synth_tool.ChannelRouter(SynthEngine(patch=state.patch))
+
+    if session is not None:
+        sound = session.ensure_sound_engine()
+    else:
+        import sound_engine as _sound_engine
+
+        sound = _sound_engine.SoundEngine()
+        sound.ensure_started()
+    previous_engine = sound.engine
+    sound.engine = router
+    sound.set_polyphony_override(lambda: synth_tool.polyphony_for_layout(state.layout))
+
+    def _sync_engines():
+        router.note_engine.patch = state.patch
+        if state.kit is not None:
+            if router.pad_engine is None:
+                router.pad_engine = SamplerEngine(patch=state.kit)
+            else:
+                router.pad_engine.set_patch(state.kit)
+
+    keys = RawKeys(want_kitty=True)
+    held_mode = "held" if keys.kitty else f"fixed {config.SYNTH_FIXED_NOTE_SECONDS:.2f}s (no key release)"
+    policy = (kitty_keys.HeldKeys() if keys.kitty
+              else kitty_keys.FixedDurationKeys(config.SYNTH_FIXED_NOTE_SECONDS))
+    lights = synth_display.KeyLights()
+    voices = {}
+    dt = 1.0 / config.TERMINAL_FPS
+
+    def _note_on(key):
+        slot = state.layout.slot_for(key)
+        if slot is None:
+            return
+        # Recorded before the unbound check, not after: "point at a key"
+        # in this tool means "play it", and an unbound key that never
+        # became the bind target could never be bound back to anything.
+        state.last_key = key
+        if slot.kind == synth_tool.UNBOUND:
+            return
+        pitch = slot.midi_key(state.octave_shift)
+        if pitch is None or not (0 <= pitch <= 127):
+            return
+        # Full velocity, always (#107 decision 3): QWERTY has no dynamics
+        # to report, and faking them would be a lie the sampler's own
+        # velocity layers then act on.
+        voices[key] = sound.note_on(NoteOn(pitch, 1.0, slot.channel()))
+
+    def _note_off(key):
+        voice_id = voices.pop(key, None)
+        if voice_id is not None:
+            sound.release_voice(voice_id)
+
+    def _apply(events):
+        for kind, key in events:
+            if kind == kitty_keys.NOTE_ON:
+                _note_on(key)
+            else:
+                _note_off(key)
+
+    try:
+        while True:
+            try:
+                while True:
+                    event = keys.poll_event()
+                    if event is None:
+                        break
+                    overlay_kind = state.overlay.kind if state.overlay is not None else None
+                    action = synth_tool.resolve_action(event, overlay_kind)
+                    if action == "menu":
+                        return "menu"
+                    if action is not None:
+                        state.message = _handle_synth_action(
+                            action, state, sound, policy, _apply, _sync_engines) or ""
+                        continue
+                    if event.event == kitty_keys.PRESS and state.overlay is not None \
+                            and state.overlay.kind == synth_tool.OVERLAY_SAVE:
+                        # PRESS only, never REPEAT: a held key sustains
+                        # one note, so it must likewise type one
+                        # character rather than a run of them.
+                        # The always-plays invariant, held even inside a
+                        # text field: the keystroke both types and sounds.
+                        text = synth_tool.typed_text(event)
+                        if len(text) == 1 and text.isprintable():
+                            state.overlay.append(text)
+                    if keys.kitty:
+                        _apply(policy.apply(event))
+                    else:
+                        _apply(policy.apply(event, time.monotonic()))
+            except KeyboardInterrupt:
+                return "quit"
+
+            if not keys.kitty:
+                _apply(policy.expire(time.monotonic()))
+
+            colors = lights.update(dt, state.layout, policy.held, state.kit, state.octave_shift)
+            status = _synth_status(state, held_mode, sound, state.message)
+            synth_display.render(state, colors, status,
+                                 _synth_legend(state) if state.help_on else "")
+            time.sleep(dt)
+    finally:
+        # `policy.release_all()` covers every note this loop started;
+        # `sound.all_notes_off()` is the belt-and-braces guarantee for
+        # anything the voice manager still holds. A stuck note is the
+        # single worst failure mode of an instrument, so both run.
+        _apply(policy.release_all())
+        keys.release_all()
+        sound.all_notes_off()
+        sound.set_polyphony_override(None)
+        sound.engine = previous_engine
+        keys.restore()
+
+
+def _handle_synth_action(action, state, sound, policy, apply_events, sync_engines):
+    """One resolved synth-tool action. Split out of `run_synth_tool()`'s
+    loop purely for legibility -- it still owns real side effects (file
+    I/O, the audio engine), so like the loop it is smoke-tested rather
+    than unit-tested; every *decision* it makes lives in `synth_tool.py`
+    and is tested there."""
+    import synth_tool
+    import wav_io
+
+    overlay = state.overlay
+
+    if action == "layout_cycle":
+        apply_events(policy.release_all())
+        layout = state.cycle_layout()
+        return f"layout: {layout.name}"
+    if action == "param_prev":
+        state.move_param(-1)
+        return None
+    if action == "param_next":
+        state.move_param(1)
+        return None
+    if action in ("param_dec", "param_inc", "param_dec_coarse", "param_inc_coarse"):
+        direction = 1 if action.startswith("param_inc") else -1
+        state.adjust_param(direction, action.endswith("coarse"))
+        sync_engines()
+        return None
+    if action in ("octave_up", "octave_down"):
+        # Sounding notes are released first: a key held across a
+        # transpose would otherwise be released against a pitch it was
+        # never started at, and stick.
+        apply_events(policy.release_all())
+        shift = state.shift_octave(1 if action == "octave_up" else -1)
+        return f"octave {shift:+d}"
+    if action == "help_toggle":
+        state.help_on = not state.help_on
+        return None
+    if action == "panic":
+        apply_events(policy.release_all())
+        sound.all_notes_off()
+        return "all notes off"
+
+    # -- overlays ---------------------------------------------------------
+    if action == "patch_browse":
+        state.toggle_overlay(synth_tool.OVERLAY_PATCH)
+        return None
+    if action == "patch_save":
+        state.toggle_overlay(synth_tool.OVERLAY_SAVE)
+        return None
+    if action == "sample_import":
+        state.toggle_overlay(synth_tool.OVERLAY_SAMPLE)
+        return None
+    if action == "overlay_cancel":
+        state.close_overlay()
+        return None
+    if action == "overlay_prev" and overlay is not None:
+        overlay.move(-1)
+        return None
+    if action == "overlay_next" and overlay is not None:
+        overlay.move(1)
+        return None
+    if action == "overlay_backspace" and overlay is not None:
+        overlay.backspace()
+        return None
+    if action == "overlay_back" and overlay is not None and overlay.directory:
+        state.overlay_enter_directory(os.path.dirname(os.path.abspath(overlay.directory)))
+        return None
+    if action == "overlay_forward" and overlay is not None and overlay.directory:
+        entry = overlay.current
+        if entry is not None and entry[2] == "dir":
+            state.overlay_enter_directory(entry[1])
+        return None
+    if action == "overlay_confirm" and overlay is not None:
+        return _confirm_synth_overlay(state, overlay, sync_engines, wav_io, synth_tool)
+
+    # -- custom layouts ---------------------------------------------------
+    if action == "layout_new":
+        layout = state.new_custom_layout()
+        return f"new custom layout: {layout.name} (shift+l saves it)"
+    if action == "bind_kind":
+        slot = state.cycle_bind_kind()
+        if slot is None:
+            return "play a key first (and shift+n for a custom layout)"
+        return f"{slot.key}: {slot.kind}"
+    if action in ("bind_up", "bind_down"):
+        slot = state.nudge_bind_value(1 if action == "bind_up" else -1)
+        if slot is None:
+            return "play a key first (and shift+n for a custom layout)"
+        return f"{slot.key}: {slot.kind} {slot.value}"
+    if action == "layout_save":
+        path = state.save_layout()
+        return f"saved layout to {path}" if path else "built-in layouts aren't saved (shift+n first)"
+    return None
+
+
+def _confirm_synth_overlay(state, overlay, sync_engines, wav_io, synth_tool):
+    """Enter inside an overlay: load the highlighted patch, save under the
+    typed name, or descend into / import the highlighted sample."""
+    import patch_format
+
+    if overlay.kind == synth_tool.OVERLAY_SAVE:
+        path = state.save_patch_as(overlay.buffer)
+        state.close_overlay()
+        return f"saved {os.path.basename(path)}"
+    entry = overlay.current
+    if entry is None:
+        return None
+    if overlay.kind == synth_tool.OVERLAY_PATCH:
+        try:
+            patch = patch_format.load_patch(entry[1])
+        except (OSError, ValueError) as exc:
+            return f"could not load: {exc}"
+        state.set_patch(patch, entry[1])
+        sync_engines()
+        state.close_overlay()
+        return f"loaded {patch.name} [{patch.engine}]"
+    # OVERLAY_SAMPLE
+    label, path, kind = entry
+    if kind == "dir":
+        state.overlay_enter_directory(path)
+        return None
+    try:
+        name = wav_io.import_sample(path)
+    except wav_io.SampleImportError as exc:
+        return f"import failed: {exc}"
+    if state.kit is None:
+        state.kit = patch_format.new_patch(name="Kit", engine="sampler")
+    slot = state.layout.slot_for(state.last_key) if state.last_key else None
+    pad_index = state.pad_index_for_slot(slot)
+    if pad_index is None:
+        pads = [s for s in state.layout.slots if s.kind == synth_tool.PAD]
+        if not pads:
+            state.close_overlay()
+            return f"imported {name} (this layout has no pads to put it on)"
+        pad_index = pads[0].value
+    synth_tool.assign_sample_to_pad(state.kit, pad_index, name)
+    sync_engines()
+    state.close_overlay()
+    return f"imported {name} -> pad {pad_index + 1}"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-time audio-to-color display")
     parser.add_argument("--fullscreen", action="store_true", help="GUI mode: start fullscreen")

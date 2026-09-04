@@ -168,3 +168,9 @@ def test_text_lines_rows_stay_within_terminal_height():
     lines = _text_lines(rows=rows, text_width=46, selected=0, status="")
     assert max(lines.keys()) <= rows
     assert min(lines.keys()) >= 1
+
+
+def test_synth_entry_describes_itself_as_a_playable_instrument():
+    descriptions = dict(MENU_ITEMS)
+    assert "synth" in descriptions
+    assert "Synth" in descriptions["synth"]
