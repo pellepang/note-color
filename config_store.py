@@ -65,6 +65,13 @@ Schema (all tables optional):
     # differing ~2x depending on whether this app's live detection is
     # running in the same process; see config.POLYPHONY_STANDALONE /
     # config.POLYPHONY_WITH_DETECTION and sound_engine.polyphony_for().
+    soundfont_path = "~/soundfonts/FluidR3_GM.sf2"
+    # Explicit SF2/SF3 soundfont for the SF2 engine (map #99, ticket
+    # #117). Hand-edit only, like menu_perf_mode. Layered over
+    # sf2_playback.discover_soundfonts()'s search of the samples dir, the
+    # XDG data dir, the standard system locations and a Homebrew prefix;
+    # nothing is bundled, so with none installed the engine reports "no
+    # soundfont found" as status. See sf2_playback.resolve_soundfont().
     # The rest of the table stays reserved for future settings this
     # ticket only owns the load/persist mechanics for, not any particular
     # one's UI (e.g. #40's still-unwired global 'H' keybind-legend on/off

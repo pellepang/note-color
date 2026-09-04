@@ -27,6 +27,15 @@ batch = [
     "librosa>=0.10",  # batch_transcribe.py, rhythm_reanalysis.py only -- never imported by the live pipeline (issue #55)
     "music21>=9.1",   # score_writer.py only -- issue #65, MusicXML export (--write-score)
 ]
+# SF2 soundfont playback (map #99, ticket #117, research #102). A separate
+# extra, never folded into a pure-Python one: pyfluidsynth is a pure-Python
+# ctypes wheel (nothing compiles), but it needs the SYSTEM libfluidsynth
+# (Arch `fluidsynth`, Debian `libfluidsynth3`, Homebrew `fluid-synth`) and
+# can fail in a way no pure-Python extra can. sf2_playback.py degrades to
+# "unavailable" when either half is missing. No soundfont is bundled.
+sf2 = [
+    "pyfluidsynth>=1.4.0",  # sf2_playback.py only -- pull-model rendering, never Synth.start()
+]
 
 [project.scripts]
 virtualnote = "virtualnote:main"
@@ -58,6 +67,7 @@ py-modules = [
     "score_writer",
     "session_player",
     "session_recorder",
+    "sf2_playback",
     "settings_display",
     "shell",
     "staff_map",

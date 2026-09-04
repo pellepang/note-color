@@ -398,3 +398,21 @@ POLYPHONY_WITH_DETECTION = 24    # the same cap while this app's live detection 
                                   # p99 of the callback's budget (GIL contention, not CPU headroom -- #100),
                                   # dropping the safe figure by nearly half. Overridable via
                                   # [preferences].polyphony_with_detection.
+
+# --- SF2 soundfont engine (map #99, ticket #117; figures measured by research #102) ---
+SF2_GAIN = 0.2                   # FluidSynth's `synth.gain` -- its own default, and what #102 measured at.
+                                  # sound_engine's callback tanh-soft-clips the mix, so a hot bank can't
+                                  # hard-clip; raise this only if a bank is consistently too quiet.
+SF2_POLYPHONY = 64               # FluidSynth's *internal* `synth.polyphony` cap. Counts FluidSynth VOICES,
+                                  # not notes: a stereo or layered preset spends 2+ per key (#102). This is
+                                  # deliberately NOT the voice manager's POLYPHONY_* note budget above --
+                                  # both apply at once, neither knows about the other (see sf2_playback.py).
+                                  # 64 is the figure #102's 0.951 ms/block headroom was measured at.
+SF2_REVERB = True                # FluidSynth's built-in reverb/chorus, on by default -- #102's headroom
+SF2_CHORUS = True                #   figure was measured with both ON, so leaving them on costs nothing
+                                  #   the budget hasn't already absorbed. Off = a few percent of CPU back.
+SF2_RELEASE_TAIL_SECONDS = 1.0   # how long a released SF2Voice keeps its voice-manager slot: FluidSynth
+                                  # exposes no per-note "finished" signal, so the slot is reclaimed on a
+                                  # timer. Long enough for a typical piano/string release to have decayed
+                                  # while another note is still likely sounding; the shared block is only
+                                  # cut early when this was the LAST live voice (see sf2_playback.py).
