@@ -31,6 +31,17 @@ from main import (SessionState, _positive_float, _parse_time_signature, run_batc
 from shell import run_menu_loop
 
 
+def _import_grid_names():
+    """The `--grid` choices, read from `log_import.py` itself rather than
+    restated here so the CLI and the picker's own grid prompt can never
+    offer different sets. Imported inside the function: `log_import`'s
+    pure half costs nothing, but this keeps `virtualnote`'s import list
+    honest about what it actually needs at module scope."""
+    import log_import
+
+    return list(log_import.GRID_NAMES)
+
+
 def _add_common_flags(parser):
     """Flags every tool (and the bare menu, to set defaults before a tool
     is picked) accepts. Defined once and added to each subparser (plus the
@@ -129,9 +140,23 @@ def build_parser():
     # No _add_common_flags(replay_p) -- same reasoning as transcribe: no
     # live audio, so --color-scheme/--sensitivity/--source don't apply.
 
-    edit_p = sub.add_parser("edit", help="terminal score editor -- load or create a MusicXML file")
-    edit_p.add_argument("file", help="path to a MusicXML file to edit; created as a blank score if it "
-                                      "doesn't exist yet")
+    edit_p = sub.add_parser("edit", help="terminal score editor -- load, create, or import into a score")
+    edit_p.add_argument("file", help="path to a MusicXML file to edit (created as a blank score if it "
+                                      "doesn't exist yet), or a session_log_*.jsonl recording to quantize "
+                                      "and import")
+    # Import options (ticket #122, decision #110). They apply only to a
+    # .jsonl argument; passing them with a MusicXML file is harmless and
+    # simply unused, which is preferable to a second subcommand for what
+    # is, from the user's side, still "open this in the editor".
+    edit_p.add_argument("--grid", choices=_import_grid_names(), default=None,
+                         help="quantization grid for importing a session recording "
+                              f"(default {config.IMPORT_DEFAULT_GRID}); ignored for a MusicXML file")
+    edit_p.add_argument("--tempo", type=_positive_float, default=None,
+                         help="tempo in BPM to quantize an imported recording against (default: the log's own "
+                              "bpm_estimate if it has one, else the recorder's reference tempo)")
+    edit_p.add_argument("--out", default=None,
+                         help="where an imported recording's score will be saved by the editor's own save key "
+                              "(default: a .musicxml sibling of the log). Nothing is written until you save.")
     # No _add_common_flags(edit_p) -- same reasoning as transcribe/replay:
     # no live audio, so --color-scheme/--sensitivity/--source don't apply.
 
@@ -173,6 +198,18 @@ def main(argv=None):
     # there's no menu to fall back to, so the sentinel is just ignored,
     # same as main()'s own standalone dispatch below.
     if args.view == "edit":
+        if args.file.endswith(".jsonl"):
+            # A session recording, not a score: quantize it into one
+            # first (ticket #122). Imported locally, like every other
+            # music21-backed path in this codebase, so `virtualnote edit
+            # song.musicxml` pays nothing for a feature it isn't using.
+            import log_import
+
+            score = log_import.import_log(
+                args.file, tempo_bpm=args.tempo,
+                grid=args.grid or log_import.DEFAULT_GRID)
+            run_score_editor(args.out or log_import.default_score_path(args.file), score=score)
+            return
         run_score_editor(args.file)
         return
 
