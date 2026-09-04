@@ -776,15 +776,27 @@ class _ScriptedKeys:
             raise KeyboardInterrupt
         return self._events.pop(0)
 
+    def release_all(self):
+        """Real RawKeys hands back synthetic releases for anything it
+        believes is still held; this stand-in tracks nothing, so [] is
+        the faithful answer (and is exactly what the real one returns on
+        a terminal without the protocol)."""
+        return []
+
     def restore(self):
         self.restored = True
 
 
 def _press(key):
+    """A press of `key`. A named key ("TAB", "UP") carries no associated
+    text and no codepoint, which is exactly how a real terminal reports
+    one; only an ordinary character key has either."""
     import kitty_keys
 
+    single = len(key) == 1
     return kitty_keys.KeyEvent(key=key, event=kitty_keys.PRESS, mods=0,
-                               text=key, codepoint=ord(key))
+                               text=key if single else "",
+                               codepoint=ord(key) if single else 0)
 
 
 def _repeat(key):
@@ -807,6 +819,16 @@ def _shift(key):
     return kitty_keys.KeyEvent(key=key.lower(), event=kitty_keys.PRESS,
                                mods=kitty_keys.MOD_SHIFT, text=key.upper(),
                                codepoint=ord(key.lower()))
+
+
+def _shift_arrow(name):
+    """Shift held with a *named* key (an arrow), which carries no text of
+    its own -- unlike `_shift()`, whose lower/upper pair only makes sense
+    for a letter."""
+    import kitty_keys
+
+    return kitty_keys.KeyEvent(key=name, event=kitty_keys.PRESS,
+                               mods=kitty_keys.MOD_SHIFT, text="", codepoint=0)
 
 
 def _drive_editor(tmp_path, monkeypatch, events, kitty=True):
@@ -932,3 +954,347 @@ def test_undoing_every_piano_note_returns_to_the_blank_score(tmp_path, monkeypat
     ]
     score = _drive_editor(tmp_path, monkeypatch, events)
     assert _pitches(score) == [[]]
+
+
+# --- run_synth_tool()'s wiring (map #99, ticket #119) ----------------------
+#
+# Same reasoning as the score editor's piano-mode block above: the render
+# loop is smoke-tested manually per this repo's convention, but the
+# *dispatch* through it -- which keystroke becomes a note on which MIDI
+# channel, which becomes a parameter sweep, what a Tab does to the voice
+# budget -- is exactly what an unverified draft gets wrong, and RawKeys is
+# the only thing between the loop and a real TTY. THE MACHINE THESE WERE
+# WRITTEN ON IS MUTED: nothing below asserts anything was heard, only that
+# the right calls were made with the right arguments.
+
+class _ScriptedSynthKeys(_ScriptedKeys):
+    """`_ScriptedKeys` with one difference the synth loop needs: it
+    reports "no input right now" (None) once the script runs out, before
+    interrupting.
+
+    `run_synth_tool()` drains every pending event *then* renders, so a
+    stand-in that interrupted the moment the script emptied would leave
+    the loop without a single render -- and the render call is where
+    these tests read the final state from. A real terminal returns None
+    the instant its input buffer is empty, so this is the faithful
+    behaviour, not a workaround.
+    """
+
+    def __init__(self, events, kitty=True):
+        super().__init__(events)
+        self.kitty = kitty
+        self._idled = False
+
+    def poll_event(self):
+        if self._events:
+            return self._events.pop(0)
+        if not self._idled:
+            self._idled = True
+            return None
+        raise KeyboardInterrupt
+
+
+class _FakeVoices:
+    def active_count(self):
+        return 0
+
+
+class _FakeSound:
+    """A `sound_engine.SoundEngine` stand-in that records note-ons instead
+    of opening an output device."""
+
+    def __init__(self):
+        self.engine = None
+        self.voices = _FakeVoices()
+        self.note_ons = []          # (pitch, velocity, channel)
+        self.released = []
+        self.panics = 0
+        self.polyphony_override = "unset"
+        self._next_id = 0
+
+    def note_on(self, event, velocity=1.0, channel=0, patch=None):
+        self.note_ons.append((event.pitch, event.velocity, event.channel))
+        self._next_id += 1
+        return self._next_id
+
+    def release_voice(self, voice_id):
+        self.released.append(voice_id)
+
+    def all_notes_off(self):
+        self.panics += 1
+
+    def set_polyphony_override(self, value):
+        self.polyphony_override = value
+
+
+class _FakeSession:
+    def __init__(self, sound):
+        self._sound = sound
+
+    def ensure_sound_engine(self):
+        return self._sound
+
+
+def _drive_synth(monkeypatch, events, kitty=True):
+    """Runs run_synth_tool() with a scripted key stream against a fake
+    sound engine. No TTY, no audio device, no real sleeping."""
+    import synth_display
+
+    sound = _FakeSound()
+    rendered = {}
+
+    def spy_render(state, colors, status, help_legend=""):
+        rendered["state"] = state
+        rendered["status"] = status
+        rendered["colors"] = colors
+        rendered["legend"] = help_legend
+
+    monkeypatch.setattr(synth_display, "render", spy_render)
+    monkeypatch.setattr(main, "RawKeys", lambda *a, **k: _ScriptedSynthKeys(events, kitty=kitty))
+    monkeypatch.setattr(main.time, "sleep", lambda dt: None)
+    result = main.run_synth_tool(session=_FakeSession(sound))
+    return sound, rendered, result
+
+
+def _synth_pitches(sound):
+    return [pitch for pitch, _vel, _chan in sound.note_ons]
+
+
+def test_synth_letters_play_notes_from_the_shared_tracker_keyboard(monkeypatch):
+    import score_audition
+    import sound_engine
+
+    sound, _rendered, _r = _drive_synth(monkeypatch, [
+        _press("z"), _press("x"), _press("c"),
+    ])
+    expected = [sound_engine.midi_pitch(*score_audition.pitch_for_key(k, config.SYNTH_BASE_OCTAVE))
+                for k in "zxc"]
+    assert _synth_pitches(sound) == expected
+
+
+def test_synth_plays_at_full_velocity_on_the_note_channel(monkeypatch):
+    # #107 decision 3: QWERTY has no dynamics to report, and faking them
+    # would be a lie the sampler's own velocity layers then act on.
+    import synth_layout
+
+    sound, _r, _res = _drive_synth(monkeypatch, [_press("z")])
+    assert sound.note_ons == [(sound.note_ons[0][0], 1.0, synth_layout.NOTE_CHANNEL)]
+
+
+def test_synth_releases_the_note_when_the_key_comes_up(monkeypatch):
+    sound, _r, _res = _drive_synth(monkeypatch, [_press("z"), _release("z")])
+    assert len(sound.note_ons) == 1 and sound.released == [1]
+
+
+def test_synth_swallows_auto_repeat_so_a_held_key_sustains(monkeypatch):
+    # A held key machine-gunning is the failure the kitty protocol exists
+    # to fix here.
+    sound, _r, _res = _drive_synth(monkeypatch, [
+        _press("z"), _repeat("z"), _repeat("z"), _release("z"),
+    ])
+    assert len(sound.note_ons) == 1
+
+
+def test_synth_pads_play_on_the_drum_channel(monkeypatch):
+    import synth_layout
+
+    # Tab twice from the two-octave layout reaches the 4x4 pad square.
+    sound, _r, _res = _drive_synth(monkeypatch, [
+        _press("TAB"), _press("TAB"), _press("z"),
+    ])
+    pitch, velocity, channel = sound.note_ons[0]
+    assert channel == synth_layout.PAD_CHANNEL
+    assert pitch == synth_layout.pad_midi_key(0)
+    assert velocity == 1.0
+
+
+def test_synth_tab_reaches_every_layout_in_turn(monkeypatch):
+    names = []
+    for taps in range(4):
+        _s, rendered, _res = _drive_synth(monkeypatch, [_press("TAB")] * taps)
+        names.append(rendered["state"].layout.name)
+    assert names == ["two-octave", "octave-pads", "pads", "two-octave"]
+
+
+def test_synth_arrows_sweep_the_selected_parameter(monkeypatch):
+    _s, rendered, _res = _drive_synth(monkeypatch, [
+        _press("DOWN"), _press("RIGHT"), _press("RIGHT"),
+    ])
+    state = rendered["state"]
+    # Row 1 of a synth patch's panel is osc1.octave; two Rights from 0.
+    assert state.patch.osc1.octave == 2
+    assert state.patch_dirty
+
+
+def test_synth_shift_arrows_make_a_coarse_sweep(monkeypatch):
+    _s, fine, _res = _drive_synth(monkeypatch, [_press("DOWN"), _press("RIGHT")])
+    _s2, coarse, _res2 = _drive_synth(monkeypatch, [
+        _press("DOWN"), _shift_arrow("RIGHT"),
+    ])
+    assert coarse["state"].patch.osc1.octave > fine["state"].patch.osc1.octave
+
+
+def test_synth_shift_up_down_transposes_the_whole_keyboard(monkeypatch):
+    # The bug the first draft of this loop shipped with: Shift+Up/Down
+    # resolved to param_prev/param_next, so shift_octave() was
+    # unreachable and `oct=` could never change.
+    sound, rendered, _res = _drive_synth(monkeypatch, [
+        _press("z"), _shift_arrow("UP"), _press("z"),
+    ])
+    assert rendered["state"].octave_shift == 1
+    before, after = _synth_pitches(sound)
+    assert after == before + 12
+
+
+def test_synth_octave_shift_shows_in_the_status_line(monkeypatch):
+    _s, rendered, _res = _drive_synth(monkeypatch, [_shift_arrow("DOWN")])
+    assert "oct=-1" in rendered["status"]
+
+
+def test_synth_status_line_always_says_how_long_notes_last(monkeypatch):
+    # #107 point 7: on a terminal reporting no key releases every note is
+    # a fixed length, and saying so plainly is what keeps "why won't
+    # notes sustain?" from becoming a bug report.
+    _s, held, _res = _drive_synth(monkeypatch, [_press("z")], kitty=True)
+    assert "keys=held" in held["status"]
+
+    _s2, fixed, _res2 = _drive_synth(monkeypatch, [_press("z")], kitty=False)
+    assert "keys=fixed" in fixed["status"] and "no key release" in fixed["status"]
+
+
+def test_synth_without_key_releases_notes_are_fixed_length(monkeypatch):
+    # The degraded path still plays -- refusing to open outside kitty was
+    # rejected, because a drum pad works fine with one-shots.
+    sound, _r, _res = _drive_synth(monkeypatch, [_press("z"), _press("x")], kitty=False)
+    assert len(sound.note_ons) == 2
+
+
+def test_synth_a_dual_layout_switches_the_voice_budget(monkeypatch):
+    import synth_tool
+
+    # The override is a callable so the budget follows Tab presses live.
+    _s, rendered, _res = _drive_synth(monkeypatch, [_press("TAB")])
+    state = rendered["state"]
+    assert state.layout.is_dual
+    assert synth_tool.polyphony_for_layout(state.layout) == config.POLYPHONY_SYNTH_DUAL
+
+
+def test_synth_restores_the_engine_and_budget_on_the_way_out(monkeypatch):
+    # The SoundEngine is process-wide (#105): leaving the synth must hand
+    # it back exactly as it was found, or every later view plays through
+    # the synth's router.
+    sound, _r, _res = _drive_synth(monkeypatch, [_press("z")])
+    assert sound.engine is None
+    assert sound.polyphony_override is None
+    assert sound.panics >= 1        # ...and nothing is left sounding
+
+
+def test_synth_pipe_returns_to_the_menu_with_nothing_left_sounding(monkeypatch):
+    sound, _r, result = _drive_synth(monkeypatch, [_press("z"), _press("|")])
+    assert result == "menu"
+    assert sound.engine is None and sound.panics >= 1
+
+
+def test_synth_ctrl_c_quits_the_app(monkeypatch):
+    _s, _r, result = _drive_synth(monkeypatch, [])
+    assert result == "quit"
+
+
+def test_synth_panic_stops_every_sounding_note(monkeypatch):
+    sound, _r, _res = _drive_synth(monkeypatch, [
+        _press("z"), _press("x"), _shift("m"),
+    ])
+    assert len(sound.released) == 2      # both notes let go
+    assert sound.panics >= 2             # the panic itself, plus the exit
+
+
+def test_synth_switching_layouts_never_leaves_a_note_stuck(monkeypatch):
+    # A key held across a layout change would otherwise be released
+    # against a slot that no longer exists.
+    sound, _r, _res = _drive_synth(monkeypatch, [_press("z"), _press("TAB")])
+    assert sound.released == [1]
+
+
+def test_synth_transposing_never_leaves_a_note_stuck(monkeypatch):
+    sound, _r, _res = _drive_synth(monkeypatch, [_press("z"), _shift_arrow("UP")])
+    assert sound.released == [1]
+
+
+def test_synth_overlays_open_over_the_panel_and_keep_the_keys_playing(monkeypatch):
+    # #107 point 6: an inline overlay, never a separate screen -- the
+    # instrument stays on screen and playable underneath.
+    import synth_tool
+
+    sound, rendered, _res = _drive_synth(monkeypatch, [_shift("p"), _press("z")])
+    assert rendered["state"].overlay.kind == synth_tool.OVERLAY_PATCH
+    assert len(sound.note_ons) == 1
+
+
+def test_synth_typing_in_the_save_overlay_both_types_and_sounds(monkeypatch):
+    # Not an oversight: the always-plays invariant holding even where a
+    # text field would normally claim the keyboard.
+    sound, rendered, _res = _drive_synth(monkeypatch, [
+        _shift("w"), _press("z"), _press("x"),
+    ])
+    assert rendered["state"].overlay.buffer.endswith("zx")
+    assert len(sound.note_ons) == 2
+
+
+def test_synth_esc_closes_an_overlay_without_saving(monkeypatch):
+    _s, rendered, _res = _drive_synth(monkeypatch, [_shift("w"), _press("ESC")])
+    assert rendered["state"].overlay is None
+
+
+def test_synth_help_legend_toggles(monkeypatch):
+    _s, on, _res = _drive_synth(monkeypatch, [_press("z")])
+    assert on["legend"]
+    _s2, off, _res2 = _drive_synth(monkeypatch, [_shift("h")])
+    assert off["legend"] == ""
+
+
+def test_synth_legend_advertises_only_reachable_actions(monkeypatch):
+    # A legend promising a keybind the dispatcher does not implement is
+    # how the octave-shift bug above stayed invisible.
+    import kitty_keys
+    import synth_tool
+
+    _s, rendered, _res = _drive_synth(monkeypatch, [_press("z")])
+    legend = rendered["legend"]
+    for key, action in synth_tool.SHIFT_ACTIONS.items():
+        if f"shift+{key.lower()}=" in legend:
+            assert synth_tool.resolve_action(_shift(key)) == action
+    assert "shift+up/down=octave" in legend
+    assert synth_tool.resolve_action(
+        kitty_keys.KeyEvent("UP", kitty_keys.PRESS, kitty_keys.MOD_SHIFT, "", 0)) == "octave_up"
+
+
+def test_synth_binding_keys_needs_a_custom_layout_first(monkeypatch):
+    # Built-ins are never edited in place -- Shift+N is one press away.
+    _s, builtin, _res = _drive_synth(monkeypatch, [_press("z"), _shift("b")])
+    assert builtin["state"].layout.builtin
+    assert builtin["state"].layout.slot_for("z").kind == "note"
+
+    _s2, custom, _res2 = _drive_synth(monkeypatch, [_shift("n"), _press("z"), _shift("b")])
+    assert not custom["state"].layout.builtin
+    assert custom["state"].layout.slot_for("z").kind == "pad"
+
+
+def test_synth_auto_repeat_types_one_character_in_the_save_overlay(monkeypatch):
+    # A held key sustains one note, so it must likewise type one
+    # character rather than a run of them.
+    _s, rendered, _res = _drive_synth(monkeypatch, [
+        _shift("w"), _press("z"), _repeat("z"), _repeat("z"),
+    ])
+    assert rendered["state"].overlay.buffer.endswith("z")
+    assert not rendered["state"].overlay.buffer.endswith("zz")
+
+
+def test_synth_an_unbound_key_can_still_be_bound_back(monkeypatch):
+    # "Point at a key" means "play it", so an unbound key that never
+    # became the bind target could never be bound to anything again.
+    _s, rendered, _res = _drive_synth(monkeypatch, [
+        _shift("n"),                       # custom layout
+        _press("z"), _shift("b"), _shift("b"),   # note -> pad -> unbound
+        _press("z"), _shift("b"),          # ...and back round to note
+    ])
+    assert rendered["state"].layout.slot_for("z").kind == "note"
