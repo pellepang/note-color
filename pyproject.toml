@@ -114,6 +114,8 @@ py-modules = [
     # would have left `pip install .` short of two modules `main` imports.
     "score_audition",
     "tab_playback",
+    # Ticket #122, quantized session-log import into the score editor.
+    "log_import",
     # Ticket #119, the synth tool.
     "synth_display",
     "synth_layout",
