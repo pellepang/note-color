@@ -121,6 +121,14 @@ ESCAPE_SEQUENCE_TIMEOUT = 0.05  # seconds RawKeys.poll() waits for an arrow key'
                                 # vim's common ttimeoutlen fix for the same class of problem; only
                                 # caps the *worst case* wait -- a genuine arrow burst resolves as soon
                                 # as its bytes are ready, almost always well under this
+KITTY_NEGOTIATION_TIMEOUT = 0.25  # seconds RawKeys waits for a terminal to answer the kitty
+                                  # keyboard-protocol probe (map #99, ticket #118) before assuming no
+                                  # support. Generous next to a local pty round trip (sub-millisecond)
+                                  # but still a blink to a human, and paid once per view that opts in
+                                  # -- never process-wide. A terminal that answers *anything* settles
+                                  # the question long before this expires, via the DA1 sentinel in
+                                  # kitty_keys.PROBE_SEQUENCE; this only bounds a pty with nothing on
+                                  # the far end at all
 
 # --- Tab / staff view ---
 DEFAULT_SCROLL_MODE = "onset"  # or "fix"
