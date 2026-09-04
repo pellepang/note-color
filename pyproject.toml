@@ -52,7 +52,7 @@ synth = [
     "scipy>=1.10",    # synth_engine.py only -- the SVF filter and pink-noise filter (ticket #113)
 ]
 all = [
-    "note-color[batch,synth]",
+    "note-color[batch,synth,sf2]",
 ]
 
 [project.scripts]
@@ -95,4 +95,19 @@ py-modules = [
     "terminal_tab_display",
     "terminal_wheel_display",
     "virtualnote",
+    "abc_export",
+    "chord_builder_display",
+    "effects",
+    "kitty_keys",
+    "patch_format",
+    "playback",
+    "sampler",
+    "score_editor_display",
+    "score_editor_picker",
+    "score_editor_state",
+    "score_properties_display",
+    "sound_engine",
+    "stats_display",
+    "tone_engine",
+    "wav_io",
 ]
