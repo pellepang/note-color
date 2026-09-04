@@ -398,3 +398,31 @@ POLYPHONY_WITH_DETECTION = 24    # the same cap while this app's live detection 
                                   # p99 of the callback's budget (GIL contention, not CPU headroom -- #100),
                                   # dropping the safe figure by nearly half. Overridable via
                                   # [preferences].polyphony_with_detection.
+
+# --- Subtractive synth (map #99, research #103, decision #111, build ticket #113: synth_engine.py) ---
+SYNTH_CONTROL_SUB_BLOCK = 64     # samples per control sub-block: the filter's coefficients (filter envelope,
+                                  # LFO, key tracking, velocity) are recomputed once per sub-block and held
+                                  # fixed across it, since scipy.signal.lfilter's contract is constant
+                                  # coefficients per call. #103's measured price knee: 1.24ms/block at 16
+                                  # voices (10.7% of the 11.61ms budget) vs 2.32ms at 32 samples; matches
+                                  # FluidSynth's own FLUID_BUFSIZE = 64. Amp envelope is audio-rate regardless.
+SYNTH_TABLE_SIZE = 4096          # samples per wavetable band. Read cost is a gather, independent of size;
+                                  # size only bounds how many partials a band can hold before linear
+                                  # interpolation error dominates (capped at SYNTH_TABLE_SIZE // 4 partials,
+                                  # i.e. >= 4 table samples per cycle of the highest partial), so 4096 keeps
+                                  # even the lowest MIDI octave's band full out to ~16.7kHz.
+SYNTH_MIP_BANDS = 12             # one band-limited table per octave from MIDI note 0 (8.18Hz) up; 12 bands
+                                  # reach 33.5kHz, past MIDI 127 (12.5kHz) with room for a pitch LFO on top.
+SYNTH_CUTOFF_MIN_HZ = 20.0       # filter cutoff floor after modulation (the patch field's own minimum)
+SYNTH_DAMPING_MAX = 1.4142       # SVF damping k = 1/Q at resonance 0: sqrt(2), i.e. Butterworth -- the
+                                  # flattest passband, no peak, which is what "no resonance" should mean.
+SYNTH_DAMPING_MIN = 0.1          # k at resonance 1.0: Q = 10, a +20dB peak at cutoff. Self-oscillation
+                                  # (k -> 0) is deliberately unreachable: a linear SVF at k = 0 is a
+                                  # marginally-stable oscillator with unbounded output, not a musical one.
+SYNTH_FILTER_ENV_OCTAVES = 6.0   # cutoff swing (octaves) at filter.env_amount = +/-1.0 and envelope 1.0
+SYNTH_LFO_FILTER_OCTAVES = 3.0   # cutoff swing (octaves) at lfo.depth 1.0 with destination "filter"
+SYNTH_LFO_PITCH_SEMITONES = 2.0  # vibrato swing (semitones, +/-) at lfo.depth 1.0 with destination "pitch"
+SYNTH_VELOCITY_FILTER_OCTAVES = 4.0  # how far below the patch cutoff velocity 0 lands at velocity_to_filter 1.0
+SYNTH_PINK_GAIN = 11.5           # make-up gain after the 1/f pinking filter so pink and white noise sit at
+                                  # the same RMS (measured 0.087x on uniform white noise, see synth_engine.py)
+                                  # -- the `colour` knob changes spectrum, not loudness.
