@@ -53,3 +53,38 @@ def test_resolve_new_score_path_keeps_an_existing_musicxml_or_xml_extension():
 
 def test_resolve_new_score_path_falls_back_to_default_name_when_blank():
     assert pk.resolve_new_score_path("/dir", "   ") == os.path.join("/dir", pk.DEFAULT_NEW_SCORE_NAME)
+
+
+# --- session-log rows (map #99, ticket #122) ------------------------------
+
+def test_log_rows_sit_between_the_scores_and_the_new_score_row():
+    entries = pk.build_menu_entries(["/a/one.musicxml"], ["/a/session_log_x.jsonl"])
+    assert entries == ["one.musicxml",
+                        "session_log_x.jsonl" + pk.LOG_LABEL_SUFFIX,
+                        "New score..."]
+
+
+def test_entry_kind_names_each_row():
+    paths, logs = ["/a/one.musicxml"], ["/a/session_log_x.jsonl"]
+    assert pk.entry_kind(0, paths, logs) == "score"
+    assert pk.entry_kind(1, paths, logs) == "log"
+    assert pk.entry_kind(2, paths, logs) == "new"
+
+
+def test_is_new_score_row_still_works_with_logs_present():
+    paths, logs = ["/a/one.musicxml"], ["/a/session_log_x.jsonl"]
+    assert pk.is_new_score_row(1, paths, logs) is False
+    assert pk.is_new_score_row(2, paths, logs) is True
+
+
+def test_log_file_paths_finds_only_session_logs(tmp_path):
+    (tmp_path / "session_log_20260101_000000.jsonl").write_text("")
+    (tmp_path / "notes.jsonl").write_text("")
+    (tmp_path / "one.musicxml").write_text("")
+    assert pk.log_file_paths(str(tmp_path)) == [str(tmp_path / "session_log_20260101_000000.jsonl")]
+
+
+def test_selection_carries_no_score_for_an_ordinary_file():
+    # The editor's `score=` parameter is None for everything but an
+    # imported recording, which is its pre-#122 behaviour unchanged.
+    assert pk.Selection("/a/one.musicxml", None).score is None

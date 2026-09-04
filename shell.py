@@ -114,19 +114,23 @@ def run_menu_loop(session, fps=None, perf_mode_override=None):
             # stream, exactly as menu -> synth tool -> editor must be able
             # to do without dropping the audio device. score_editor_picker.
             # run_score_editor_picker() shows the file picker first (an
-            # existing score, or "New score..."); a cancelled picker (no
+            # existing score, a session recording to quantize and import
+            # (ticket #122), or "New score..."); a cancelled picker (no
             # path chosen) just loops back to the menu, same as backing out
-            # of any other menu entry.
+            # of any other menu entry. It hands back a `Selection`, whose
+            # `score` is an already-built EditorScore only for an imported
+            # recording and None in every other case -- exactly the
+            # editor's own `score=` parameter.
             from score_editor_picker import run_score_editor_picker
 
             try:
-                path = run_score_editor_picker()
+                picked = run_score_editor_picker()
             except KeyboardInterrupt:
                 return
-            if path is None:
+            if picked is None:
                 continue
             try:
-                result = run_score_editor(path, session=session)
+                result = run_score_editor(picked.path, session=session, score=picked.score)
             except KeyboardInterrupt:
                 return
             if result == "quit":

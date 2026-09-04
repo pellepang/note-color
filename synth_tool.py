@@ -18,6 +18,16 @@ silently break the always-plays invariant, and `settings_display`'s
 existing reserved-key check has no way to express "any letter, ever". Same
 tier as the score editor's own hardcoded Shift+Arrow transpose.
 
+That rule covers `Shift`+S, the recording arm (ticket #122, decision
+#110), even though the live views' own `session_record_toggle` *is*
+remappable and #110 said this one would be too. The two are not the same
+key in the same place: in `fill`/`wheel`/`tab` a letter is a command by
+default and remapping one is safe, while here every letter is a note and
+the reserved-key check cannot express that. Following #110's word to the
+letter would put the invariant this whole tool is built on at the mercy of
+one line of TOML; following #119's rule keeps `rec=`'s *meaning* identical
+across all four views, which is what #110 was actually asking for.
+
 **2. A kit and a synth patch sound simultaneously in layout 2**, which is
 a *routing* question rather than a second code path: `ChannelRouter`
 dispatches a `NoteOn` by its channel, pads playing on MIDI channel 9 (the
@@ -78,6 +88,7 @@ SHIFT_ACTIONS = {
     "N": "layout_new",       # start a custom layout by copying the active one
     "M": "panic",            # all notes off -- the stuck-note escape
     "H": "help_toggle",      # the help legend ('h' itself plays a note here)
+    "S": "record_toggle",    # arm/disarm session recording (ticket #122, decision #110)
 }
 
 #: Bare punctuation that no layout binds, so it can carry an action
