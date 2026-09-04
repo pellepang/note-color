@@ -274,3 +274,49 @@ def test_chord_name_for_column_recognizes_a_major_triad():
     name = sed.chord_name_for_column(column)
     assert name is not None
     assert "C" in name
+
+
+# --- place_note_at_pitch / append_column (map #99, ticket #120) -----------
+
+def test_place_note_at_pitch_adds_the_exact_pitch_and_returns_its_row():
+    column = _col()
+    row = sed.place_note_at_pitch(column, 6, 4)   # F#4 -- no key signature involved
+    assert [(n.pitch_class, n.octave) for n in column.notes] == [(6, 4)]
+    assert row == staff_row(6, 4)
+
+
+def test_place_note_at_pitch_keeps_a_column_in_ascending_pitch_order():
+    column = _col((7, 4))
+    sed.place_note_at_pitch(column, 0, 4)
+    sed.place_note_at_pitch(column, 4, 4)
+    assert [(n.pitch_class, n.octave) for n in column.notes] == [(0, 4), (4, 4), (7, 4)]
+
+
+def test_place_note_at_pitch_is_idempotent_and_never_removes():
+    # Pressing the same piano key twice inside one chord group must leave
+    # one note, not stack duplicates -- and must never delete, unlike
+    # toggle_note_at_cursor(): a played key silently erasing a note would
+    # be a trap.
+    column = _col((0, 4))
+    sed.place_note_at_pitch(column, 0, 4)
+    sed.place_note_at_pitch(column, 0, 4)
+    assert [(n.pitch_class, n.octave) for n in column.notes] == [(0, 4)]
+
+
+def test_append_column_adds_an_empty_column_inheriting_a_duration():
+    from score_editor_state import new_blank_score
+
+    score = new_blank_score()
+    index = sed.append_column(score, "eighth")
+    assert index == len(score.columns) - 1
+    assert score.columns[index].notes == []
+    assert score.columns[index].duration_class == "eighth"
+
+
+def test_append_column_falls_back_to_the_default_duration():
+    from duration_tracker import DEFAULT_DURATION_CLASS
+    from score_editor_state import new_blank_score
+
+    score = new_blank_score()
+    index = sed.append_column(score)
+    assert score.columns[index].duration_class == DEFAULT_DURATION_CLASS

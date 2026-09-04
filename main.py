@@ -50,6 +50,7 @@ import config
 import kitty_keys
 import multipitch
 import rhythm_reanalysis
+import score_audition
 from config_store import store
 from audio_capture import AudioCapture, resolve_loopback_device
 from detection_backends import default_pitch_backend, default_poly_backend
@@ -881,6 +882,14 @@ _EDITOR_ACTIONS = [
     "note_toggle", "duration_shorten", "duration_lengthen",
     "clear_to_rest", "insert_column", "delete_column", "undo", "redo", "zoom_cycle",
     "chords_only_toggle", "save", "score_properties",
+    # Audition/piano mode/playback (map #99, ticket #120, decision #108).
+    # mark_range_start/mark_range_end are the tab view's own existing
+    # bindings ('['/']'), reused verbatim rather than duplicated: #108
+    # settled that the editor's loop region is the same "mark a range at
+    # the point you're looking at" gesture applied to columns instead of
+    # history timestamps, so it must be the same gesture.
+    "piano_mode", "play_from_cursor", "metronome_toggle", "audition_toggle",
+    "mark_range_start", "mark_range_end",
 ]
 # transpose_up/transpose_down (issue #98 follow-up) are deliberately *not*
 # in _EDITOR_ACTIONS/config.DEFAULT_KEYBINDS -- they were remappable
@@ -897,7 +906,14 @@ _EDITOR_ACTIONS = [
 # matched case-sensitively below, unlike every other remappable action in
 # this codebase (matched case-insensitively, e.g. 'M' also toggles source
 # the same as 'm'). See docs/DECISIONS.md.
-_EDITOR_CASE_SENSITIVE_ACTIONS = ("undo", "redo")
+# piano_mode/play_from_cursor/metronome_toggle/audition_toggle (ticket
+# #120) join undo/redo in exact-case matching for a related reason: they
+# default to Shift+letter, and their unshifted letters are live notes on
+# piano mode's two-octave keyboard ('m' is B, 'p' is unused, 'l'/'a' are
+# not on it) -- a case-insensitive 'M' would be indistinguishable from
+# playing B. See docs/DECISIONS.md.
+_EDITOR_CASE_SENSITIVE_ACTIONS = ("undo", "redo", "piano_mode", "play_from_cursor",
+                                  "metronome_toggle", "audition_toggle")
 
 
 def _match_editor_action(key, action, keybind_store):
@@ -2391,19 +2407,134 @@ def _handle_property_key(key, score, slot, buffer):
     return slot, buffer, True
 
 
-def run_score_editor(path):
+def _editor_sound_engine(session):
+    """The `sound_engine.SoundEngine` the score editor auditions and plays
+    through, and whether this call owns it (and must therefore stop it on
+    the way out). Returns `(engine, owned)`, with `engine` None when no
+    sound is available at all.
+
+    A `session` (the live menu's long-lived `SessionState`) already holds
+    the one process-wide engine #105 settled on, so the editor borrows it
+    and never stops it -- switching menu -> editor -> synth must not drop
+    the audio device. `virtualnote edit <path>` constructs no
+    `SessionState` at all (the editor never touches the mic), so there it
+    builds its own, exactly as `run_replay_session()` does.
+
+    Every failure degrades to a silent-but-fully-usable editor rather
+    than refusing to open: `synth_engine.SynthUnavailable` when the
+    `[synth]` extra (SciPy, #111) isn't installed, and any
+    `sounddevice`/PortAudio error on a machine with no output device.
+    That posture is the opposite of the standalone synth tool's, which
+    *does* refuse to open without SciPy -- and deliberately so: a synth
+    that makes no sound is not a synth, while a score editor that makes
+    no sound is still a score editor."""
+    try:
+        if session is not None:
+            return session.ensure_sound_engine(), False
+        import sound_engine
+
+        engine = sound_engine.SoundEngine(detection_active=False)
+        engine.ensure_started()
+        return engine, True
+    except Exception:
+        # Deliberately broad: the point is that *nothing* about audio
+        # availability can stop the editor opening, and the failure modes
+        # span an ImportError (no SciPy), a custom SynthUnavailable, and
+        # PortAudio's own error type, which importing to catch precisely
+        # would itself be a dependency this branch cannot assume.
+        return None, False
+
+
+class _EditorPlayback:
+    """Render-thread-local state for the score editor's play-from-cursor
+    (map #99, ticket #120): which columns are scheduled, where the
+    playhead is, and which metronome clicks are still owed.
+
+    Purely local to `run_score_editor()`'s loop, like `tab`'s freeze/
+    scroll_offset state -- there is no playback thread. Every frame the
+    loop calls `advance()`, which converts wall-clock elapsed time into
+    the score's own beat position and fires whatever fell due since the
+    last frame. All the arithmetic lives in `score_audition.py` and is
+    unit-tested there; this class only holds the state between frames and
+    talks to the engine.
+
+    Playback is strictly non-dirtying: nothing here mutates the score."""
+
+    def __init__(self):
+        self.active = False
+        self.entries = []
+        self.clicks = []
+        self.tempo_bpm = 90.0
+        self.start_time = 0.0
+        self.prev_beats = None
+        self.playhead = None
+
+    def start(self, score, entries, now):
+        if not entries:
+            return False
+        origin = entries[0].start_beat
+        end = entries[-1].start_beat + entries[-1].beats
+        self.entries = entries
+        self.clicks = score_audition.metronome_clicks(origin, end, score.time_signature)
+        self.tempo_bpm = score.tempo_bpm
+        self.start_time = now
+        self.prev_beats = None
+        self.playhead = entries[0].index
+        self.active = True
+        return True
+
+    def stop(self, engine):
+        self.active = False
+        self.playhead = None
+        self.entries = []
+        self.clicks = []
+        if engine is not None:
+            engine.all_notes_off()
+
+    def advance(self, score, engine, metronome_on, now):
+        """One frame of playback. Returns the column index the playhead is
+        on, or None once playback has finished (and stops itself)."""
+        elapsed = self.start_time_to_beats(now)
+        previous = float("-inf") if self.prev_beats is None else self.prev_beats
+        for entry in score_audition.due_entries(self.entries, previous, elapsed):
+            column = score.columns[entry.index]
+            score_audition.sound_notes(
+                engine,
+                [(note.pitch_class, note.octave) for note in column.notes],
+                score_audition.beats_to_seconds(entry.beats, self.tempo_bpm),
+            )
+        if metronome_on:
+            for _beat, is_downbeat in score_audition.due_clicks(self.clicks, previous, elapsed):
+                score_audition.sound_metronome_click(engine, is_downbeat)
+        self.prev_beats = elapsed
+        self.playhead = score_audition.playhead_index(self.entries, elapsed)
+        if self.playhead is None:
+            self.stop(engine)
+        return self.playhead
+
+    def start_time_to_beats(self, now):
+        base = self.entries[0].start_beat if self.entries else 0.0
+        return base + score_audition.seconds_to_beats(now - self.start_time, self.tempo_bpm)
+
+
+def run_score_editor(path, session=None):
     """`virtualnote edit <path>` (issue #98): loads `path` via
     score_editor_state.load_score() if it already exists, otherwise
     starts a brand-new blank score (new_blank_score()) to be saved to
     `path` later. Drives its own interactive loop (own RawKeys instance,
     mirroring every other run_terminal_* function) over
     score_editor_display.py's pure mutation/render layer, with
-    EditHistory backing undo/redo -- never touches SessionState/audio, so
-    virtualnote.py's 'edit' subcommand handles and returns before
-    SessionState is even constructed, same shape as transcribe/replay.
-    Returns the "quit"/"menu" sentinel convention every other
-    run_terminal_* function does, so shell.py's menu loop can dispatch it
-    exactly like a real session tool despite that.
+    EditHistory backing undo/redo -- never touches SessionState's *audio
+    input*, so virtualnote.py's 'edit' subcommand handles and returns
+    before SessionState is even constructed, same shape as
+    transcribe/replay. Returns the "quit"/"menu" sentinel convention
+    every other run_terminal_* function does, so shell.py's menu loop can
+    dispatch it exactly like a real session tool despite that.
+
+    `session` is optional and used only to borrow the one process-wide
+    `sound_engine.SoundEngine` (#105) for audition/playback when the
+    editor was reached from the live menu; `virtualnote edit` passes
+    None and gets its own -- see `_editor_sound_engine()`.
 
     Quitting (| or Ctrl+C) while there are unsaved changes (saved=no in
     the status line) needs a second confirming press of the same key --
@@ -2416,7 +2547,23 @@ def run_score_editor(path):
     whether the score has returned to exactly its last-saved content --
     dirty stays True after either, a conservative "warn even if you
     undid your way back to the saved state" simplification (see
-    docs/DECISIONS.md)."""
+    docs/DECISIONS.md).
+
+    **Audition, piano mode, playback (map #99, ticket #120, decision
+    #108).** `piano_mode` (Shift+P) switches the letter keys from editor
+    commands to a two-octave keyboard; the status line always names the
+    active mode. Keys pressed together land in one column, keys pressed
+    in sequence fill successive columns -- a distinction only the kitty
+    protocol's key releases (#118) can report, so this loop's RawKeys is
+    the one in this app constructed with `want_kitty=True`, and degrades
+    to #108's explicit place-without-advancing path on any other
+    terminal. Placing a note always auditions it; moving the cursor
+    auditions too, toggleably (`audition_toggle`, default on).
+    `play_from_cursor` plays to the end of the score or of a marked
+    `[`/`]` loop region, with the view following the playhead and any key
+    stopping it; `metronome_toggle` adds a click on the score's own
+    tempo/time signature. Entering piano mode and playing back are both
+    strictly non-dirtying -- only actually writing a note is an edit."""
     import score_editor_display as sed
     import score_properties_display as spd
     from score_editor_state import EditHistory, load_score, new_blank_score, save_score
@@ -2437,25 +2584,91 @@ def run_score_editor(path):
     properties_editing = False
     properties_slot = 0
     properties_buffer = ""
+    mode = score_audition.EDIT_MODE
+    base_octave = config.EDITOR_PIANO_BASE_OCTAVE
+    audition_on = True
+    metronome_on = False
+    mark_start = mark_end = None
+    playback = _EditorPlayback()
     dt = 1.0 / config.TERMINAL_FPS
-    keys = RawKeys()
+    # want_kitty=True is what makes press-together-means-chord possible at
+    # all (#118/#101). Per-view, not process-wide: `|` back to the menu
+    # pops the mode again, so no other screen pays the negotiation.
+    keys = RawKeys(want_kitty=True)
+    entry = score_audition.PianoEntry(advance_between_groups=keys.kitty)
+    engine, owns_engine = _editor_sound_engine(session)
 
     def _record():
         history.record(score)
 
+    def _audition(notes, duration_class=None):
+        if engine is None or not notes:
+            return
+        seconds = score_audition.duration_seconds(
+            duration_class or score.columns[cursor_col].duration_class, score.tempo_bpm)
+        score_audition.sound_notes(engine, notes, seconds)
+
     try:
         while True:
             try:
-                key = keys.poll()
+                event = keys.poll_event()
+                key = kitty_keys.legacy_token(event) if event is not None else None
                 quit_requested, quit_result = (key == "|"), "menu"
             except KeyboardInterrupt:
-                key, quit_requested, quit_result = None, True, "quit"
+                event, key, quit_requested, quit_result = None, None, True, "quit"
+
+            # Only a genuine PRESS enters a note. A kitty REPEAT (the
+            # terminal's own auto-repeat, which this view asks for via
+            # FLAG_EVENT_TYPES) must not: the key is still down, so it is
+            # still part of the same chord group, and re-firing would
+            # machine-gun the audition and re-record an undo snapshot
+            # dozens of times a second for a key the user simply held.
+            # It still counts as "a key" for stopping playback below.
+            piano_note = (
+                event is not None
+                and event.event == kitty_keys.PRESS
+                and score_audition.is_piano_note_event(mode, event.key, event.mods)
+            )
+
+            if playback.active and (event is not None and event.event != kitty_keys.RELEASE):
+                # "Any key stops playback" (#108). The keystroke is
+                # consumed by stopping rather than also doing its normal
+                # job -- a panic key must not simultaneously edit.
+                playback.stop(engine)
+                entry.reset()
+                key, piano_note, quit_requested = None, False, False
 
             if quit_requested:
                 if dirty and not quit_pending:
                     quit_pending = True
                 else:
                     return quit_result
+            elif piano_note:
+                quit_pending = False
+                pitch = score_audition.pitch_for_key(event.key, base_octave)
+                if pitch is not None:
+                    group = entry.press(event.key)
+                    if len(entry.held) == 1:
+                        # First press of a group: one undo snapshot per
+                        # chord, taken *before* any mutation (including
+                        # the append below) so undo restores the score as
+                        # it stood before this chord was played -- not a
+                        # state that already carries the empty column the
+                        # chord was about to be written into.
+                        _record()
+                    if group == score_audition.NEW_COLUMN:
+                        cursor_col += 1
+                        if cursor_col >= len(score.columns):
+                            sed.append_column(score, score_audition.new_column_duration(
+                                score.columns, cursor_col - 1))
+                    cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                    column = score.columns[cursor_col]
+                    cursor_row = sed.clamp_row(sed.place_note_at_pitch(column, *pitch))
+                    dirty = True
+                    _audition([pitch])          # placement audition is unconditional (#108)
+            elif event is not None and event.event == kitty_keys.RELEASE:
+                if event.key in score_audition.PIANO_KEY_SEMITONES:
+                    entry.release(event.key)
             else:
                 if key is not None:
                     quit_pending = False
@@ -2473,26 +2686,58 @@ def run_score_editor(path):
                         dirty = True
                 else:
                     action = resolve_editor_action(key)
+                    if key == "\x1b" and mode == score_audition.PIANO_MODE:
+                        # Esc always *leaves* piano mode, never enters it
+                        # -- the standard modal escape hatch, alongside
+                        # the piano_mode key's own toggle.
+                        mode = score_audition.EDIT_MODE
+                        entry.reset()
+                        action = None
 
-                    if action == "LEFT":
-                        cursor_col = sed.clamp_column(cursor_col - 1, len(score.columns))
-                    elif action == "RIGHT":
-                        cursor_col = sed.clamp_column(cursor_col + 1, len(score.columns))
-                    elif action == "UP":
-                        cursor_row = sed.clamp_row(cursor_row + 1)
-                    elif action == "DOWN":
-                        cursor_row = sed.clamp_row(cursor_row - 1)
+                    if action in ("LEFT", "RIGHT", "UP", "DOWN"):
+                        if action == "LEFT":
+                            cursor_col = sed.clamp_column(cursor_col - 1, len(score.columns))
+                        elif action == "RIGHT":
+                            cursor_col = sed.clamp_column(cursor_col + 1, len(score.columns))
+                        elif action == "UP":
+                            cursor_row = sed.clamp_row(cursor_row + 1)
+                        else:
+                            cursor_row = sed.clamp_row(cursor_row - 1)
+                        entry.reset()   # a moved cursor starts a fresh piano-entry group
+                        if audition_on:
+                            _audition(score_audition.audition_targets(
+                                action, score.columns[cursor_col], cursor_row))
                     elif action == "note_toggle":
                         _record()
                         if sed.toggle_note_at_cursor(score.columns[cursor_col], cursor_row, score.key_fifths):
                             dirty = True
+                        # Placement audition is unconditional (#108): you
+                        # should always hear what you just wrote, even
+                        # with cursor-move audition switched off. Nothing
+                        # sounds when the toggle *removed* a note, since
+                        # there is then no note at the row to sound.
+                        index = sed.note_index_at_row(score.columns[cursor_col], cursor_row)
+                        if index is not None:
+                            note = score.columns[cursor_col].notes[index]
+                            _audition([(note.pitch_class, note.octave)])
                     elif action in ("transpose_up", "transpose_down"):
-                        _record()
                         direction = 1 if action == "transpose_up" else -1
-                        new_row = sed.transpose_note_at_cursor(score.columns[cursor_col], cursor_row, direction)
-                        if new_row is not None:
-                            cursor_row = new_row
-                            dirty = True
+                        if mode == score_audition.PIANO_MODE:
+                            # In piano mode Shift+Up/Down moves the
+                            # keyboard's own octave instead of transposing
+                            # a note under the cursor -- a two-octave
+                            # keyboard otherwise cannot reach the whole
+                            # grand staff, and nothing else in this mode
+                            # wants the binding.
+                            base_octave = score_audition.clamp_base_octave(base_octave + direction)
+                        else:
+                            _record()
+                            new_row = sed.transpose_note_at_cursor(score.columns[cursor_col], cursor_row, direction)
+                            if new_row is not None:
+                                cursor_row = new_row
+                                dirty = True
+                                _audition(score_audition.audition_targets(
+                                    "UP", score.columns[cursor_col], cursor_row))
                     elif action in ("duration_shorten", "duration_lengthen"):
                         _record()
                         sed.cycle_duration(score.columns[cursor_col], 1 if action == "duration_shorten" else -1)
@@ -2526,6 +2771,27 @@ def run_score_editor(path):
                         zoom_level = sed.cycle_zoom(zoom_level)
                     elif action == "chords_only_toggle":
                         chords_only = not chords_only
+                    elif action == "piano_mode":
+                        # Non-dirtying by construction (#108): switching
+                        # modes touches no EditorScore state at all.
+                        mode = score_audition.toggle_mode(mode)
+                        entry.reset()
+                    elif action == "audition_toggle":
+                        audition_on = not audition_on
+                    elif action == "metronome_toggle":
+                        metronome_on = not metronome_on
+                    elif action == "mark_range_start":
+                        mark_start = cursor_col
+                    elif action == "mark_range_end":
+                        mark_end = cursor_col
+                    elif action == "play_from_cursor":
+                        loop = _mark_range(mark_start, mark_end)
+                        span = score_audition.playback_range(len(score.columns), cursor_col, loop)
+                        if span is not None:
+                            entries = score_audition.schedule_slice(
+                                score_audition.build_schedule(score.columns), span[0], span[1])
+                            entry.reset()
+                            playback.start(score, entries, time.monotonic())
                     elif action == "ENTER":
                         _record()
                         _run_chord_builder(keys, score.columns[cursor_col])
@@ -2540,6 +2806,9 @@ def run_score_editor(path):
                         dirty = False
                     elif key is not None and key.lower() == "h":
                         help_legend_on = not help_legend_on
+
+            if playback.active:
+                playback.advance(score, engine, metronome_on, time.monotonic())
 
             zoom_name, _width = sed.ZOOM_LEVELS[zoom_level]
             field_texts = _property_field_texts(score)
@@ -2559,6 +2828,9 @@ def run_score_editor(path):
                 properties_line = "  ".join(field_texts[s] for s in spd.PROPERTY_SLOTS)
             status = (f"saved={'no' if dirty else 'yes'}  col={cursor_col + 1}/{len(score.columns)}  "
                       f"{properties_line}  "
+                      f"mode={mode}({_key_hint('piano_mode')})  "
+                      f"{_editor_audio_status(mode, base_octave, audition_on, metronome_on, engine, playback)}  "
+                      f"{_editor_loop_status(mark_start, mark_end)}"
                       f"zoom={zoom_name}({_key_hint('zoom_cycle')})  "
                       f"chords={'on' if chords_only else 'off'}({_key_hint('chords_only_toggle')})  "
                       f"({_key_hint('save')})save  legend(h)")
@@ -2567,6 +2839,13 @@ def run_score_editor(path):
             if properties_editing:
                 help_legend = _legend_line([
                     "left/right=field", "up/down=value", "0-9=type (time/tempo)", "enter=done",
+                ]) if help_legend_on else ""
+            elif mode == score_audition.PIANO_MODE:
+                help_legend = _legend_line([
+                    "zsxdcvgbhnjm/q2w3er5t6y7u=play", "together=chord", "in sequence=columns",
+                    "shift+up/shift+down=octave", "left/right=column",
+                    f"{_key_hint('duration_shorten')}/{_key_hint('duration_lengthen')}=duration",
+                    f"{_key_hint('piano_mode')}/esc=leave piano",
                 ]) if help_legend_on else ""
             else:
                 help_legend = _legend_line([
@@ -2577,12 +2856,53 @@ def run_score_editor(path):
                     f"{_key_hint('delete_column')}=delete", f"{_key_hint('undo')}/{_key_hint('redo')}=undo/redo",
                     f"{_key_hint('zoom_cycle')}=zoom", f"{_key_hint('chords_only_toggle')}=chords",
                     "enter=chordbuilder", f"{_key_hint('score_properties')}=properties",
+                    f"{_key_hint('piano_mode')}=piano", f"{_key_hint('play_from_cursor')}=play",
+                    f"{_key_hint('metronome_toggle')}=metronome",
+                    f"{_key_hint('audition_toggle')}=audition",
+                    f"{_key_hint('mark_range_start')}/{_key_hint('mark_range_end')}=loop",
                     f"{_key_hint('save')}=save",
                 ]) if help_legend_on else ""
-            sed.render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_legend)
+            sed.render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_legend,
+                       playhead_col=playback.playhead)
             time.sleep(dt)
     finally:
+        playback.stop(engine)
+        if owns_engine and engine is not None:
+            engine.stop()
         keys.restore()
+
+
+def _editor_audio_status(mode, base_octave, audition_on, metronome_on, engine, playback):
+    """The score editor's audition/piano/playback status-line fields (map
+    #99, ticket #120). `oct=` only appears in piano mode, where it is the
+    one piece of state a player needs and cannot otherwise see; `sound=`
+    only appears when there is *no* engine, since "the editor is silent
+    and here is why" is worth a permanent field while "sound works" is
+    not."""
+    parts = []
+    if mode == score_audition.PIANO_MODE:
+        parts.append(f"oct={base_octave}-{base_octave + 1}")
+    parts.append(f"audition={'on' if audition_on else 'off'}({_key_hint('audition_toggle')})")
+    parts.append(f"metro={'on' if metronome_on else 'off'}({_key_hint('metronome_toggle')})")
+    if playback.active:
+        parts.append("playing")
+    if engine is None:
+        parts.append("sound=unavailable")
+    return "  ".join(parts)
+
+
+def _editor_loop_status(mark_start, mark_end):
+    """`loop=` field for the editor's `[`/`]` marked region, in 1-based
+    column numbers to match the status line's own `col=` field. Blank
+    (and contributing no separator) when nothing is marked, mirroring
+    `tab`'s own mark= field only appearing once a mark exists."""
+    if mark_start is None and mark_end is None:
+        return ""
+    span = _mark_range(mark_start, mark_end)
+    if span is None:
+        placed = mark_start if mark_start is not None else mark_end
+        return f"loop=[{placed + 1},...]  "
+    return f"loop=[{span[0] + 1},{span[1] + 1}]  "
 
 
 def main():

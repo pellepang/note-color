@@ -226,7 +226,37 @@ DEFAULT_KEYBINDS = {
     "chord_builder_exit": "b",
     "save": "w",
     "score_properties": "t",
+    # Score editor audition/piano/playback (map #99, ticket #120,
+    # decision #108). All four default to a *Shift*ed letter, because
+    # plain-letter space in the editor is nearly exhausted and piano mode
+    # now claims a two-octave block of it (`zsxdcvgbhnjm`/`q2w3er5t6y7u`
+    # -- see score_audition.py). They are matched exact-case by
+    # main._EDITOR_CASE_SENSITIVE_ACTIONS for the same reason undo/redo
+    # are: 'm' is a note (B) in piano mode while 'M' is the metronome, so
+    # a case-insensitive match would make the two indistinguishable.
+    # mark_range_start/mark_range_end aren't repeated here -- the editor's
+    # loop region deliberately reuses the tab view's existing '['/']'
+    # binding above rather than inventing a second mark vocabulary (#108).
+    "piano_mode": "P",
+    "play_from_cursor": "L",
+    "metronome_toggle": "M",
+    "audition_toggle": "A",
 }
+
+# --- Score editor audition/playback (map #99, ticket #120) ---
+# The octave the piano keyboard's lower row (`z` = C) sounds in; the upper
+# row is one octave above. 3 puts the two octaves either side of middle C,
+# i.e. centred on the grand staff. Shift+Up/Shift+Down moves it live.
+EDITOR_PIANO_BASE_OCTAVE = 3
+EDITOR_AUDITION_VELOCITY = 0.8
+# The metronome is synthesised through the same SoundEngine as everything
+# else (there is no click sample in this repo): a short high tone, a fifth
+# higher on the downbeat so bar one is audibly distinct. MIDI pitches --
+# 96 is C7, 89 is F6.
+EDITOR_METRONOME_PITCH = 89
+EDITOR_METRONOME_DOWNBEAT_PITCH = 96
+EDITOR_METRONOME_VELOCITY = 0.5
+EDITOR_METRONOME_CLICK_SECONDS = 0.05
 
 # --- Credits & donation (issue #44) ---
 # Author callout shown on the menu screen itself and, in full, on the

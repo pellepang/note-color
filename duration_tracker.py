@@ -45,9 +45,24 @@ DURATION_CLASS_ORDER = [name for _, name in _DURATION_CLASSES]
 # _DURATION_CLASSES itself for the same reason DURATION_CLASS_ORDER is --
 # so the two can never drift. `tab_playback.py` (ticket #121) needs it to
 # turn an already-finalized note's duration_class back into real seconds
-# against a tempo; score_writer.QUARTER_LENGTHS is the same table but
-# lives behind a music21 import, which no live-path module may pay for.
+# against a tempo; `score_audition.py` (ticket #120) needs the same thing
+# for the score editor's own playback. score_writer.QUARTER_LENGTHS is
+# the same table but lives behind a music21 import, which no live-path
+# module may pay for.
 BEATS_BY_DURATION_CLASS = {name: beats for beats, name in _DURATION_CLASSES}
+
+
+def beats_for_duration_class(name):
+    """Length in beats of a standard duration class name, with
+    DEFAULT_DURATION_CLASS's own length as the fallback for an unknown or
+    None name -- the same "never raise on a duration lookup" posture
+    duration_class_for_beats() already takes for a missing measurement.
+    Both playback paths (tab_playback.note_duration_seconds(),
+    score_audition.build_schedule()) go through this rather than reaching
+    into BEATS_BY_DURATION_CLASS with their own fallback expression."""
+    if name is None:
+        name = DEFAULT_DURATION_CLASS
+    return BEATS_BY_DURATION_CLASS.get(name, BEATS_BY_DURATION_CLASS[DEFAULT_DURATION_CLASS])
 
 
 def duration_class_for_beats(beats):

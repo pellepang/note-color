@@ -546,3 +546,389 @@ def test_wait_until_returns_early_when_stopped():
     stop.set()
     assert main._wait_until(time.monotonic() + 10.0, stop) is False
     assert main._wait_until(time.monotonic() - 1.0, threading.Event()) is True
+
+
+# --- Score editor audition/piano/playback (map #99, ticket #120) ----------
+
+def test_resolve_editor_action_matches_the_new_shifted_defaults():
+    # Ticket #120's four new editor bindings all default to a *Shift*ed
+    # letter, since plain-letter space is nearly exhausted and piano mode
+    # claims a two-octave block of it.
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action("P", fake) == "piano_mode"
+    assert resolve_editor_action("L", fake) == "play_from_cursor"
+    assert resolve_editor_action("M", fake) == "metronome_toggle"
+    assert resolve_editor_action("A", fake) == "audition_toggle"
+
+
+def test_the_new_editor_bindings_are_matched_exact_case():
+    # The load-bearing rule: 'm' is B on piano mode's keyboard while 'M'
+    # is the metronome, so a case-insensitive match would make the two
+    # indistinguishable. Same treatment undo/redo already get.
+    fake = _FakeKeybindStore()
+    for lowered in ("p", "l", "m", "a"):
+        assert resolve_editor_action(lowered, fake) is None
+
+
+def test_the_editor_loop_region_reuses_the_tab_views_own_mark_keys():
+    # #108: the editor's loop region is the same '['/']' gesture, applied
+    # to columns instead of history timestamps -- not a second vocabulary.
+    fake = _FakeKeybindStore()
+    assert resolve_editor_action("[", fake) == "mark_range_start"
+    assert resolve_editor_action("]", fake) == "mark_range_end"
+
+
+def test_editor_loop_status_is_blank_until_a_mark_is_placed():
+    assert main._editor_loop_status(None, None) == ""
+
+
+def test_editor_loop_status_shows_a_half_placed_range():
+    assert main._editor_loop_status(3, None).startswith("loop=[4,...]")
+    assert main._editor_loop_status(None, 3).startswith("loop=[4,...]")
+
+
+def test_editor_loop_status_is_one_based_and_order_independent():
+    # 1-based to match the status line's own col= field; normalized so
+    # marking end-before-start reads the same as start-before-end.
+    assert main._editor_loop_status(5, 2).startswith("loop=[3,6]")
+    assert main._editor_loop_status(2, 5).startswith("loop=[3,6]")
+
+
+def test_editor_audio_status_names_the_octave_only_in_piano_mode():
+    import score_audition
+
+    playback = main._EditorPlayback()
+    piano = main._editor_audio_status(score_audition.PIANO_MODE, 3, True, False, object(), playback)
+    edit = main._editor_audio_status(score_audition.EDIT_MODE, 3, True, False, object(), playback)
+    assert "oct=3-4" in piano
+    assert "oct=" not in edit
+
+
+def test_editor_audio_status_reports_only_the_absence_of_sound():
+    import score_audition
+
+    playback = main._EditorPlayback()
+    assert "sound=unavailable" in main._editor_audio_status(
+        score_audition.EDIT_MODE, 3, True, False, None, playback)
+    assert "sound=" not in main._editor_audio_status(
+        score_audition.EDIT_MODE, 3, True, False, object(), playback)
+
+
+def test_editor_audio_status_reflects_the_two_toggles():
+    import score_audition
+
+    playback = main._EditorPlayback()
+    text = main._editor_audio_status(score_audition.EDIT_MODE, 3, False, True, object(), playback)
+    assert "audition=off" in text and "metro=on" in text
+
+
+# --- _EditorPlayback (ticket #120) ---------------------------------------
+
+class _FakePlaybackEngine:
+    """Records what playback asks for. No audio device, same split
+    tests/test_playback.py already applies to LiveScheduler."""
+
+    def __init__(self):
+        self.note_ons = []
+        self.panics = 0
+        self._next_id = 0
+
+    def note_on(self, event):
+        self._next_id += 1
+        self.note_ons.append(event.pitch)
+        return self._next_id
+
+    def schedule_note_off(self, voice_id, seconds):
+        pass
+
+    def all_notes_off(self):
+        self.panics += 1
+
+
+def _three_note_score():
+    from score_editor_state import EditorColumn, EditorNote, EditorScore
+
+    return EditorScore(
+        time_signature=(4, 4), key_fifths=0, tempo_bpm=60.0,
+        columns=[EditorColumn(notes=[EditorNote(pc, 4)], duration_class="quarter")
+                 for pc in (0, 2, 4)],
+    )
+
+
+def _run_playback(score, entries, engine, metronome_on=False, step=0.25, limit=200):
+    """Drive _EditorPlayback with a synthetic monotonic clock -- the loop's
+    own time.monotonic() calls are the only real-world thing here, and the
+    class takes `now` as a parameter precisely so this is testable."""
+    playback = main._EditorPlayback()
+    playback.start(score, entries, 0.0)
+    seen = []
+    now = 0.0
+    for _ in range(limit):
+        seen.append(playback.advance(score, engine, metronome_on, now))
+        if not playback.active:
+            break
+        now += step
+    return playback, seen
+
+
+def test_playback_walks_every_column_once_and_then_stops_itself():
+    import score_audition
+
+    score = _three_note_score()
+    engine = _FakePlaybackEngine()
+    entries = score_audition.build_schedule(score.columns)
+    playback, seen = _run_playback(score, entries, engine)
+    # 60bpm, quarter notes: one column per second. Every column sounded
+    # exactly once, in order, and playback ended by itself.
+    assert engine.note_ons == [60, 62, 64]
+    assert [i for i in seen if i is not None] == [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2]
+    assert seen[-1] is None
+    assert not playback.active
+    assert engine.panics == 1          # all_notes_off on the way out
+
+
+def test_playback_starting_mid_score_keeps_the_absolute_beat_grid():
+    import score_audition
+
+    score = _three_note_score()
+    engine = _FakePlaybackEngine()
+    entries = score_audition.schedule_slice(
+        score_audition.build_schedule(score.columns), 1, 2)
+    playback, seen = _run_playback(score, entries, engine)
+    assert engine.note_ons == [62, 64]
+    assert seen[0] == 1                # the playhead starts on the marked column
+
+
+def test_playback_never_mutates_the_score():
+    import copy
+
+    import score_audition
+
+    score = _three_note_score()
+    before = copy.deepcopy(score)
+    _run_playback(score, score_audition.build_schedule(score.columns), _FakePlaybackEngine())
+    assert score == before
+
+
+def test_the_metronome_only_clicks_when_it_is_switched_on():
+    import score_audition
+
+    score = _three_note_score()
+    entries = score_audition.build_schedule(score.columns)
+    silent = _FakePlaybackEngine()
+    _run_playback(score, entries, silent, metronome_on=False)
+    clicking = _FakePlaybackEngine()
+    _run_playback(score, entries, clicking, metronome_on=True)
+    assert len(clicking.note_ons) > len(silent.note_ons)
+    assert config.EDITOR_METRONOME_DOWNBEAT_PITCH in clicking.note_ons
+
+
+def test_stopping_playback_clears_the_playhead_and_panics_the_engine():
+    import score_audition
+
+    score = _three_note_score()
+    engine = _FakePlaybackEngine()
+    playback = main._EditorPlayback()
+    playback.start(score, score_audition.build_schedule(score.columns), 0.0)
+    playback.advance(score, engine, False, 0.0)
+    playback.stop(engine)
+    assert not playback.active and playback.playhead is None
+    assert engine.panics == 1
+
+
+def test_starting_playback_with_nothing_to_play_is_a_no_op():
+    playback = main._EditorPlayback()
+    assert playback.start(_three_note_score(), [], 0.0) is False
+    assert not playback.active
+
+
+def test_a_missing_sound_engine_leaves_the_editor_silent_not_broken():
+    # _editor_sound_engine()'s whole posture: no audio device, no SciPy,
+    # no anything -- the editor still opens, it just makes no sound.
+    class _Boom:
+        def ensure_sound_engine(self):
+            raise RuntimeError("no audio device")
+
+    assert main._editor_sound_engine(_Boom()) == (None, False)
+
+
+# --- run_score_editor()'s piano-mode wiring (map #99, ticket #120) --------
+#
+# The loop itself is smoke-tested manually per this repo's convention, but
+# the *dispatch* through it -- which keystroke becomes a note, which
+# becomes a column advance, what lands in the undo history -- is exactly
+# the kind of wiring the two earlier drafts of this ticket got wrong, and
+# it is testable without a terminal: RawKeys is the only thing standing
+# between the loop and a real TTY, so a scripted stand-in for it drives
+# the whole loop headlessly.
+
+class _ScriptedKeys:
+    """A RawKeys stand-in that replays a fixed list of kitty KeyEvents and
+    then raises KeyboardInterrupt, so the loop exits on its own."""
+
+    def __init__(self, events, kitty=True):
+        self._events = list(events)
+        self.kitty = kitty
+        self.restored = False
+
+    def poll_event(self):
+        if not self._events:
+            raise KeyboardInterrupt
+        return self._events.pop(0)
+
+    def restore(self):
+        self.restored = True
+
+
+def _press(key):
+    import kitty_keys
+
+    return kitty_keys.KeyEvent(key=key, event=kitty_keys.PRESS, mods=0,
+                               text=key, codepoint=ord(key))
+
+
+def _repeat(key):
+    import kitty_keys
+
+    return kitty_keys.KeyEvent(key=key, event=kitty_keys.REPEAT, mods=0,
+                               text=key, codepoint=ord(key))
+
+
+def _release(key):
+    import kitty_keys
+
+    return kitty_keys.KeyEvent(key=key, event=kitty_keys.RELEASE, mods=0,
+                               text=key, codepoint=ord(key))
+
+
+def _shift(key):
+    import kitty_keys
+
+    return kitty_keys.KeyEvent(key=key.lower(), event=kitty_keys.PRESS,
+                               mods=kitty_keys.MOD_SHIFT, text=key.upper(),
+                               codepoint=ord(key.lower()))
+
+
+def _drive_editor(tmp_path, monkeypatch, events, kitty=True):
+    """Runs run_score_editor() over a fresh blank score with a scripted
+    key stream, returning the score it was left holding. No TTY, no audio
+    device (score_audition.sound_notes() no-ops on a None engine), no
+    real sleeping."""
+    import score_editor_display as sed
+    import score_editor_state as ses
+
+    path = str(tmp_path / "piano.musicxml")
+    ses.save_score(ses.new_blank_score(), path)
+
+    # The score is captured off render() rather than off load_score()
+    # because undo/redo *rebind* the loop's local `score` to a fresh
+    # snapshot -- a reference grabbed at load time would go stale the
+    # moment either fired.
+    captured = {}
+
+    def spy_render(score, *args, **kwargs):
+        captured["score"] = score
+
+    monkeypatch.setattr(sed, "render", spy_render)
+    monkeypatch.setattr(main, "RawKeys", lambda *a, **k: _ScriptedKeys(events, kitty=kitty))
+    monkeypatch.setattr(main, "_editor_sound_engine", lambda session: (None, False))
+    monkeypatch.setattr(main.time, "sleep", lambda dt: None)
+    try:
+        main.run_score_editor(path)
+    except KeyboardInterrupt:
+        pass
+    return captured["score"]
+
+
+def _pitches(score):
+    return [[(n.pitch_class, n.octave) for n in c.notes] for c in score.columns]
+
+
+def test_piano_mode_keys_pressed_together_land_in_one_column(tmp_path, monkeypatch):
+    # Shift+P enters piano mode; z/c/b held together are C/E/G in the
+    # keyboard's base octave (config.EDITOR_PIANO_BASE_OCTAVE) -- one
+    # chord, one column, no advance.
+    score = _drive_editor(tmp_path, monkeypatch, [
+        _shift("p"), _press("z"), _press("c"), _press("b"),
+        _release("z"), _release("c"), _release("b"),
+    ])
+    base = config.EDITOR_PIANO_BASE_OCTAVE
+    assert _pitches(score) == [[(0, base), (4, base), (7, base)]]
+
+
+def test_piano_mode_keys_pressed_in_sequence_fill_successive_columns(tmp_path, monkeypatch):
+    score = _drive_editor(tmp_path, monkeypatch, [
+        _shift("p"),
+        _press("z"), _release("z"),
+        _press("x"), _release("x"),
+        _press("c"), _release("c"),
+    ])
+    base = config.EDITOR_PIANO_BASE_OCTAVE
+    # A blank score starts with one column, so two more were appended.
+    assert _pitches(score) == [[(0, base)], [(2, base)], [(4, base)]]
+
+
+def test_auto_repeat_never_advances_or_duplicates(tmp_path, monkeypatch):
+    # A held key auto-repeats in the kitty protocol. That must place
+    # nothing new -- the key is still down, still the same chord.
+    score = _drive_editor(tmp_path, monkeypatch, [
+        _shift("p"), _press("z"), _repeat("z"), _repeat("z"), _release("z"),
+    ])
+    assert _pitches(score) == [[(0, config.EDITOR_PIANO_BASE_OCTAVE)]]
+
+
+def test_letters_stay_editor_commands_outside_piano_mode(tmp_path, monkeypatch):
+    # Without Shift+P first, 'z' is zoom_cycle and 'c' is chords_only --
+    # neither writes a note. The score must come back untouched.
+    score = _drive_editor(tmp_path, monkeypatch, [_press("z"), _press("c")])
+    assert _pitches(score) == [[]]
+
+
+def test_shift_p_leaves_piano_mode_again(tmp_path, monkeypatch):
+    score = _drive_editor(tmp_path, monkeypatch, [
+        _shift("p"), _press("z"), _release("z"), _shift("p"), _press("x"),
+    ])
+    # The second 'x' arrived in edit mode, where it is delete_column --
+    # and the editor refuses to delete its last remaining column, so the
+    # one note played stays put.
+    assert _pitches(score) == [[(0, config.EDITOR_PIANO_BASE_OCTAVE)]]
+
+
+def test_a_degraded_terminal_places_without_advancing(tmp_path, monkeypatch):
+    # No kitty protocol -> no key releases -> #108's explicit degraded
+    # path: every press joins the current column, arrows move on.
+    score = _drive_editor(tmp_path, monkeypatch, [
+        _shift("p"), _press("z"), _press("x"), _press("c"),
+    ], kitty=False)
+    base = config.EDITOR_PIANO_BASE_OCTAVE
+    assert _pitches(score) == [[(0, base), (2, base), (4, base)]]
+
+
+def test_undo_after_piano_entry_restores_the_state_before_the_last_chord(tmp_path, monkeypatch):
+    # The bug this guards: the undo snapshot for a new column must be
+    # taken *before* the column is appended, or undo restores a score
+    # that already carries the empty column the chord was written into.
+    # ('u' is a note on the upper row, so undo is reached from edit mode
+    # -- an intended consequence of piano entry being a mode.)
+    base = config.EDITOR_PIANO_BASE_OCTAVE
+    events = [
+        _shift("p"),
+        _press("z"), _release("z"),
+        _press("x"), _release("x"),
+        _shift("p"),          # back to edit mode
+        _press("u"),          # undo
+    ]
+    score = _drive_editor(tmp_path, monkeypatch, events)
+    assert _pitches(score) == [[(0, base)]]
+
+
+def test_undoing_every_piano_note_returns_to_the_blank_score(tmp_path, monkeypatch):
+    events = [
+        _shift("p"),
+        _press("z"), _release("z"),
+        _press("x"), _release("x"),
+        _shift("p"),
+        _press("u"), _press("u"),
+    ]
+    score = _drive_editor(tmp_path, monkeypatch, events)
+    assert _pitches(score) == [[]]
