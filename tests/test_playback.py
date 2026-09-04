@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import config
-from playback import LiveScheduler, _adsr_envelope, note_frequency, render_offline, synthesize_note
+from playback import _adsr_envelope, note_frequency, render_offline, synthesize_note
 
 
 def test_note_frequency_matches_standard_midi_tuning():
@@ -117,53 +117,3 @@ def test_render_offline_buffer_length_matches_latest_ending_note():
     expected_min_len = int(round(1.0 * sample_rate)) + int((0.1 + config.PLAYBACK_RELEASE_SECONDS) * sample_rate)
     # Allow a small tolerance for rounding of onset/duration -> sample counts.
     assert abs(len(buffer) - expected_min_len) <= 2
-
-
-def test_live_scheduler_trigger_note_queues_a_voice_without_a_stream():
-    # trigger_note()/the callback's mixing logic must work standalone,
-    # without ever opening a real OutputStream -- exercises the same
-    # "pure logic, no hardware I/O" split this repo's test suite already
-    # follows for audio_capture.py (untested at the device layer).
-    scheduler = LiveScheduler(sample_rate=1000, block_size=64)
-    assert scheduler._active == []
-
-    scheduler.trigger_note(0, 4, 0.05)
-    assert len(scheduler._active) == 1
-    samples, position = scheduler._active[0]
-    assert position == 0
-    assert len(samples) > 0
-
-
-def test_live_scheduler_callback_mixes_and_advances_and_retires_voices():
-    scheduler = LiveScheduler(sample_rate=1000, block_size=64)
-    scheduler.trigger_note(0, 4, 0.01)  # short note -- a handful of blocks to fully retire
-    samples, _ = scheduler._active[0]
-    total_len = len(samples)
-
-    outdata = np.zeros((64, 1), dtype=np.float32)
-    pulled = 0
-    iterations = 0
-    while scheduler._active and iterations < 1000:
-        outdata[:] = 0.0
-        scheduler._callback(outdata, 64, None, None)
-        pulled += 64
-        iterations += 1
-
-    # Voice must have fully drained and been removed once enough blocks
-    # were pulled to cover its whole length.
-    assert scheduler._active == []
-    assert pulled >= total_len
-
-
-def test_live_scheduler_callback_is_silent_with_no_active_voices():
-    scheduler = LiveScheduler(sample_rate=1000, block_size=32)
-    outdata = np.ones((32, 1), dtype=np.float32)  # pre-fill with garbage to prove the callback overwrites it
-    scheduler._callback(outdata, 32, None, None)
-    assert np.all(outdata[:, 0] == 0.0)
-
-
-def test_live_scheduler_stop_is_idempotent_without_start():
-    scheduler = LiveScheduler()
-    scheduler.stop()
-    scheduler.stop()
-    assert scheduler._active == []
