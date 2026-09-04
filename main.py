@@ -47,6 +47,7 @@ import numpy as np
 import batch_transcribe
 import chroma
 import config
+import kitty_keys
 import multipitch
 import rhythm_reanalysis
 from config_store import store
@@ -198,14 +199,63 @@ class RawKeys:
     """Non-blocking single-key reads from stdin, for terminal hotkeys.
     Inert (poll() always returns None) when stdin isn't a real TTY or
     termios/tty aren't available (Windows) -- terminal modes keep working,
-    just without live hotkeys, in that case."""
+    just without live hotkeys, in that case.
 
-    def __init__(self):
-        self._active = _HAS_TERMIOS and sys.stdin.isatty()
+    Optionally (``want_kitty=True``) negotiates the kitty keyboard
+    protocol (`kitty_keys.py`, wayfinder map #99 / ticket #118), which is
+    the only way a terminal reports key *releases* -- and therefore the
+    only way a held key can sustain a note rather than machine-gunning
+    it. Off by default, and deliberately so: negotiation is per-view, not
+    process-wide, so `|` back-to-menu never pays the (<=0.25s worst case)
+    round trip, which would work directly against the "instant
+    transition" reason `|` exists at all. Every existing caller
+    constructs `RawKeys()` with no arguments and gets byte-for-byte
+    today's behaviour, including today's exact `poll()` contract.
+
+    With the protocol active, `poll()` still returns exactly the same
+    tokens it always has (`kitty_keys.legacy_token()` maps the richer
+    event stream back down: releases are skipped rather than returned as
+    None, auto-repeat maps to the same token a press does so holding Down
+    on a menu still scrolls, and a bare modifier press maps to nothing so
+    a "press any key" screen isn't dismissed by a stray Shift).
+    `poll_event()` is the new, opt-in richer view: one
+    `kitty_keys.KeyEvent` per call, with press/repeat/release
+    distinguished. On a terminal without the protocol it synthesises a
+    PRESS event from whatever `poll()` would have returned, so a caller
+    written against events works everywhere (with the degraded
+    fixed-duration note policy).
+    """
+
+    def __init__(self, fd=None, out_fd=None, want_kitty=False,
+                 kitty_flags=kitty_keys.SYNTH_FLAGS,
+                 negotiation_timeout=config.KITTY_NEGOTIATION_TIMEOUT,
+                 set_cbreak=True):
+        # `fd` is a constructor parameter rather than sys.stdin.fileno()
+        # read inline (as it was before ticket #118) purely for
+        # testability: it is what lets every byte path below -- the
+        # negotiation, the fallback, the parser -- be exercised against an
+        # os.pipe() in an environment with no TTY at all, per this repo's
+        # "pure logic unit-tested, real terminal I/O smoke-tested"
+        # convention. `out_fd` splits the write side off for the same
+        # reason; on a real terminal the two are the same fd.
+        self._fd = sys.stdin.fileno() if fd is None else fd
+        self._out_fd = self._fd if out_fd is None else out_fd
+        self._active = _HAS_TERMIOS and os.isatty(self._fd)
         self._old_settings = None
-        if self._active:
-            self._old_settings = termios.tcgetattr(sys.stdin)
-            tty.setcbreak(sys.stdin.fileno())
+        self._pushed = False
+        self._kitty_flags_wanted = kitty_flags
+        self._pending = deque()
+        self._queued_events = deque()
+        self._held = {}
+        self.kitty = False
+        self.kitty_flags = None
+        self.kitty_flags_before = None
+        self.negotiation = "skipped"
+        if self._active and set_cbreak:
+            self._old_settings = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        if want_kitty:
+            self._negotiate(negotiation_timeout)
 
     @property
     def active(self):
@@ -216,24 +266,154 @@ class RawKeys:
         False."""
         return self._active
 
+    # -- kitty keyboard protocol negotiation ----------------------------
+
+    def _negotiate(self, timeout):
+        """Ask whether the terminal speaks the kitty keyboard protocol,
+        wait a bounded time, and push the mode only on success.
+
+        The *failure* path is the one that matters, since it is what every
+        non-kitty terminal takes. `kitty_keys.PROBE_SEQUENCE` sends the
+        protocol query immediately followed by a DA1 request -- and every
+        VT-lineage terminal answers DA1. So a terminal without the
+        protocol settles the question the moment its DA1 reply lands,
+        rather than waiting out a timeout; the timeout only covers
+        something pathological (a pty with nothing on the far end).
+        Bytes the user typed ahead during the probe are recovered from
+        `probe.leftover` and queued as ordinary input rather than eaten.
+        On any non-supported outcome no mode is ever pushed, and poll()
+        behaves exactly as it did before this existed.
+        """
+        if not self._active:
+            self.negotiation = "no-tty"
+            return
+        if not self._write(kitty_keys.PROBE_SEQUENCE):
+            self.negotiation = "write-failed"
+            return
+        probe = kitty_keys.CapabilityProbe()
+        deadline = time.monotonic() + timeout
+        while not probe.settled:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not select.select([self._fd], [], [], remaining)[0]:
+                continue
+            chunk = os.read(self._fd, 1024)
+            if not chunk:
+                break
+            probe.feed(chunk)
+        self.negotiation = probe.state
+        for byte in probe.leftover.decode("utf-8", "ignore"):
+            self._pending.append(byte)
+        if not probe.supported:
+            return
+        self._write(kitty_keys.push_sequence(self._kitty_flags_wanted))
+        self._write(kitty_keys.FOCUS_TRACKING_ON)
+        self._pushed = True
+        self.kitty = True
+        # The flags *pushed*, not the ones the query reported: the query
+        # answers with the terminal's flag state as it was *before* the
+        # push, which is 0 in a fresh kitty. Reporting that reads as "the
+        # protocol isn't on" when reaching this branch at all proves it
+        # is -- only a kitty-protocol terminal answers CSI ? u, and one
+        # that doesn't settles as unsupported via the DA1 sentinel. That
+        # exact misreport was found and fixed during issue #101's live
+        # verification; `kitty_flags_before` keeps the queried value,
+        # which is the honest answer to "what was already active".
+        self.kitty_flags = self._kitty_flags_wanted
+        self.kitty_flags_before = probe.flags
+
+    def _write(self, data):
+        """Emit an escape sequence. Never raises -- a terminal that has
+        gone away must degrade to "no protocol", not crash a render
+        loop."""
+        try:
+            os.write(self._out_fd, data)
+            return True
+        except OSError:
+            return False
+
+    # -- reading --------------------------------------------------------
+
     def poll(self):
+        """One key token, or None -- the exact contract every existing
+        caller depends on, unchanged by the kitty protocol."""
+        while True:
+            item = self._next()
+            if item is None:
+                return None
+            if isinstance(item, str):
+                return item
+            token = kitty_keys.legacy_token(item)
+            if token is not None:
+                return token
+            # A release (or a bare modifier press): invisible to a legacy
+            # caller. Keep draining rather than returning None -- a
+            # note-off must never make a menu look like nothing was
+            # pressed.
+
+    def poll_event(self):
+        """One `kitty_keys.KeyEvent`, or None when there's no input.
+
+        On a terminal without the protocol, whatever `poll()` would have
+        returned is synthesised as a PRESS with no modifiers, so a caller
+        written against events keeps working everywhere -- it just never
+        sees a release there, and must fall back to
+        `kitty_keys.FixedDurationKeys`."""
+        item = self._next()
+        if item is None:
+            return None
+        if isinstance(item, str):
+            return _synthetic_press(item)
+        return item
+
+    def release_all(self):
+        """Synthetic RELEASE events for every key this instance currently
+        believes is held down, and forget them. Returns [] when the
+        protocol isn't active (nothing is ever tracked as held there).
+
+        Called automatically on focus-out, and worth calling explicitly
+        when a view exits: a stuck note is the single worst failure mode
+        of a held-note instrument, and a release delivered to whichever
+        window has focus *now* never reaches us."""
+        events = [
+            kitty_keys.KeyEvent(key=key, event=kitty_keys.RELEASE, mods=0,
+                                text="", codepoint=codepoint)
+            for key, codepoint in sorted(self._held.items())
+        ]
+        self._held.clear()
+        return events
+
+    def _next(self):
+        """Next queued item, else read the fd once. Items are either a str
+        (a legacy token, when the protocol isn't active) or a KeyEvent."""
+        if self._queued_events:
+            return self._queued_events.popleft()
+        if self._pending:
+            return self._decode_pending()
         # Reads via os.read() on the raw fd, never sys.stdin.read() --
-        # sys.stdin is a buffered TextIOWrapper, and mixing select() (which
-        # only sees data still sitting at the OS level) with a buffered
-        # read() is a classic trap: read(1) can slurp every byte the pty
-        # already delivered into Python's internal buffer while only
-        # handing back the one requested, so the *next* select() call sees
-        # nothing left at the fd and falsely reports "no more input yet" --
-        # even though the rest of an ESC [ <letter> arrow burst was sitting
-        # right there. That's what made Up/Down on the menu screen require
-        # holding the key (repeated OS key-repeat bursts occasionally
-        # landing on a lucky read boundary) instead of registering on a
+        # sys.stdin is a buffered TextIOWrapper, and mixing select()
+        # (which only sees data still sitting at the OS level) with a
+        # buffered read() is a classic trap: read(1) can slurp every byte
+        # the pty already delivered into Python's internal buffer while
+        # only handing back the one requested, so the *next* select()
+        # call sees nothing left at the fd and falsely reports "no more
+        # input yet" -- even though the rest of an ESC [ <letter> arrow
+        # burst was sitting right there. That's what made Up/Down on the
+        # menu screen require holding the key instead of registering on a
         # single tap. os.read() is unbuffered, so select() and read() stay
         # in sync with the actual fd state.
-        fd = sys.stdin.fileno()
-        if not self._active or not select.select([fd], [], [], 0)[0]:
+        if not self._active or not select.select([self._fd], [], [], 0)[0]:
             return None
-        ch = os.read(fd, 1).decode(errors="ignore")
+        chunk = os.read(self._fd, 1024)
+        for byte in chunk.decode("utf-8", "ignore"):
+            self._pending.append(byte)
+        if not self._pending:
+            return None
+        return self._decode_pending()
+
+    def _decode_pending(self):
+        ch = self._pending.popleft()
         if ch != "\x1b":
             return ch
         # Arrow keys send ESC [ <letter> as one burst, but under a
@@ -242,36 +422,102 @@ class RawKeys:
         # a 0-timeout select() right here would misread that as a lone
         # Escape keypress and silently drop the arrow key.
         # config.ESCAPE_SEQUENCE_TIMEOUT gives the rest of the burst a
-        # brief window to show up; nothing in this app binds a bare
-        # Escape keypress to an action, so the extra wait before falling
-        # back to "not an arrow key" is never user-visible.
-        timeout = config.ESCAPE_SEQUENCE_TIMEOUT
-        if not select.select([fd], [], [], timeout)[0]:
+        # brief window to show up.
+        if not self._await_bytes():
+            # With the protocol active a bare Escape is impossible (it
+            # arrives as CSI 27 u), so an ESC with nothing behind it is
+            # genuinely the Escape key only when the protocol is off --
+            # where nothing in this app binds it, so returning None
+            # preserves today's behaviour exactly.
+            return "\x1b" if self.kitty else None
+        if self._pending[0] != "[":
             return None
-        if os.read(fd, 1).decode(errors="ignore") != "[":
-            return None
+        self._pending.popleft()
         # A bare arrow is 'ESC [ <letter>' -- no parameter bytes at all.
         # A modified arrow (issue #98's Shift+Up/Down) instead sends
-        # 'ESC [ <params> <letter>', params being ASCII digits/semicolons
-        # (e.g. "1;2" for Shift). Keep reading one byte at a time, under
-        # the same timeout-gated select() as above, for as long as each
-        # byte is a parameter byte; the first byte that isn't one is the
-        # sequence's final letter. _parse_csi_params() turns whatever
-        # parameter string was accumulated (possibly empty) plus that
-        # final letter into the token poll() returns.
-        param_bytes = ""
+        # 'ESC [ <params> <letter>'; a kitty key event sends the same
+        # shape with richer parameters (see kitty_keys.parse_key_event()).
+        # Keep reading for as long as each byte is a parameter byte; the
+        # first byte that isn't one is the sequence's final letter.
+        params = ""
         while True:
-            if not select.select([fd], [], [], timeout)[0]:
+            if not self._await_bytes():
                 return None
-            ch = os.read(fd, 1).decode(errors="ignore")
-            if ch and ch in "0123456789;":
-                param_bytes += ch
+            ch = self._pending.popleft()
+            if ch and ch in "0123456789;:<>?":
+                params += ch
                 continue
-            return _parse_csi_params(param_bytes, ch)
+            if not self.kitty:
+                return _parse_csi_params(params, ch)
+            if params == "" and ch in (kitty_keys.FOCUS_IN_FINAL,
+                                       kitty_keys.FOCUS_OUT_FINAL):
+                return self._handle_focus(ch)
+            event = kitty_keys.parse_key_event(params, ch)
+            if event is not None:
+                self._note_held(event)
+            return event
+
+    def _handle_focus(self, final_byte):
+        """Focus reporting (DECSET 1004, enabled alongside the keyboard
+        mode). On focus-out, every key still held is released *to whoever
+        has focus now* -- we will never see those releases -- so synthesise
+        them here rather than let the notes hang. Returns the first such
+        event (the rest are queued), or None on focus-in / nothing held."""
+        if final_byte == kitty_keys.FOCUS_IN_FINAL:
+            return None
+        events = self.release_all()
+        if not events:
+            return None
+        self._queued_events.extend(events[1:])
+        return events[0]
+
+    def _note_held(self, event):
+        if event.event == kitty_keys.RELEASE:
+            self._held.pop(event.key, None)
+        else:
+            self._held[event.key] = event.codepoint
+
+    def _await_bytes(self):
+        """Ensure at least one byte is queued, giving a split escape burst
+        the same brief grace window poll() has always given it."""
+        if self._pending:
+            return True
+        timeout = config.ESCAPE_SEQUENCE_TIMEOUT
+        if not select.select([self._fd], [], [], timeout)[0]:
+            return False
+        chunk = os.read(self._fd, 1024)
+        for byte in chunk.decode("utf-8", "ignore"):
+            self._pending.append(byte)
+        return bool(self._pending)
+
+    # -- teardown -------------------------------------------------------
 
     def restore(self):
-        if self._active:
-            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self._old_settings)
+        """Leave the terminal exactly as it was found. Idempotent, and
+        safe on any error path -- popping the keyboard mode is not
+        optional: without it the user's shell inherits a terminal that
+        reports every keystroke as an escape code."""
+        if self._pushed:
+            self._write(kitty_keys.FOCUS_TRACKING_OFF)
+            self._write(kitty_keys.pop_sequence())
+            self._pushed = False
+            self.kitty = False
+        if self._active and self._old_settings is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+            self._old_settings = None
+
+
+def _synthetic_press(token):
+    """A `poll()`-shaped token seen as a KeyEvent, for `poll_event()` on a
+    terminal with no kitty protocol."""
+    single = len(token) == 1
+    return kitty_keys.KeyEvent(
+        key=token.lower() if single else token,
+        event=kitty_keys.PRESS,
+        mods=kitty_keys.MOD_SHIFT if single and token.isupper() else 0,
+        text=token if single else "",
+        codepoint=ord(token) if single else 0,
+    )
 
 
 def _positive_float(text):
