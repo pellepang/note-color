@@ -5,10 +5,11 @@ Decision #32 (`gh issue view 32`) already settled the approach: a NumPy
 oscillator+ADSR synth (no soundfont/FluidSynth dependency, per #28's
 research -- that stays a future upgrade, not rejected outright), reusing
 `sounddevice.OutputStream` the same way `audio_capture.py` reuses
-`InputStream` (already a dependency, zero new package). Both an offline
-whole-buffer pre-render mode and a live per-event scheduling mode are
-first-class (#32's explicit "both, not a single pick"). Color
-sonification is explicitly out of scope for v1 (#32).
+`InputStream` (already a dependency, zero new package). #32 made both an
+offline whole-buffer pre-render mode and a live per-event scheduling
+mode first-class ("both, not a single pick"); map #99's decision #105
+later moved the live half out of here into `sound_engine.py` -- see
+below. Color sonification is explicitly out of scope for v1 (#32).
 
 Never imported by `analysis_loop()`/`SessionState`/any live-capture code
 path -- playback is strictly an opt-in offline/replay-time feature, same
@@ -24,46 +25,25 @@ site):** offline pre-render is the natural fit for `virtualnote
 transcribe --play` -- a whole `TranscriptionResult` already exists in
 full before playback starts, so there is nothing to schedule against;
 pre-rendering once up front is strictly simpler and gives sample-accurate
-timing for free. Live per-event scheduling is the natural fit for
-`virtualnote replay --play` -- `run_replay_session()`'s loop already
-walks `session_player.group_columns()` paced by real elapsed time
-(`time.sleep()` between columns, divided by `--speed`), so triggering
-each note's audio at the exact moment its column is pushed reuses that
-existing pacing clock instead of running a second, independent one that
-could drift against the visuals. Pre-rendering the whole replay up front
-would also mean buffering a session of unknown, possibly very long,
-duration entirely in memory for no benefit `virtualnote transcribe`
-already needed anyway.
+timing for free, since timing is a buffer-index computation rather than a
+wall-clock one.
 
-**Timing accuracy, live mode:** `LiveScheduler.trigger_note()` does not
-sleep at all -- it synthesizes the note's full waveform immediately (a
-few hundred microseconds of NumPy, not audible-scale latency) and hands
-it to a lock-protected list of "active voices" that `OutputStream`'s own
-audio callback mixes into each output block as it's pulled. This mirrors
-`AudioCapture`'s own callback-thread + non-blocking-handoff shape in
-reverse (`audio_capture.py`'s docstring): the caller thread only ever
-appends to a list, it never blocks on or drives the audio clock itself,
-so onset latency is bounded by one callback block
-(`config.PLAYBACK_BLOCK_SIZE`/`config.PLAYBACK_SAMPLE_RATE` seconds,
-~11ms at the defaults below) rather than by Python-thread sleep-loop
-jitter -- the same class of latency #28's research measured for
-callback-based playback (~3ms +/- 1ms) and comfortably inside this
-project's existing "under 150ms end-to-end" budget. `LiveScheduler` also
-exposes `schedule_note(..., delay_seconds=...)` for a future caller that
-needs the scheduler itself to own timing (e.g. a not-yet-built live
-practice-mode target-playback) -- implemented as one dedicated thread
-that sleeps in short bounded increments toward the next due event's
-`time.perf_counter()` deadline rather than one dumb full-duration sleep
-per note (the sleep-jitter difference #28's research measured: ~2ms
-perf_counter-paced vs. ~15ms naive). No caller in this codebase uses
-`schedule_note()` yet; `trigger_note()` (fired directly off
-`run_replay_session()`'s own already-paced loop) is what both current
-integrations need.
+**What used to live here, and where it went (map #99, decision #105).**
+This module also carried a `LiveScheduler`: an `OutputStream` callback
+mixing a lock-protected list of pre-synthesized notes, driven by
+`trigger_note(pitch_class, octave, duration_seconds)`. It is gone,
+superseded by `sound_engine.py`'s note-on/note-off voice manager, and its
+one caller (`main.run_replay_session()`, `virtualnote replay --play`) has
+moved over. Two reasons, both from map #99: two independent voice-mixing
+callbacks in one process would compete for the same device and the same
+GIL that prototype #100 showed is the binding constraint on polyphony;
+and `trigger_note()`'s duration-carrying shape is exactly the second
+primitive decision #105 ruled out, since every later feature (voice
+stealing, sustain pedal, held-note transpose, aftertouch) would then have
+to be reasoned about twice. `render_offline()`/`play_offline()` below are
+deliberately untouched by that change -- a fully-known transcription has
+no reason to be routed through a real-time voice manager.
 """
-
-import queue
-import threading
-import time
 
 import numpy as np
 import sounddevice as sd
@@ -213,114 +193,3 @@ def play_offline(notes, sample_rate=None, blocking=True):
     if len(buffer) == 0:
         return
     sd.play(buffer, sample_rate, blocking=blocking)
-
-
-class LiveScheduler:
-    """Per-event live playback -- see module docstring for the full
-    rationale versus `render_offline()`/`play_offline()`.
-
-    Not thread-per-note: `_active` is one list of `(samples, position)`
-    pairs, appended to by whichever thread calls `trigger_note()`
-    (typically the caller's own already-paced loop, e.g.
-    `run_replay_session()`) and drained/mixed by the `OutputStream`
-    callback. `_lock` guards every read/write of `_active` -- unlike
-    `main.ReanalysisBuffer`'s deque (safe under the GIL for single
-    append/snapshot ops without an explicit lock, per that module's own
-    documented reasoning), this class does an append *and* an in-place
-    list-comprehension rebuild every callback tick, which is not a single
-    atomic bytecode op, so an explicit lock is the correct call here
-    rather than relying on the same GIL argument."""
-
-    def __init__(self, sample_rate=None, block_size=None):
-        self.sample_rate = sample_rate or config.PLAYBACK_SAMPLE_RATE
-        self.block_size = block_size or config.PLAYBACK_BLOCK_SIZE
-        self._active = []
-        self._lock = threading.Lock()
-        self._stream = None
-        self._due_queue = queue.PriorityQueue()
-        self._scheduler_thread = None
-        self._stop_event = threading.Event()
-
-    def start(self):
-        """Opens the output stream and starts the background due-event
-        thread. Idempotent -- calling start() while already started is a
-        no-op, mirroring AudioCapture's own defensive shape."""
-        if self._stream is not None:
-            return
-        self._stop_event.clear()
-        self._stream = sd.OutputStream(
-            samplerate=self.sample_rate, blocksize=self.block_size, channels=1,
-            dtype="float32", callback=self._callback,
-        )
-        self._stream.start()
-        self._scheduler_thread = threading.Thread(target=self._run_scheduler, daemon=True)
-        self._scheduler_thread.start()
-
-    def stop(self):
-        """Closes the stream and drops any still-sounding voices.
-        Idempotent, same convention as SessionRecorder.close()."""
-        self._stop_event.set()
-        if self._scheduler_thread is not None:
-            self._scheduler_thread.join(timeout=1.0)
-            self._scheduler_thread = None
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
-        with self._lock:
-            self._active = []
-
-    def trigger_note(self, pitch_class, octave, duration_seconds, velocity=1.0):
-        """Synthesizes and immediately queues one note for playback on the
-        next callback pull -- no scheduling delay. This is what
-        `run_replay_session()` calls directly from its own already-paced
-        loop (see module docstring for why)."""
-        samples = synthesize_note(pitch_class, octave, duration_seconds, self.sample_rate, velocity)
-        with self._lock:
-            self._active.append([samples, 0])
-
-    def schedule_note(self, pitch_class, octave, duration_seconds, delay_seconds=0.0, velocity=1.0):
-        """Queues a note to be triggered `delay_seconds` from now, via the
-        background scheduler thread's own precise wait (see module
-        docstring). No current caller uses this -- `trigger_note()` covers
-        both of this module's real integrations -- kept for a future
-        caller that needs the scheduler to own timing rather than an
-        external already-paced loop."""
-        due_time = time.perf_counter() + max(0.0, delay_seconds)
-        self._due_queue.put((due_time, (pitch_class, octave, duration_seconds, velocity)))
-
-    def _run_scheduler(self):
-        # Sleeps in short bounded increments toward the next due event's
-        # deadline rather than one dumb sleep per note (see module
-        # docstring's #28-research citation on why) -- also lets stop()
-        # break out promptly via _stop_event rather than sleeping through
-        # a shutdown request.
-        max_step = 0.02
-        while not self._stop_event.is_set():
-            try:
-                due_time, note = self._due_queue.get(timeout=max_step)
-            except queue.Empty:
-                continue
-            remaining = due_time - time.perf_counter()
-            while remaining > 0 and not self._stop_event.is_set():
-                time.sleep(min(max_step, remaining))
-                remaining = due_time - time.perf_counter()
-            if not self._stop_event.is_set():
-                self.trigger_note(*note)
-
-    def _callback(self, outdata, frames, time_info, status):
-        if status:
-            print(f"[playback] status: {status}")
-        mix = np.zeros(frames, dtype=np.float32)
-        with self._lock:
-            still_active = []
-            for samples, position in self._active:
-                available = len(samples) - position
-                take = min(frames, available)
-                if take > 0:
-                    mix[:take] += samples[position:position + take]
-                new_position = position + take
-                if new_position < len(samples):
-                    still_active.append([samples, new_position])
-            self._active = still_active
-        outdata[:, 0] = np.tanh(mix)

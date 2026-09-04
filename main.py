@@ -1655,6 +1655,39 @@ class SessionState:
         # armed), and it needs to exist before ensure_started() builds the
         # analysis thread's arg tuple below.
         self.session_recorder = SessionRecorder()
+        # Map #99 / decision #105: the one process-wide SoundEngine, created
+        # lazily by ensure_sound_engine() below (constructing one opens no
+        # device, but there is no reason to construct it for a session that
+        # never plays a note either) and then kept for the process's whole
+        # life, exactly as `capture` is -- so switching from the editor to a
+        # live view never drops or reopens the audio *output* device, the
+        # same way `|` never reopens the mic.
+        self.sound_engine = None
+
+    def ensure_sound_engine(self):
+        """Idempotent: returns this process's one `sound_engine.SoundEngine`,
+        creating and starting it on first use. Mirrors `ensure_started()`
+        above (issue #40's lifecycle for audio input) for audio output, per
+        decision #105 -- two independent lazy starts rather than one, since
+        a tool can want input without output (every existing live view) or
+        output without input (the score editor, the coming synth tool).
+
+        `detection_active` is passed as a callable, not a bool: which of the
+        two polyphony budgets applies depends on whether the analysis thread
+        is running *at the moment a note is played*, which can change during
+        the engine's life (menu -> editor -> a live view, all one process).
+
+        Imported locally, same convention as `playback`/`score_writer`/
+        `pygame` -- nothing on the capture/analysis path may pay for the
+        sound engine."""
+        if self.sound_engine is None:
+            import sound_engine
+
+            self.sound_engine = sound_engine.SoundEngine(
+                detection_active=lambda: self.capture is not None,
+            )
+        self.sound_engine.ensure_started()
+        return self.sound_engine
 
     def ensure_started(self):
         """Idempotent: a no-op once the capture/analysis thread already
@@ -1694,6 +1727,12 @@ class SessionState:
         # recorder's file rather than relying on the user to press 's'
         # again before quitting.
         self.session_recorder.close()
+        # Idempotent and safe whether or not a note was ever played (see
+        # SoundEngine.stop()); closed unconditionally, before the capture
+        # check below, since a session can have opened output without ever
+        # having opened input.
+        if self.sound_engine is not None:
+            self.sound_engine.stop()
         if self.capture is None:
             return
         self.stop_event.set()
@@ -1899,26 +1938,35 @@ def run_replay_session(file_path, dump_file, speed=1.0, play=False):
     still dumps via TabDisplay.dump_ansi() on the way out, covering
     whatever was replayed up to that point, not just a full run.
 
-    `play=True` (map #24's playback engine) triggers each column's
-    note(s) through a `playback.LiveScheduler` the instant that column is
-    pushed on screen, reusing this loop's own already-paced `time.sleep()`
-    clock rather than running a second, independent one -- see
-    playback.py's module docstring for why live scheduling (not offline
-    pre-render) is the right mode for this specific caller. Each event's
-    own recorded `duration_seconds` is divided by `speed` so the audio
-    speeds up/slows down in lockstep with the visual pacing above, not
-    just the gaps between notes."""
+    `play=True` (map #24's playback engine) plays each column's note(s)
+    the instant that column is pushed on screen, reusing this loop's own
+    already-paced `time.sleep()` clock rather than running a second,
+    independent one. Each event's own recorded `duration_seconds` is
+    divided by `speed` so the audio speeds up/slows down in lockstep with
+    the visual pacing above, not just the gaps between notes.
+
+    Since map #99's ticket #112 that goes through `sound_engine.
+    SoundEngine`, not `playback.LiveScheduler` (superseded, decision
+    #105): one note-on per event, with its matching note-off scheduled
+    `duration_seconds / speed` later against the audio callback's own
+    frame clock. This caller knows each note's duration up front, which
+    is exactly the "arrange your own note-off" case #105 anticipated --
+    the engine itself still has no duration-carrying primitive. A
+    `SoundEngine` is built locally here rather than taken from
+    `main.SessionState`: `virtualnote replay` never constructs a
+    SessionState at all (see virtualnote.py's main()), being a standalone
+    offline entry point that touches no audio *input*."""
     from terminal_tab_display import TabDisplay
 
     events = load_events(file_path)
     columns = group_columns(events)
 
-    scheduler = None
+    engine = None
     if play:
-        import playback
+        import sound_engine
 
-        scheduler = playback.LiveScheduler()
-        scheduler.start()
+        engine = sound_engine.SoundEngine(detection_active=False)
+        engine.ensure_started()
 
     display = TabDisplay(fps=config.TAB_FPS)
     last_t = 0.0
@@ -1940,17 +1988,19 @@ def run_replay_session(file_path, dump_file, speed=1.0, play=False):
                 display.push_notes(push_tuples, chord_name, t=t)
                 for event in group:
                     display.finalize_duration(event["pc"], event["octave"], event["duration_class"])
-                    if scheduler is not None:
-                        scheduler.trigger_note(
-                            event["pc"], event["octave"], event["duration_seconds"] / max(speed, 1e-6)
+                    if engine is not None:
+                        note_on = sound_engine.NoteOn.from_pitch_class(event["pc"], event["octave"])
+                        voice_id = engine.note_on(note_on)
+                        engine.schedule_note_off(
+                            voice_id, event["duration_seconds"] / max(speed, 1e-6)
                         )
             status = f"virtualnote replay  file={os.path.basename(file_path)}  t={t:.2f}s  speed={speed}x"
             display.render(status, chord_mode=True)
     except KeyboardInterrupt:
         pass
     finally:
-        if scheduler is not None:
-            scheduler.stop()
+        if engine is not None:
+            engine.stop()
         resolved_dump_path = dump_file or os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
