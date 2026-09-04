@@ -37,6 +37,24 @@ sf2 = [
     "pyfluidsynth>=1.4.0",  # sf2_playback.py only -- pull-model rendering, never Synth.start()
 ]
 
+# The subtractive synth's resonant filter is a per-sample IIR recurrence,
+# and #103 measured that there is no pure-NumPy substitute for one: a
+# scalar Python loop costs 594us/block and the vectorize-across-voices
+# escape has a ~5ms floor at *one* voice, 43% of the budget, while
+# `scipy.signal.lfilter` with a persistent per-voice `zi` is 54x faster.
+# Decision #111 settled that this does not make SciPy a core dependency:
+# it lives behind its own extra exactly as librosa/music21 do, isolated
+# to synth_engine.py and imported lazily there. Without it the synth
+# refuses to *open*, carrying the install line -- never opening
+# filterless, which is synthplayer's failure mode and precisely what
+# makes the closest prior art read as a toy.
+synth = [
+    "scipy>=1.10",    # synth_engine.py only -- the SVF filter and pink-noise filter (ticket #113)
+]
+all = [
+    "note-color[batch,synth]",
+]
+
 [project.scripts]
 virtualnote = "virtualnote:main"
 
@@ -65,6 +83,7 @@ py-modules = [
     "prototypes_display",
     "rhythm_reanalysis",
     "score_writer",
+    "synth_engine",
     "session_player",
     "session_recorder",
     "sf2_playback",

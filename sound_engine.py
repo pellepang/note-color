@@ -522,9 +522,12 @@ def _default_engine():
     without pulling in a concrete engine's own dependencies -- the same
     reason `detection_backends.default_pitch_backend()` exists as a
     function rather than a module-level constant. Ticket #113's
-    subtractive synth becomes the default here once it lands; until
-    then it is `tone_engine.ToneEngine`, which is map #24's existing
-    harmonic-stack+ADSR voice made note-on/note-off-shaped."""
-    from tone_engine import ToneEngine
+    subtractive synth (`synth_engine.SynthEngine`) is the default; it
+    needs SciPy (the `[synth]` extra, #111) and raises
+    `synth_engine.SynthUnavailable` with the install line when that is
+    missing, rather than falling back to anything filterless.
+    `tone_engine.ToneEngine` (#112's interim engine) remains available
+    to any caller that names it explicitly."""
+    from synth_engine import SynthEngine
 
-    return ToneEngine()
+    return SynthEngine()
