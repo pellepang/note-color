@@ -1028,18 +1028,24 @@ class _FakeSound:
 
 
 class _FakeSession:
-    def __init__(self, sound):
+    def __init__(self, sound, session_recorder=None):
         self._sound = sound
+        self.session_recorder = session_recorder
 
     def ensure_sound_engine(self):
         return self._sound
 
 
-def _drive_synth(monkeypatch, events, kitty=True):
+def _drive_synth(monkeypatch, events, kitty=True, recorder=None):
     """Runs run_synth_tool() with a scripted key stream against a fake
     sound engine. No TTY, no audio device, no real sleeping."""
     import synth_display
+    from session_recorder import SessionRecorder
 
+    # An un-armed recorder never opens a file, so the default here writes
+    # nothing anywhere -- the tests that actually arm one pass their own,
+    # pointed at tmp_path.
+    recorder = SessionRecorder() if recorder is None else recorder
     sound = _FakeSound()
     rendered = {}
 
@@ -1052,7 +1058,7 @@ def _drive_synth(monkeypatch, events, kitty=True):
     monkeypatch.setattr(synth_display, "render", spy_render)
     monkeypatch.setattr(main, "RawKeys", lambda *a, **k: _ScriptedSynthKeys(events, kitty=kitty))
     monkeypatch.setattr(main.time, "sleep", lambda dt: None)
-    result = main.run_synth_tool(session=_FakeSession(sound))
+    result = main.run_synth_tool(session=_FakeSession(sound, recorder))
     return sound, rendered, result
 
 
@@ -1298,3 +1304,138 @@ def test_synth_an_unbound_key_can_still_be_bound_back(monkeypatch):
         _press("z"), _shift("b"),          # ...and back round to note
     ])
     assert rendered["state"].layout.slot_for("z").kind == "note"
+
+
+# --- the synth tool's recording (map #99, ticket #122, decision #110) -----
+#
+# Again headless and again MUTED: these assert what lands in the log file,
+# never that anything was heard. Every note here is played by the scripted
+# key stream through the real run_synth_tool() loop, so the pairing under
+# test is the loop's own _note_on/_note_off wiring, not a direct call to
+# the recorder.
+
+def _armed_recorder(tmp_path):
+    from session_recorder import SessionRecorder
+
+    return SessionRecorder(path=str(tmp_path / "session_log_test.jsonl"))
+
+
+def _log_lines(recorder):
+    import json
+
+    with open(recorder.path, encoding="utf-8") as fh:
+        return [json.loads(line) for line in fh if line.strip()]
+
+
+def test_synth_shift_s_arms_recording_and_says_so_in_the_status_line(tmp_path, monkeypatch):
+    recorder = _armed_recorder(tmp_path)
+    _s, rendered, _r = _drive_synth(monkeypatch, [_shift("s")], recorder=recorder)
+    assert recorder.armed is True
+    assert "rec=ON" in rendered["status"]
+
+
+def test_synth_status_shows_recording_off_by_default(tmp_path, monkeypatch):
+    # Off by default, no disk writes unless explicitly armed -- the same
+    # posture the live views' own `S` has always had.
+    recorder = _armed_recorder(tmp_path)
+    _s, rendered, _r = _drive_synth(monkeypatch, [_press("z")], recorder=recorder)
+    assert recorder.armed is False
+    assert "rec=off" in rendered["status"]
+    assert not (tmp_path / "session_log_test.jsonl").exists()
+
+
+def test_synth_shift_s_twice_disarms_again(tmp_path, monkeypatch):
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_shift("s"), _shift("s")], recorder=recorder)
+    assert recorder.armed is False
+
+
+def test_synth_records_a_played_note_as_a_played_event(tmp_path, monkeypatch):
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_shift("s"), _press("z"), _release("z")], recorder=recorder)
+    recorder.close()
+
+    (event,) = _log_lines(recorder)
+    assert event["source"] == "played"
+    assert event["velocity"] == 127          # #107 decision 3: QWERTY has no dynamics
+    assert event["duration_hops"] is None    # #110 point 2: wall clock, no hop pipeline
+    assert event["bpm_estimate"] is None
+    assert event["patch"]                     # the sound that played it, by name
+
+
+def test_synth_records_the_pitch_the_key_actually_played(tmp_path, monkeypatch):
+    import score_audition
+    import sound_engine
+
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_shift("s"), _press("z"), _release("z")], recorder=recorder)
+    recorder.close()
+
+    pitch = sound_engine.midi_pitch(*score_audition.pitch_for_key("z", config.SYNTH_BASE_OCTAVE))
+    pitch_class, octave = sound_engine.pitch_class_octave(pitch)
+    (event,) = _log_lines(recorder)
+    assert (event["pc"], event["octave"]) == (pitch_class, octave)
+
+
+def test_synth_records_a_pad_hit_with_its_pad_number(tmp_path, monkeypatch):
+    # Tab twice reaches the 4x4 pad square; 'z' is its first pad.
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_press("TAB"), _press("TAB"), _shift("s"),
+                                _press("z"), _release("z")], recorder=recorder)
+    recorder.close()
+
+    (event,) = _log_lines(recorder)
+    assert event["pad"] == 1
+
+
+def test_synth_records_nothing_played_before_arming(tmp_path, monkeypatch):
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_press("z"), _release("z"), _shift("s"),
+                                _press("x"), _release("x")], recorder=recorder)
+    recorder.close()
+
+    assert len(_log_lines(recorder)) == 1
+
+
+def test_synth_keys_held_together_record_as_separate_overlapping_notes(tmp_path, monkeypatch):
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_shift("s"), _press("z"), _press("c"), _press("b"),
+                                _release("b"), _release("c"), _release("z")], recorder=recorder)
+    recorder.close()
+
+    assert len(_log_lines(recorder)) == 3
+
+
+def test_synth_leaving_the_tool_finalizes_a_still_held_note(tmp_path, monkeypatch):
+    # run_synth_tool()'s finally block releases every held key, and the
+    # recorder writes each one's line on the way out -- a note is never
+    # lost just because the take ended while a key was down.
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_shift("s"), _press("z")], recorder=recorder)
+    assert len(_log_lines(recorder)) == 1
+
+
+def test_synth_recording_survives_the_tool_when_a_session_owns_the_recorder(tmp_path, monkeypatch):
+    # The process-wide recorder is the live views' own: arming in the
+    # synth and arming in `fill` are the same switch on the same file, so
+    # leaving the tool must not close it.
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_shift("s"), _press("z"), _release("z")], recorder=recorder)
+    assert recorder.armed is True
+
+
+def test_synth_recording_round_trips_into_a_quantized_score(tmp_path, monkeypatch):
+    # The whole ticket, end to end: play, record, import. Every note here
+    # lands at essentially the same instant (the scripted key stream has
+    # no real elapsed time between events), so a single column is the
+    # correct answer, not an artefact.
+    import log_import
+
+    recorder = _armed_recorder(tmp_path)
+    _drive_synth(monkeypatch, [_shift("s"), _press("z"), _press("c"),
+                                _release("z"), _release("c")], recorder=recorder)
+    recorder.close()
+
+    score = log_import.import_log(recorder.path, grid="quarter")
+    assert len(score.columns) == 1
+    assert len(score.columns[0].notes) == 2

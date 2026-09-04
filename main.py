@@ -2517,11 +2517,20 @@ class _EditorPlayback:
         return base + score_audition.seconds_to_beats(now - self.start_time, self.tempo_bpm)
 
 
-def run_score_editor(path, session=None):
+def run_score_editor(path, session=None, score=None):
     """`virtualnote edit <path>` (issue #98): loads `path` via
     score_editor_state.load_score() if it already exists, otherwise
     starts a brand-new blank score (new_blank_score()) to be saved to
-    `path` later. Drives its own interactive loop (own RawKeys instance,
+    `path` later.
+
+    `score`, when given, is used instead of either -- the score already
+    exists in memory and `path` is only where a later `save` will write
+    it. That is how an imported session recording arrives (ticket #122):
+    `log_import.py` has already quantized the log into an EditorScore, so
+    the editor opens on it *unsaved*, and quitting without saving leaves
+    nothing behind but the untouched log. Deliberately one parameter
+    rather than an `import_log=`/`grid=` pair -- this function's job is to
+    edit a score, not to know what a session log is. Drives its own interactive loop (own RawKeys instance,
     mirroring every other run_terminal_* function) over
     score_editor_display.py's pure mutation/render layer, with
     EditHistory backing undo/redo -- never touches SessionState's *audio
@@ -2568,7 +2577,8 @@ def run_score_editor(path, session=None):
     import score_properties_display as spd
     from score_editor_state import EditHistory, load_score, new_blank_score, save_score
 
-    score = load_score(path) if os.path.exists(path) else new_blank_score()
+    if score is None:
+        score = load_score(path) if os.path.exists(path) else new_blank_score()
     history = EditHistory()
     dirty = False
     cursor_col = 0
@@ -2905,7 +2915,7 @@ def _editor_loop_status(mark_start, mark_end):
     return f"loop=[{span[0] + 1},{span[1] + 1}]  "
 
 
-def _synth_status(state, held_mode, engine, message):
+def _synth_status(state, held_mode, engine, message, recorder=None):
     """The synth tool's status line. `keys=` is the one field decision
     #107 point 7 makes mandatory: on a terminal that reports no key
     releases every note is a fixed length, and *saying so plainly* is
@@ -2921,6 +2931,7 @@ def _synth_status(state, held_mode, engine, message):
         f"kit={state.kit.name if state.kit is not None else '--'}",
         f"voices={voices}",
         f"keys={held_mode}",
+        f"rec={'ON' if recorder is not None and recorder.armed else 'off'}(shift+s)",
     ]
     if message:
         parts.append(message)
@@ -2932,7 +2943,7 @@ def _synth_legend(state):
         "letters/numbers=play", "tab=layout", "up/down=param", "left/right=value",
         "shift+left/right=coarse", "shift+up/down=octave",
         "shift+p=patches", "shift+w=save", "shift+i=import sample",
-        "shift+m=panic", "shift+h=legend",
+        "shift+m=panic", "shift+s=record", "shift+h=legend",
     ]
     if not state.layout.builtin:
         parts.extend(["shift+b=bind kind", "<|>=bind value", "shift+l=save layout"])
@@ -2978,6 +2989,7 @@ def run_synth_tool(session=None):
         print(f"[virtualnote] {exc}", file=sys.stderr)
         return "menu"
 
+    import sound_engine
     from sampler import SamplerEngine
     from sound_engine import NoteOn
     from synth_engine import SynthEngine
@@ -3004,6 +3016,16 @@ def run_synth_tool(session=None):
             else:
                 router.pad_engine.set_patch(state.kit)
 
+    # The recording target (ticket #122, decision #110): the process-wide
+    # SessionRecorder when there is a session, so arming here and arming
+    # in a live view are literally the same switch on the same file and a
+    # `|` back to the menu never severs a recording mid-take. With no
+    # session (the `virtualnote synth` CLI subcommand) the tool owns one
+    # for its own lifetime and closes it on the way out -- nothing else
+    # in the process would.
+    recorder = session.session_recorder if session is not None else SessionRecorder()
+    owns_recorder = session is None
+
     keys = RawKeys(want_kitty=True)
     held_mode = "held" if keys.kitty else f"fixed {config.SYNTH_FIXED_NOTE_SECONDS:.2f}s (no key release)"
     policy = (kitty_keys.HeldKeys() if keys.kitty
@@ -3029,8 +3051,24 @@ def run_synth_tool(session=None):
         # to report, and faking them would be a lie the sampler's own
         # velocity layers then act on.
         voices[key] = sound.note_on(NoteOn(pitch, 1.0, slot.channel()))
+        # Recorded from the same two functions that start and stop the
+        # sound, so what lands in the log is exactly what was heard --
+        # including a note ended by a layout switch or an octave shift
+        # (both release everything through `policy.release_all()`), and
+        # including a fixed-duration note on a terminal with no key
+        # releases, whose note_off arrives from `policy.expire()` at the
+        # moment it actually stopped sounding.
+        pad_index = state.pad_index_for_slot(slot)
+        pitch_class, octave = sound_engine.pitch_class_octave(pitch)
+        recorder.note_on(
+            key, pitch_class, octave, velocity=1.0,
+            patch=(state.kit.name if pad_index is not None and state.kit is not None
+                   else state.patch.name),
+            pad=None if pad_index is None else pad_index + 1,
+        )
 
     def _note_off(key):
+        recorder.note_off(key)
         voice_id = voices.pop(key, None)
         if voice_id is not None:
             sound.release_voice(voice_id)
@@ -3055,7 +3093,7 @@ def run_synth_tool(session=None):
                         return "menu"
                     if action is not None:
                         state.message = _handle_synth_action(
-                            action, state, sound, policy, _apply, _sync_engines) or ""
+                            action, state, sound, policy, _apply, _sync_engines, recorder) or ""
                         continue
                     if event.event == kitty_keys.PRESS and state.overlay is not None \
                             and state.overlay.kind == synth_tool.OVERLAY_SAVE:
@@ -3078,7 +3116,7 @@ def run_synth_tool(session=None):
                 _apply(policy.expire(time.monotonic()))
 
             colors = lights.update(dt, state.layout, policy.held, state.kit, state.octave_shift)
-            status = _synth_status(state, held_mode, sound, state.message)
+            status = _synth_status(state, held_mode, sound, state.message, recorder)
             synth_display.render(state, colors, status,
                                  _synth_legend(state) if state.help_on else "")
             time.sleep(dt)
@@ -3092,10 +3130,12 @@ def run_synth_tool(session=None):
         sound.all_notes_off()
         sound.set_polyphony_override(None)
         sound.engine = previous_engine
+        if owns_recorder:
+            recorder.close()
         keys.restore()
 
 
-def _handle_synth_action(action, state, sound, policy, apply_events, sync_engines):
+def _handle_synth_action(action, state, sound, policy, apply_events, sync_engines, recorder=None):
     """One resolved synth-tool action. Split out of `run_synth_tool()`'s
     loop purely for legibility -- it still owns real side effects (file
     I/O, the audio engine), so like the loop it is smoke-tested rather
@@ -3135,6 +3175,17 @@ def _handle_synth_action(action, state, sound, policy, apply_events, sync_engine
         apply_events(policy.release_all())
         sound.all_notes_off()
         return "all notes off"
+    if action == "record_toggle":
+        if recorder is None:
+            return None
+        # Sounding notes are released first, for the same reason an octave
+        # shift releases them: a note whose note_on landed on one side of
+        # the switch and whose note_off lands on the other has no honest
+        # line to write. Releasing first makes disarming end every note
+        # cleanly in the log, and arming start the take from silence.
+        apply_events(policy.release_all())
+        armed = recorder.toggle()
+        return f"recording -> {os.path.basename(recorder.path)}" if armed else "recording stopped"
 
     # -- overlays ---------------------------------------------------------
     if action == "patch_browse":
