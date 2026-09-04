@@ -45,7 +45,7 @@ Schema (all tables optional):
     [preferences]
     # Free-form booleans/numbers/strings for quality-of-life settings.
     # menu_perf_mode has no dedicated editor screen (hand-edit only); the
-    # two numeric fields below are editable live from the Settings
+    # numeric fields below are editable live from the Settings
     # screen's generic NUMERIC_FIELDS (issue #43 follow-up), same
     # preference()/set_preference() path, no bespoke accessor needed:
     menu_perf_mode = "auto"
@@ -58,6 +58,13 @@ Schema (all tables optional):
     tab_scrollback_seconds = 300.0
     # How far back the tab view's freeze-mode Left/Right scrollback can
     # browse; see config.TAB_SCROLLBACK_SECONDS.
+    polyphony_standalone = 40
+    polyphony_with_detection = 24
+    # Sound-engine hard voice caps (map #99, decision #105) -- two
+    # separate budgets because prototype #100 measured the safe figure
+    # differing ~2x depending on whether this app's live detection is
+    # running in the same process; see config.POLYPHONY_STANDALONE /
+    # config.POLYPHONY_WITH_DETECTION and sound_engine.polyphony_for().
     # The rest of the table stays reserved for future settings this
     # ticket only owns the load/persist mechanics for, not any particular
     # one's UI (e.g. #40's still-unwired global 'H' keybind-legend on/off

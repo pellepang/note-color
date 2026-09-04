@@ -108,6 +108,21 @@ NUMERIC_FIELDS = [
         30, 3600, 30,
         config.TAB_SCROLLBACK_SECONDS,
     ),
+    # Map #99 / decision #105: two budgets rather than one, because #100
+    # measured the safe figure differing ~2x between "nothing else running"
+    # and "one thread doing this app's real analysis work" (GIL contention).
+    NumericFieldSpec(
+        "polyphony_standalone",
+        "Polyphony, standalone (voices)",
+        1, 128, 4,
+        config.POLYPHONY_STANDALONE,
+    ),
+    NumericFieldSpec(
+        "polyphony_with_detection",
+        "Polyphony, detection running (voices)",
+        1, 128, 4,
+        config.POLYPHONY_WITH_DETECTION,
+    ),
 ]
 
 # One row per keybind action, then one row per note (sharp spelling,
