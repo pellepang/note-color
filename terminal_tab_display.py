@@ -418,6 +418,30 @@ class TabDisplay:
             all_entries = all_entries[: max(len(all_entries) - scroll_offset, 0)]
         return all_entries[-1].t if all_entries else None
 
+    def visible_entries(self, chord_mode=False, notehead_style="symbol", legend_on=True, scroll_offset=0):
+        """The history entries `render()` would currently draw, oldest
+        first -- the same width-budget walk, against the same terminal
+        size, with the same `scroll_offset` truncation applied, because
+        both go through `select_visible_entries()`.
+
+        Ticket #121's frozen playback needs "every column currently
+        visible" as its default scope, and the only honest source for
+        that is the identical computation the renderer itself uses: a
+        separately-derived guess (a fixed column count, say) would drift
+        the moment the terminal is resized or the legend toggled off.
+        The terminal-size lookup is why this is a method rather than a
+        pure function; everything that decides *which* entries survive
+        is in `select_visible_entries()`, which is pure and directly
+        unit-tested."""
+        cols, _rows = shutil.get_terminal_size(fallback=(80, 24))
+        width = column_width_for(chord_mode, notehead_style)
+        legend_width = config.TAB_LEGEND_WIDTH if legend_on else 0
+        available_width = max(cols - legend_width, 0)
+        entries, _used = select_visible_entries(
+            list(self.entries), available_width, width, max(scroll_offset, 0)
+        )
+        return entries
+
     def render(self, status, chord_mode=False, notehead_style="symbol", legend_on=True, frozen=False,
                help_legend="", scroll_offset=0):
         size = shutil.get_terminal_size(fallback=(80, 24))
@@ -449,60 +473,29 @@ class TabDisplay:
                 top -= 1
                 shrink -= 1
 
-        # Chord mode always gets the wide chord-name column; mono's *name*
-        # style (issue #83) also needs the wider column, since its
-        # f"{letter}·{suffix}" duration text (e.g. "Bb·16th.") doesn't fit
-        # in TAB_COLUMN_WIDTH's 3 cells -- `_pad_center()` would otherwise
-        # clip it to an unreadable stub like "Bb·1". Mono *symbol* style
-        # keeps the narrow column: its duration glyphs are combining marks
-        # composed onto the notehead, not extra text, so they don't need
-        # the extra width.
-        if chord_mode:
-            width = config.TAB_COLUMN_WIDTH_CHORD
-        elif notehead_style == "name":
-            width = config.TAB_COLUMN_WIDTH_NAME
-        else:
-            width = config.TAB_COLUMN_WIDTH
+        width = column_width_for(chord_mode, notehead_style)
         # `L` (legend_on) reclaims the legend column's width for note
         # columns entirely when off, rather than just blanking its
         # content -- issue #19's stated intent for the toggle.
         legend_width = config.TAB_LEGEND_WIDTH if legend_on else 0
         available_width = max(cols - legend_width, 0)
 
-        # Walk the history from newest to oldest, accumulating each
-        # column's *actual* width (barline columns are narrower than note
-        # columns -- config.TAB_BARLINE_WIDTH vs. `width`) until the
-        # available screen width is used up. The newest column is always
-        # included even if it alone doesn't fit, same guarantee the old
-        # fixed-width `max(..., 1)` gave.
-        all_entries = list(self.entries)
-        # Scrollback (Left/Right-arrow feature, frozen-only): `scroll_offset`
-        # is a count of history entries (note *and* barline columns alike,
-        # not raw terminal character columns) to hide off the tail --
-        # slicing them off here, before the width-budget walk below, makes
-        # the remaining tail entry play the role of "the newest visible
-        # column" for every purpose below (width budget, age-from-that-
-        # point-in-time), i.e. this renders exactly what the live view
-        # looked like `scroll_offset` columns ago, not the current live
-        # tail with some cosmetic offset applied on top.
+        # Which entries actually fit on screen (and how much width they
+        # use) is `select_visible_entries()`'s pure walk -- shared with
+        # `visible_entries()` below, so the frozen-playback feature
+        # (ticket #121) plays back exactly the columns this render pass
+        # draws, rather than a second, independently-derived idea of
+        # "what is on screen".
         scroll_offset = max(scroll_offset, 0)
-        if scroll_offset:
-            all_entries = all_entries[: max(len(all_entries) - scroll_offset, 0)]
+        visible_entries, used_width = select_visible_entries(
+            list(self.entries), available_width, width, scroll_offset
+        )
         # Freeze (#23) pins every visible column to age 0 -- but only when
         # not also scrolled back: a scrolled-back-to column should show the
         # age-fade gradient it actually had at that point in history (see
         # the module docstring), not render as if it just arrived the way
         # plain freeze-with-no-scrolling does.
         pin_to_newest = frozen and not scroll_offset
-        visible_entries = []
-        used_width = 0
-        for e in reversed(all_entries):
-            e_width = config.TAB_BARLINE_WIDTH if isinstance(e, BarlineEntry) else width
-            if visible_entries and used_width + e_width > available_width:
-                break
-            used_width += e_width
-            visible_entries.append(e)
-        visible_entries.reverse()
         if visible_entries:
             pad = max((available_width - used_width) // width, 0)
         else:
@@ -645,6 +638,59 @@ class TabDisplay:
     def quit(self):
         sys.stdout.write("\033[0m\033[2J\033[H\033[?25h")
         sys.stdout.flush()
+
+
+def column_width_for(chord_mode, notehead_style):
+    """A note column's width in terminal cells. Chord mode always gets the
+    wide chord-name column; mono's *name* style (issue #83) also needs the
+    wider column, since its f"{letter}·{suffix}" duration text (e.g.
+    "Bb·16th.") doesn't fit in TAB_COLUMN_WIDTH's 3 cells --
+    `_pad_center()` would otherwise clip it to an unreadable stub like
+    "Bb·1". Mono *symbol* style keeps the narrow column: its duration
+    glyphs are combining marks composed onto the notehead, not extra text,
+    so they don't need the extra width."""
+    if chord_mode:
+        return config.TAB_COLUMN_WIDTH_CHORD
+    if notehead_style == "name":
+        return config.TAB_COLUMN_WIDTH_NAME
+    return config.TAB_COLUMN_WIDTH
+
+
+def select_visible_entries(entries, available_width, width, scroll_offset=0):
+    """Pure: which of `entries` (oldest-first, note *and* barline columns)
+    fit in `available_width` cells, and how much width they use --
+    returned as `(visible, used_width)`, `visible` oldest-first.
+
+    Walks newest to oldest accumulating each column's *actual* width
+    (barline columns are narrower than note columns --
+    config.TAB_BARLINE_WIDTH vs. `width`) until the available screen
+    width is used up. The newest column is always included even if it
+    alone doesn't fit, the same guarantee the old fixed-width
+    `max(..., 1)` gave.
+
+    `scroll_offset` (the Left/Right-arrow scrollback feature,
+    frozen-only) is a count of history entries -- note *and* barline
+    columns alike, not raw terminal character columns -- to hide off the
+    tail. They're sliced off *before* the width-budget walk, so the
+    remaining tail entry plays the role of "the newest visible column"
+    for every purpose downstream (width budget, age-from-that-point-in-
+    time), i.e. this describes exactly what the live view looked like
+    `scroll_offset` columns ago, not the current live tail with some
+    cosmetic offset applied on top."""
+    entries = list(entries)
+    scroll_offset = max(scroll_offset, 0)
+    if scroll_offset:
+        entries = entries[: max(len(entries) - scroll_offset, 0)]
+    visible = []
+    used_width = 0
+    for e in reversed(entries):
+        e_width = config.TAB_BARLINE_WIDTH if isinstance(e, BarlineEntry) else width
+        if visible and used_width + e_width > available_width:
+            break
+        used_width += e_width
+        visible.append(e)
+    visible.reverse()
+    return visible, used_width
 
 
 def _sorted_insert(container, entry):
