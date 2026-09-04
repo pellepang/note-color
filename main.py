@@ -158,6 +158,28 @@ class ReanalysisState:
         self.in_progress = False
 
 
+class PlaybackState:
+    """Frozen-buffer playback's render-thread/worker-thread handshake (map
+    #99, ticket #121, decision #109) -- the same shape as ReanalysisState
+    above, for the same reason: the render loop needs one flag to show in
+    the status line and to tell a second Enter press "stop" rather than
+    "start again", and the worker needs one flag to know it has been
+    asked to stop. Plain attribute access, safe under CPython's GIL
+    (`threading.Event` for `stop` only because the worker *waits* on it,
+    which an attribute can't do).
+
+    `note_count` is what was scheduled, kept purely for the status line
+    -- "playing N notes" is the one piece of feedback that tells a user
+    the marked range they set actually covers what they thought it
+    did."""
+
+    def __init__(self):
+        self.in_progress = False
+        self.stop = threading.Event()
+        self.note_count = 0
+        self.unavailable = None
+
+
 _ARROW_BY_FINAL_BYTE = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}
 
 # The final byte(s) that mean "this was a Shift-modified arrow" once a CSI
@@ -1074,6 +1096,128 @@ def _apply_reanalysis_result(display, result, hop_seconds):
             display.insert_barline(t)
 
 
+def is_playback_key(key):
+    """Pure: is this keypress the frozen-playback trigger? Enter, and only
+    Enter (both the `\r` a raw TTY sends and the `\n` a pipe would),
+    hardcoded rather than remappable -- same tier as this app's other
+    hardcoded Enter/arrow handling (`resolve_editor_action()`), and
+    #109's decision 4: the `tab` view already carries `P N L S Space R [
+    ] H |` plus arrows, Enter is the one unused key there, and
+    overloading `Space` (freeze, then play) was rejected because it is
+    the one key in this view whose meaning is currently crisp."""
+    return key in ("\r", "\n")
+
+
+def _handle_playback_key(key, frozen, playback_state, display, sound_engine_provider,
+                          chord_mode=False, notehead_style="symbol", legend_on=True,
+                          scroll_offset=0, mark_range=None, bpm=None):
+    """'tab' view only: Enter starts frozen-buffer playback, and a second
+    Enter stops it (map #99, ticket #121, decision #109). A no-op unless
+    the view is currently frozen -- live-view sonification is explicitly
+    out of scope (#109 dropped it on a measured ~163ms detection-to-sound
+    latency that cannot be reduced without damaging detection itself), so
+    this key must do nothing at all while the view is live.
+
+    Scope is `tab_playback.select_columns()`'s: the `[`/`]` marked range
+    if one is set, else exactly the columns `display.visible_entries()`
+    reports -- the renderer's own width-budget walk, not a second guess
+    at what is on screen.
+
+    The schedule is built here, on the render thread, from a plain
+    snapshot; the *waiting* happens on a throwaway daemon thread, the
+    same shape `_handle_reanalysis_key()` uses and for the same reason --
+    the render loop must keep polling keys (not least the Enter that
+    stops this) while playback runs.
+
+    A failure to obtain a sound engine (most plausibly
+    `synth_engine.SynthUnavailable`: SciPy is an optional extra) is
+    recorded on `playback_state.unavailable` for the status line rather
+    than raised -- a missing optional dependency must not take down a
+    view whose actual job is drawing notes."""
+    # Imported locally, same convention as playback/score_writer/pygame
+    # and SessionState.ensure_sound_engine() itself -- nothing on the
+    # capture/analysis path may pay for the sound engine's import.
+    import tab_playback
+
+    if not is_playback_key(key) or not frozen:
+        return
+    if playback_state.in_progress:
+        playback_state.stop.set()
+        return
+    columns = tab_playback.select_columns(
+        display.visible_entries(chord_mode=chord_mode, notehead_style=notehead_style,
+                                legend_on=legend_on, scroll_offset=scroll_offset),
+        list(display.entries),
+        mark_range,
+    )
+    schedule = tab_playback.build_schedule(columns, bpm=bpm)
+    if not schedule:
+        return
+    if sound_engine_provider is None:
+        playback_state.unavailable = "no engine"
+        return
+    try:
+        engine = sound_engine_provider()
+    except Exception as exc:                        # noqa: BLE001 -- surfaced in the status line
+        playback_state.unavailable = str(exc).splitlines()[0][:60] or exc.__class__.__name__
+        return
+    playback_state.unavailable = None
+    playback_state.note_count = len(schedule)
+    playback_state.stop.clear()
+    playback_state.in_progress = True
+    threading.Thread(target=_playback_worker, args=(engine, schedule, playback_state), daemon=True).start()
+
+
+def _playback_worker(engine, schedule, playback_state):
+    """Plays one `tab_playback.build_schedule()` result in real time, on a
+    throwaway thread. Each note is a note-on plus a `schedule_note_off()`
+    of its own measured length -- resolved against the audio callback's
+    own frame clock, so this thread never has to wake up again to end a
+    note (#105 decision 1's "a caller that knows a duration arranges its
+    own note-off").
+
+    Sleeps toward each onset in short bounded slices rather than one long
+    sleep per gap, so a second Enter (`playback_state.stop`) is acted on
+    within a slice instead of after the next note. `all_notes_off()` on
+    the way out covers both the stopped case and the natural end -- every
+    voice still fades through its own release either way, so stopping
+    never clicks.
+
+    Smoke-tested only against a real audio device, per this repo's "pure
+    logic unit-tested, real I/O smoke-tested" convention -- everything
+    deciding *what* is played is in `tab_playback.py`, which is pure."""
+    import sound_engine
+    import tab_playback
+
+    started = time.monotonic()
+    try:
+        for note in schedule:
+            if not _wait_until(started + note.start_seconds, playback_state.stop):
+                return
+            voice_id = engine.note_on(sound_engine.NoteOn(note.pitch, note.velocity))
+            engine.schedule_note_off(voice_id, note.duration_seconds)
+        _wait_until(started + tab_playback.schedule_duration(schedule), playback_state.stop)
+    finally:
+        engine.all_notes_off()
+        playback_state.in_progress = False
+
+
+def _wait_until(deadline, stop_event, slice_seconds=0.01):
+    """Sleeps until `time.monotonic()` reaches `deadline`, in `slice_
+    seconds` steps, returning False the moment `stop_event` is set (and
+    True if the deadline was reached un-interrupted). Deliberately not a
+    single `Event.wait(remaining)`: the schedule's own onsets are what
+    playback must stay aligned to, so each slice recomputes the remaining
+    time against the real clock rather than accumulating per-note drift."""
+    while True:
+        if stop_event.is_set():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(remaining, slice_seconds))
+
+
 def _fade_toward(value, target, dt, tau_ms):
     tau = max(tau_ms, 1) / 1000.0
     alpha = 1.0 - math.exp(-dt / tau)
@@ -1273,7 +1417,8 @@ def _hop_beats(beats_values):
 
 
 def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state,
-                      reanalysis_buffer, session_recorder, time_signature=config.DEFAULT_TIME_SIGNATURE):
+                      reanalysis_buffer, session_recorder, time_signature=config.DEFAULT_TIME_SIGNATURE,
+                      sound_engine_provider=None):
     from terminal_tab_display import TabDisplay
 
     display = TabDisplay(fps=config.TAB_FPS, scrollback_seconds=store.preference(
@@ -1314,6 +1459,14 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     # catch-up" convention every other frozen-only piece of state here
     # follows (scroll_offset, reanalysis_bpm_estimate above).
     mark_start, mark_end = None, None
+    # Frozen-buffer playback (map #99, ticket #121, decision #109):
+    # Enter-while-frozen plays what's on screen (or the marked range).
+    # Local to one run_terminal_tab call, like reanalysis_state -- there
+    # is nothing to preserve across a '|' back-to-menu round trip;
+    # `sound_engine_provider` (SessionState.ensure_sound_engine, passed
+    # by run_session) is the one piece that outlives it, so the output
+    # device isn't reopened per tool switch.
+    playback_state = PlaybackState()
 
     # time_signature arrives pre-validated as an (int, int) tuple from the
     # CLI layer (main._parse_time_signature / virtualnote.py), not a
@@ -1346,6 +1499,11 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             legend_on = _handle_legend_key(key, legend_on)
             was_frozen = frozen
             frozen = _handle_freeze_key(key, frozen)
+            if was_frozen and not frozen and playback_state.in_progress:
+                # Unfreezing stops playback: what was being played back is
+                # exactly "what is frozen on screen", and that stops being
+                # a stable thing the moment columns start scrolling again.
+                playback_state.stop.set()
             if was_frozen and not frozen:
                 # Un-freezing resumes live immediately -- no catch-up of
                 # anything that happened while frozen, same convention
@@ -1359,6 +1517,12 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             mark_start, mark_end = _handle_mark_keys(
                 key, frozen, mark_start, mark_end, display.timestamp_at_offset(scroll_offset)
             )
+            _handle_playback_key(key, frozen, playback_state, display, sound_engine_provider,
+                                  chord_mode=chord_mode, notehead_style=notehead_style,
+                                  legend_on=legend_on, scroll_offset=scroll_offset,
+                                  mark_range=_mark_range(mark_start, mark_end),
+                                  bpm=reanalysis_bpm_estimate if reanalysis_bpm_estimate is not None
+                                  else bpm_estimate)
             _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, reanalysis_result_queue,
                                     beats_per_bar, hop_seconds, mark_range=_mark_range(mark_start, mark_end))
             help_legend_on = _handle_help_legend_key(key, help_legend_on)
@@ -1458,6 +1622,11 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
             elif scroll_offset:
                 reanalysis_hint = f"  scrollback=-{scroll_offset}"
 
+            if playback_state.in_progress:
+                reanalysis_hint += f"  play={playback_state.note_count}notes(enter)"
+            elif playback_state.unavailable:
+                reanalysis_hint += f"  play=unavailable({playback_state.unavailable})"
+
             marked_range = _mark_range(mark_start, mark_end)
             if marked_range is not None:
                 reanalysis_hint += f"  mark=[{marked_range[0]:.2f}s,{marked_range[1]:.2f}s]"
@@ -1477,6 +1646,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
                 f"{_key_hint('chord_mode_toggle')}=mode", f"{_key_hint('notehead_style_toggle')}=notes",
                 f"{_key_hint('legend_toggle')}=stafflegend", f"{_key_hint('freeze_toggle')}=freeze",
                 f"{_key_hint('rhythm_reanalysis')}=reanalyze(frozen)", "left/right=scrollback(frozen)",
+                "enter=play(frozen)",
                 f"{_key_hint('mark_range_start')}/{_key_hint('mark_range_end')}=mark range(frozen)",
                 f"{_key_hint('session_record_toggle')}=record",
             ]) if help_legend_on else ""
@@ -1532,6 +1702,7 @@ def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture,
     except KeyboardInterrupt:
         return "quit"
     finally:
+        playback_state.stop.set()
         keys.restore()
         try:
             display.dump_ansi(resolved_dump)
@@ -1761,7 +1932,8 @@ def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
     if view == "tab":
         return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
                                  session.capture, session.source_state, session.reanalysis_buffer,
-                                 session.session_recorder, time_signature=time_signature)
+                                 session.session_recorder, time_signature=time_signature,
+                                 sound_engine_provider=session.ensure_sound_engine)
     return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state,
                               session.session_recorder)
 

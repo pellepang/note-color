@@ -390,3 +390,159 @@ def test_handle_property_key_navigation_resets_the_buffer():
     score = _FakeScore()
     _, buffer, _ = _handle_property_key("LEFT", score, 2, "42")
     assert buffer == ""
+
+
+# ---------------------------------------------------------------------------
+# Frozen-buffer playback wiring (map #99, ticket #121, decision #109).
+# The *what is played* logic lives in tab_playback.py (tested there); these
+# cover main.py's own start/stop/scope/failure handling. The worker thread
+# is exercised only through the observable handshake below -- no audio
+# device is ever opened, same "pure logic unit-tested, real I/O smoke-tested"
+# split every run_terminal_* loop already follows.
+# ---------------------------------------------------------------------------
+
+import threading
+import time
+
+from sound_engine import midi_pitch
+from terminal_tab_display import TabEntry
+
+
+class _FakeEngine:
+    def __init__(self):
+        self.note_ons = []
+        self.note_offs = []
+        self.all_off_calls = 0
+
+    def note_on(self, event):
+        self.note_ons.append(event)
+        return len(self.note_ons)
+
+    def schedule_note_off(self, voice_id, delay_seconds):
+        self.note_offs.append((voice_id, delay_seconds))
+
+    def all_notes_off(self):
+        self.all_off_calls += 1
+
+
+class _FakeDisplay:
+    """Just enough TabDisplay surface for _handle_playback_key: the retained
+    history and the renderer's own view of what is on screen."""
+
+    def __init__(self, entries, visible=None):
+        self.entries = list(entries)
+        self._visible = list(entries if visible is None else visible)
+        self.visible_calls = []
+
+    def visible_entries(self, **kwargs):
+        self.visible_calls.append(kwargs)
+        return list(self._visible)
+
+
+def _note(pitch_class, octave=4, duration_class="thirtysecond"):
+    return {"pitch_class": pitch_class, "octave": octave, "rgb": (1, 2, 3),
+            "label": "X", "duration_class": duration_class}
+
+
+def _wait_for(predicate, timeout=3.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return False
+
+
+def test_is_playback_key_is_enter_and_only_enter():
+    assert main.is_playback_key("\r")
+    assert main.is_playback_key("\n")
+    for key in (" ", "r", "R", "LEFT", "ENTER", None, ""):
+        assert not main.is_playback_key(key)
+
+
+def test_playback_is_a_no_op_while_the_view_is_live():
+    """Live-view sonification is explicitly out of scope (#109 dropped it on
+    a measured ~163ms latency), so Enter must do nothing at all unfrozen."""
+    state = main.PlaybackState()
+    display = _FakeDisplay([TabEntry([_note(0)], None, 0.0)])
+    engine = _FakeEngine()
+    main._handle_playback_key("\r", False, state, display, lambda: engine)
+    assert not state.in_progress and engine.note_ons == [] and display.visible_calls == []
+
+
+def test_playback_plays_the_visible_columns_full_stack_then_finishes():
+    state = main.PlaybackState()
+    entries = [
+        TabEntry([_note(0), _note(4), _note(7)], "C", 0.0),   # a chord column
+        TabEntry([_note(2)], None, 0.02),
+    ]
+    display = _FakeDisplay(entries)
+    engine = _FakeEngine()
+    main._handle_playback_key("\r", True, state, display, lambda: engine, bpm=240.0)
+    assert state.in_progress and state.note_count == 4
+    assert _wait_for(lambda: not state.in_progress)
+    assert [e.pitch for e in engine.note_ons] == [
+        midi_pitch(0, 4), midi_pitch(4, 4), midi_pitch(7, 4), midi_pitch(2, 4),
+    ]
+    assert len(engine.note_offs) == 4          # every note-on gets its own note-off arranged
+    assert engine.all_off_calls == 1
+
+
+def test_a_marked_range_scopes_playback_instead_of_what_is_visible():
+    state = main.PlaybackState()
+    entries = [TabEntry([_note(i)], None, float(i) / 100.0) for i in range(5)]
+    display = _FakeDisplay(entries, visible=entries[-1:])
+    engine = _FakeEngine()
+    main._handle_playback_key("\r", True, state, display, lambda: engine,
+                               mark_range=(0.0, 0.02), bpm=240.0)
+    assert state.note_count == 3
+    assert _wait_for(lambda: not state.in_progress)
+    assert [e.pitch for e in engine.note_ons] == [midi_pitch(i, 4) for i in range(3)]
+
+
+def test_a_second_enter_stops_playback_early():
+    state = main.PlaybackState()
+    entries = [TabEntry([_note(i)], None, float(i)) for i in range(4)]   # a second apart
+    display = _FakeDisplay(entries)
+    engine = _FakeEngine()
+    main._handle_playback_key("\r", True, state, display, lambda: engine, bpm=240.0)
+    assert _wait_for(lambda: len(engine.note_ons) == 1)
+    main._handle_playback_key("\r", True, state, display, lambda: engine)
+    assert _wait_for(lambda: not state.in_progress)
+    assert len(engine.note_ons) == 1           # the remaining columns never sounded
+    assert engine.all_off_calls == 1           # ...and the stop still released cleanly
+
+
+def test_nothing_playable_never_reaches_for_a_sound_engine():
+    """A barline-only/silent screen shouldn't open the audio device at all."""
+    state = main.PlaybackState()
+    display = _FakeDisplay([TabEntry([_note(None)], None, 0.0)])
+
+    def _provider():
+        raise AssertionError("the engine must not be requested for an empty scope")
+
+    main._handle_playback_key("\r", True, state, display, _provider)
+    assert not state.in_progress and state.unavailable is None
+
+
+def test_an_unavailable_sound_engine_is_reported_not_raised():
+    state = main.PlaybackState()
+    display = _FakeDisplay([TabEntry([_note(0)], None, 0.0)])
+
+    def _provider():
+        raise RuntimeError("SciPy is required: pip install -e .[synth]")
+
+    main._handle_playback_key("\r", True, state, display, _provider)
+    assert not state.in_progress
+    assert "SciPy" in state.unavailable
+
+    state2 = main.PlaybackState()
+    main._handle_playback_key("\r", True, state2, display, None)
+    assert state2.unavailable == "no engine"
+
+
+def test_wait_until_returns_early_when_stopped():
+    stop = threading.Event()
+    stop.set()
+    assert main._wait_until(time.monotonic() + 10.0, stop) is False
+    assert main._wait_until(time.monotonic() - 1.0, threading.Event()) is True
