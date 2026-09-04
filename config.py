@@ -536,3 +536,37 @@ SYNTH_VELOCITY_FILTER_OCTAVES = 4.0  # how far below the patch cutoff velocity 0
 SYNTH_PINK_GAIN = 11.5           # make-up gain after the 1/f pinking filter so pink and white noise sit at
                                   # the same RMS (measured 0.087x on uniform white noise, see synth_engine.py)
                                   # -- the `colour` knob changes spectrum, not loudness.
+
+# --- Synth tool (map #99, ticket #119, decision #107) ---
+# The standalone `synth` menu tool: which key plays what, how a parameter
+# sweeps, and how the input layer is lit. Provisional by-ear values in the
+# same spirit as PLAYBACK_HARMONIC_WEIGHTS -- none is load-bearing.
+SYNTH_BASE_OCTAVE = 3            # octave of the *lower* row of the two-octave layout (z = C3), so the two
+                                  # built-in keyboard octaves span C3..B4 -- centred on middle C, the register
+                                  # a bare QWERTY keyboard is most often played in.
+SYNTH_OCTAVE_SHIFT_MAX = 3       # how far Shift+Up/Shift+Down can transpose the note keys, +/- octaves. Bounded
+                                  # so a shift can never walk the whole layout off the bottom or top of MIDI.
+SYNTH_FIXED_NOTE_SECONDS = 0.35  # note length on a terminal with no key-release reporting (decision #107 point
+                                  # 7). Long enough to hear a filter envelope open, short enough that a fast
+                                  # passage doesn't smear -- and the status line says plainly that this is what
+                                  # is happening, rather than leaving "why won't notes sustain?" a mystery.
+SYNTH_PARAM_COARSE_STEPS = 10    # Shift+Left/Right multiplier: one coarse press == ten ordinary ones. The
+                                  # `Shift`-is-the-escape-hatch rule (#107 point 5) applied to a sweep that
+                                  # would otherwise take a hundred presses to cross the filter's range.
+SYNTH_PARAM_CUTOFF_RATIO = 1.059463094359295  # 2**(1/12): one Left/Right press moves the cutoff a semitone,
+                                  # so a filter sweep is the same musical distance per press everywhere in
+                                  # the 20Hz-20kHz range instead of crawling low and leaping high.
+SYNTH_PARAM_LOG_FLOOR = 0.001    # smallest value a log-scaled parameter steps *up* to from its minimum -- a
+                                  # ratio step can never leave zero on its own, so the first press has to jump.
+POLYPHONY_SYNTH_DUAL = 28        # voice cap while the synth tool's layout 2 has a kit and a synth patch playable
+                                  # at once (#107's implementation note). Lower than POLYPHONY_STANDALONE
+                                  # because the same budget is now shared by two engines whose per-voice costs
+                                  # differ, and a drum hit arriving to find every slot held by sustained synth
+                                  # notes is the audible failure this margin buys off.
+SYNTH_KEY_DIM_LIGHTNESS = 0.20   # lightness of an idle key in the input layer -- the same "visible but plainly
+                                  # off" floor DIM_LIGHTNESS gives the wheel view's inactive wedges.
+SYNTH_KEY_LIT_LIGHTNESS = 0.62   # lightness of a key while its note is sounding.
+SYNTH_KEY_TAU_MS = 45            # ColorAnimator crossfade for one key. Much faster than the fill view's, since
+                                  # a key press is a discrete event to be seen landing, not a colour to dwell in.
+SYNTH_KEY_PULSE_DECAY_MS = 220
+SYNTH_KEY_PULSE_BOOST = 0.5

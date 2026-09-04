@@ -257,6 +257,17 @@ class VoiceManager:
         except (TypeError, ValueError):
             return config.POLYPHONY_STANDALONE
 
+    def set_polyphony(self, value):
+        """Replaces the budget with an int, a zero-argument callable, or
+        None (restoring `config.POLYPHONY_STANDALONE`). Public because a
+        *context* can change within one process's life without the engine
+        being rebuilt -- the synth tool's layout 2 plays a kit and a synth
+        patch from one cap and wants a lower figure than a single-engine
+        view does (#107's implementation note), and it switches on a Tab
+        press."""
+        self._polyphony = config.POLYPHONY_STANDALONE if value is None else value
+        return self._polyphony
+
     def active_count(self):
         with self._lock:
             return len(self._records)
@@ -429,6 +440,16 @@ class SoundEngine:
         self.effects.reset()
         with self._pending_lock:
             self._pending_offs = {}
+
+    def set_polyphony_override(self, value):
+        """Point the voice manager's budget at something other than the
+        two `polyphony_for()` context settings -- or back at them, with
+        `None`. The one caller today is the synth tool, whose dual layout
+        is a third context (see `synth_tool.polyphony_for_layout()`);
+        keeping it an override rather than a third branch inside
+        `polyphony_for()` means `sound_engine` stays ignorant of what a
+        layout is."""
+        return self.voices.set_polyphony(self._polyphony if value is None else value)
 
     # -- the effects bus (ticket #114) ------------------------------------
 
