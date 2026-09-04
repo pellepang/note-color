@@ -149,6 +149,39 @@ def toggle_note_at_cursor(column, row, key_fifths=0):
     return True
 
 
+def place_note_at_pitch(column, pitch_class, octave):
+    """Piano-mode note entry (map #99, ticket #120): adds an exact pitch
+    to `column`, keeping the column's notes in ascending pitch order the
+    way `toggle_note_at_cursor()` does. Unlike that function this takes a
+    *pitch*, not a staff row -- a played key names a specific note
+    directly, with no key-signature spelling to infer -- and it is
+    idempotent: pressing the same key twice inside one chord group leaves
+    one note rather than stacking duplicates. Returns the note's staff
+    row, so the caller can move the cursor onto what it just played.
+    Never removes anything: piano mode is note *entry*, and a key press
+    silently deleting an existing note would be a trap."""
+    for note in column.notes:
+        if note.pitch_class == pitch_class and note.octave == octave:
+            return staff_row(pitch_class, octave)
+    column.notes.append(EditorNote(pitch_class=pitch_class, octave=octave))
+    column.notes.sort(key=lambda n: n.octave * 12 + n.pitch_class)
+    return staff_row(pitch_class, octave)
+
+
+def append_column(score, duration_class=None):
+    """Appends a new empty (Rest) column at the end of the score and
+    returns its index -- what piano-mode entry does when a sequence of
+    played notes runs off the end of the score, so playing simply keeps
+    writing instead of stopping at the last existing column.
+    `duration_class` defaults to DEFAULT_DURATION_CLASS; the caller
+    normally passes the current column's own (see
+    score_audition.new_column_duration()) so a run of eighth notes stays
+    eighth notes."""
+    score.columns.append(EditorColumn(
+        notes=[], duration_class=duration_class or DEFAULT_DURATION_CLASS))
+    return len(score.columns) - 1
+
+
 def transpose_note_at_cursor(column, row, direction):
     """`transpose_up`/`transpose_down`: shifts the note at `row` a
     semitone (direction=+1/-1). A no-op (returns None) if there's no note
@@ -295,12 +328,21 @@ def _cell_swatch(rgb, text, width):
     return f"\033[48;2;{r};{g};{b}m\033[38;2;{fg[0]};{fg[1]};{fg[2]}m{_pad_center(text, width)}\033[0m"
 
 
-def render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_legend=""):
+def render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_legend="",
+           playhead_col=None):
     """Draws the fixed grand-staff editor. Smoke-tested manually only,
     per this module's docstring -- the layout below (viewport scrolling,
     column widths, cursor highlight) mirrors terminal_tab_display.py's
     render() shape closely, minus its age-fade/barline/freeze machinery,
-    none of which applies to a fixed, loaded-once buffer."""
+    none of which applies to a fixed, loaded-once buffer.
+
+    `playhead_col` (map #99, ticket #120) marks the column currently
+    sounding during play-from-cursor: it takes over the viewport's
+    focus, which is what makes "the view scrolls to follow the playhead"
+    true without moving the user's own cursor, and its cells render
+    reverse-video so the playhead is visible even when it is nowhere
+    near the cursor. None outside playback, where everything below
+    behaves exactly as it did before this parameter existed."""
     size = shutil.get_terminal_size(fallback=(80, 24))
     cols, rows = size
 
@@ -323,7 +365,8 @@ def render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_
     legend_width = config.TAB_LEGEND_WIDTH
     available_width = max(cols - legend_width, 0)
     visible_count = max(available_width // width, 1)
-    start, end = visible_column_range(cursor_col, len(score.columns), visible_count)
+    focus_col = cursor_col if playhead_col is None else playhead_col
+    start, end = visible_column_range(focus_col, len(score.columns), visible_count)
 
     lines = []
     if chords_only:
@@ -346,6 +389,7 @@ def render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_
         for i in range(start, end):
             column = score.columns[i]
             is_cursor_cell = (i == cursor_col and screen_row == cursor_row)
+            is_playhead_cell = (playhead_col is not None and i == playhead_col)
             if chords_only:
                 cell = LEDGER_CHAR * width if screen_row in STAFF_LINE_ROWS else " " * width
                 if is_cursor_cell:
@@ -360,12 +404,15 @@ def render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_
                 # A cursor sitting on a real note reverse-videos the
                 # whole cell instead of its usual color swatch -- the
                 # cursor always visibly wins over a note's own color.
-                cell = (f"\033[7m{_pad_center(text, width)}\033[0m" if is_cursor_cell
+                cell = (f"\033[7m{_pad_center(text, width)}\033[0m"
+                        if (is_cursor_cell or is_playhead_cell)
                         else _cell_swatch(_editor_note_rgb(note.pitch_class), text, width))
             elif is_cursor_cell:
                 cell = f"\033[7m{_pad_center(CURSOR_MARKER, width)}\033[0m"
             elif screen_row in ledger_rows_for(column, bottom, top) or screen_row in STAFF_LINE_ROWS:
                 cell = LEDGER_CHAR * width
+                if is_playhead_cell:
+                    cell = f"\033[7m{cell}\033[0m"
             else:
                 cell = " " * width
             cells.append(cell)
