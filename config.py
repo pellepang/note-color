@@ -398,3 +398,18 @@ POLYPHONY_WITH_DETECTION = 24    # the same cap while this app's live detection 
                                   # p99 of the callback's budget (GIL contention, not CPU headroom -- #100),
                                   # dropping the safe figure by nearly half. Overridable via
                                   # [preferences].polyphony_with_detection.
+
+# --- Sampler engine (map #99, build ticket #116) ---
+SAMPLER_ATTACK_SECONDS = 0.002   # click-suppression fade-in at the very start of a sample. Not a musical
+                                  # envelope (a sample already carries its own attack -- that is the point of
+                                  # sampling); this exists only so a recording that happens to start on a
+                                  # non-zero sample doesn't begin with a step discontinuity. ~2ms is below
+                                  # the ~10ms where a fade starts being heard as a fade rather than as a
+                                  # clean start.
+SAMPLER_RELEASE_SECONDS = 0.08   # fade-out on note-off, applied ONLY to a looping zone -- a one-shot (a
+                                  # drum) ignores note-off and plays to its natural end, which is what makes
+                                  # a pad work with a fixed-duration key tap (see sampler.py).
+SAMPLER_CHOKE_SECONDS = 0.006    # fade-out when a zone is cut by another in the same choke_group (closed
+                                  # hi-hat over open). Deliberately much shorter than the release: a choke
+                                  # must read as a cutoff, not as a fade, while still being long enough to
+                                  # avoid the click of dropping a waveform mid-cycle to zero.
