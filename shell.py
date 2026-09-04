@@ -107,7 +107,12 @@ def run_menu_loop(session, fps=None, perf_mode_override=None):
             # also directly reachable as `virtualnote edit <path>`), so its
             # result has to be handled the same way run_session's is below
             # -- but it still never touches SessionState/audio, so it can't
-            # go through run_session() either. score_editor_picker.
+            # go through run_session()'s audio-*input* lifecycle either --
+            # `session` is handed over only so the editor's audition and
+            # playback (ticket #120) can borrow this process's one
+            # SoundEngine (#105) instead of opening a second output
+            # stream, exactly as menu -> synth tool -> editor must be able
+            # to do without dropping the audio device. score_editor_picker.
             # run_score_editor_picker() shows the file picker first (an
             # existing score, or "New score..."); a cancelled picker (no
             # path chosen) just loops back to the menu, same as backing out
@@ -121,7 +126,7 @@ def run_menu_loop(session, fps=None, perf_mode_override=None):
             if path is None:
                 continue
             try:
-                result = run_score_editor(path)
+                result = run_score_editor(path, session=session)
             except KeyboardInterrupt:
                 return
             if result == "quit":

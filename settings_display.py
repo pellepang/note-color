@@ -60,6 +60,13 @@ KEYBIND_ACTIONS = [
     "chord_builder_exit",
     "save",
     "score_properties",
+    # Score editor audition/piano mode/playback (map #99, ticket #120).
+    # The editor's loop region reuses mark_range_start/mark_range_end
+    # above rather than adding a second pair -- see score_audition.py.
+    "piano_mode",
+    "play_from_cursor",
+    "metronome_toggle",
+    "audition_toggle",
 ]
 
 _KEYBIND_LABELS = {
@@ -85,6 +92,10 @@ _KEYBIND_LABELS = {
     "chord_builder_exit": "Score editor: leave Chord builder",
     "save": "Score editor: save",
     "score_properties": "Score editor: edit time/key/tempo (inline)",
+    "piano_mode": "Score editor: piano note-entry mode",
+    "play_from_cursor": "Score editor: play from cursor",
+    "metronome_toggle": "Score editor: metronome during playback",
+    "audition_toggle": "Score editor: audition notes on cursor move",
 }
 
 # A generic numeric preference row -- key is the config.toml [preferences]
