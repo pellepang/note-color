@@ -362,7 +362,10 @@ PLAYBACK_SAMPLE_RATE = 44100     # independent of the live pipeline's SAMPLE_RAT
                                   # so it defaults to a standard audio-output rate instead of piggybacking
                                   # on a value picked for a different purpose.
 PLAYBACK_BLOCK_SIZE = 512        # OutputStream callback block size -- 512/44100 =~ 11.6ms upper bound on
-                                  # trigger_note()-to-audible latency (see playback.py's LiveScheduler docstring).
+                                  # note_on()-to-audible latency (sound_engine.SoundEngine). Kept at 512
+                                  # deliberately: prototype #100 measured PipeWire reporting an identical
+                                  # 34.8ms stream latency at 128/256/512, so a smaller block buys no latency
+                                  # at all and only tightens the callback's deadline.
 PLAYBACK_ATTACK_SECONDS = 0.01
 PLAYBACK_DECAY_SECONDS = 0.08
 PLAYBACK_SUSTAIN_LEVEL = 0.65    # 0..1, fraction of peak amplitude held during a note's sustain segment
@@ -373,3 +376,17 @@ PLAYBACK_HARMONIC_WEIGHTS = (1.0, 0.4, 0.15)  # fundamental + 2nd + 3rd partial 
                                                 # issue #28's "a few adjustable waveforms is the ceiling
                                                 # without real modelling work" framing. Picked by ear, not
                                                 # measured -- revisit freely, not a tuned/load-bearing constant.
+
+# --- Sound engine (map #99, decision #105; figures measured by prototype #100) ---
+POLYPHONY_STANDALONE = 40        # hard voice cap when nothing else in the process is doing heavy work (the
+                                  # standalone synth tool, the score editor, `virtualnote replay`). #100
+                                  # measured 40 voices sustained with zero driver xruns inside a real
+                                  # sounddevice callback, 48 marginal, 64 failing -- a measured ceiling, not
+                                  # a guessed one. Overridable live via [preferences].polyphony_standalone
+                                  # (Settings screen): the binding constraint is what else the process is
+                                  # doing, which no startup hardware probe can see (#100).
+POLYPHONY_WITH_DETECTION = 24    # the same cap while this app's live detection is running: one thread doing
+                                  # the real 2048-point FFT at ~86 hops/s costs ~1.3ms/block mean and ~7ms
+                                  # p99 of the callback's budget (GIL contention, not CPU headroom -- #100),
+                                  # dropping the safe figure by nearly half. Overridable via
+                                  # [preferences].polyphony_with_detection.
