@@ -570,3 +570,20 @@ SYNTH_KEY_TAU_MS = 45            # ColorAnimator crossfade for one key. Much fas
                                   # a key press is a discrete event to be seen landing, not a colour to dwell in.
 SYNTH_KEY_PULSE_DECAY_MS = 220
 SYNTH_KEY_PULSE_BOOST = 0.5
+
+# --- Synth recording + quantized import (map #99, ticket #122, decision #110) ---
+PLAYED_NOTE_REFERENCE_BPM = 90.0  # the tempo `session_recorder.py` snaps a *played* note's measured
+                                  # `duration_seconds` against to fill the log's `duration_class` field. A synth
+                                  # performance has no tempo estimate at all -- nothing in the synth tool tracks a
+                                  # beat -- but `duration_class` is what `virtualnote replay` draws its duration
+                                  # glyphs from, so writing every played note as the same DEFAULT_DURATION_CLASS
+                                  # would make a fast passage replay as a row of identical quarter notes. The raw
+                                  # `duration_seconds` is written unrounded alongside it, so this derived field can
+                                  # always be recomputed against a different tempo later (which is exactly what
+                                  # log_import.py does on the way into the editor). Matches
+                                  # score_editor_state.DEFAULT_TEMPO_BPM, so an imported score's own default tempo
+                                  # and the glyphs a replay drew agree by construction.
+IMPORT_DEFAULT_GRID = "sixteenth"  # log_import.py's starting quantization grid (decision #110 point 3: capture raw,
+                                  # quantize at import, with a selectable grid). A sixteenth is fine enough to keep
+                                  # ordinary played rhythm intact and coarse enough that small human timing spread
+                                  # doesn't fragment a phrase into unreadable dotted values.
