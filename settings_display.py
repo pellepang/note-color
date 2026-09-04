@@ -134,6 +134,17 @@ NUMERIC_FIELDS = [
         1, 128, 4,
         config.POLYPHONY_WITH_DETECTION,
     ),
+    # Ticket #119's third context: the synth tool's layout 2 plays a kit
+    # and a synth patch from one cap, so the risk is a drum hit arriving
+    # to find every slot held by sustained synth notes -- starvation, not
+    # overrun. Its own figure rather than a compromise on the other two,
+    # for the same reason those two are separate.
+    NumericFieldSpec(
+        "polyphony_synth_dual",
+        "Polyphony, synth kit+keys (voices)",
+        1, 128, 4,
+        config.POLYPHONY_SYNTH_DUAL,
+    ),
 ]
 
 # One row per keybind action, then one row per note (sharp spelling,

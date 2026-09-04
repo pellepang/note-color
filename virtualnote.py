@@ -27,7 +27,7 @@ import argparse
 
 import config
 from main import (SessionState, _positive_float, _parse_time_signature, run_batch_transcribe, run_replay_session,
-                   run_score_editor, run_session)
+                   run_score_editor, run_session, run_synth_tool)
 from shell import run_menu_loop
 
 
@@ -135,6 +135,13 @@ def build_parser():
     # No _add_common_flags(edit_p) -- same reasoning as transcribe/replay:
     # no live audio, so --color-scheme/--sensitivity/--source don't apply.
 
+    sub.add_parser("synth", help="standalone synth -- play the QWERTY keyboard and pads (map #99)")
+    # No _add_common_flags(synth_p) and no arguments at all: the synth is
+    # an instrument, not a view of captured audio, so it takes no input
+    # source and no color scheme. Everything it plays is chosen live from
+    # inside the tool (decision #107's inline overlays), which is the
+    # whole point of not making patch loading a separate screen.
+
     return parser
 
 
@@ -167,6 +174,17 @@ def main(argv=None):
     # same as main()'s own standalone dispatch below.
     if args.view == "edit":
         run_score_editor(args.file)
+        return
+
+    # 'synth' (map #99, ticket #119) is the third of these: an instrument,
+    # so it never opens the *microphone* and never goes through
+    # run_session(). It does want a SoundEngine, but building one is
+    # exactly what run_synth_tool() does when handed no session, so
+    # (unlike shell.py's live-menu branch, which passes the process's
+    # existing one) the standalone path stays a bare early return like
+    # transcribe/replay/edit above.
+    if args.view == "synth":
+        run_synth_tool()
         return
 
     # 'circle' is colorize's old name for the wheel view -- kept as a

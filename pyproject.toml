@@ -110,4 +110,13 @@ py-modules = [
     "stats_display",
     "tone_engine",
     "wav_io",
+    # Tickets #120/#121 -- missing from this list when they merged, which
+    # would have left `pip install .` short of two modules `main` imports.
+    "score_audition",
+    "tab_playback",
+    # Ticket #119, the synth tool.
+    "synth_display",
+    "synth_layout",
+    "synth_params",
+    "synth_tool",
 ]

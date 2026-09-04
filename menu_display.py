@@ -47,6 +47,7 @@ MENU_ITEMS = TOOLS + [
     ("prototypes", "Prototypes -- browse prototypes/ READMEs"),
     ("stats", "Stats -- historical play stats"),
     ("edit", "Edit -- score editor (load/create MusicXML)"),
+    ("synth", "Synth -- play the QWERTY keyboard & pads"),
 ]
 
 

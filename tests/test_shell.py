@@ -6,6 +6,7 @@ here -- the threaded run_* loops and the interactive menu loop itself are
 smoke-tested manually (see the issue), not driven by pytest."""
 
 import argparse
+import inspect
 
 import pytest
 
@@ -267,3 +268,65 @@ def test_parse_time_signature_valid():
 def test_parse_time_signature_rejects_bad_input(text):
     with pytest.raises(argparse.ArgumentTypeError):
         _parse_time_signature(text)
+
+
+# --- the synth tool's menu entry (map #99, ticket #119) -------------------
+
+def test_menu_offers_the_synth_tool_as_its_own_entry():
+    names = [name for name, _desc in MENU_ITEMS]
+    assert "synth" in names
+    # Not a run_session tool: it never opens the microphone.
+    assert "synth" not in [name for name, _desc in TOOLS]
+
+
+def test_synth_is_reachable_by_its_own_digit_like_every_other_entry():
+    menu = MenuDisplay()
+    index = [name for name, _desc in MENU_ITEMS].index("synth")
+    _handle_menu_key(str(index + 1), menu)
+    assert menu.current_view() == "synth"
+
+
+def test_synth_has_its_own_dispatch_branch_rather_than_run_session():
+    # Like `edit` (#98): it returns the same "menu"/"quit" sentinel a real
+    # tool does, so its result must be interpreted -- but it must never go
+    # through run_session()'s ensure_started(), which would open the mic
+    # for an instrument that has no use for it.
+    import shell
+
+    assert "synth" not in shell._NON_SESSION_SCREENS
+    source = inspect.getsource(shell.run_menu_loop)
+    assert 'selection == "synth"' in source
+
+
+def test_synth_branch_hands_over_the_session_and_honours_the_quit_sentinel():
+    # `session` is passed for one reason only: the process-wide
+    # SoundEngine (#105), so menu -> synth -> editor never tears down and
+    # reopens the output stream. The menu loop itself is smoke-tested
+    # manually per this repo's convention, so its source is what's
+    # checked here rather than a driven loop.
+    import shell
+
+    import main
+
+    assert shell.run_synth_tool is main.run_synth_tool
+    body = inspect.getsource(shell.run_menu_loop)
+    branch = body.split('selection == "synth"')[1].split(
+        "if selection in _NON_SESSION_SCREENS:")[0]
+    # Executable lines only -- the branch's own comment explains *why* it
+    # doesn't call ensure_started(), and would otherwise match a naive
+    # substring check for it.
+    code = "\n".join(line for line in branch.splitlines()
+                     if line.strip() and not line.strip().startswith("#"))
+    assert "run_synth_tool(session=session)" in code
+    assert 'result == "quit"' in code
+    assert "ensure_started" not in code
+
+
+def test_virtualnote_synth_subcommand_takes_no_audio_input_flags():
+    # An instrument, not a view of captured audio: no --source, no
+    # --color-scheme to apply. Everything it plays is chosen live from
+    # inside the tool (decision #107's inline overlays).
+    args = build_parser().parse_args(["synth"])
+    assert args.view == "synth"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["synth", "--source", "loopback"])

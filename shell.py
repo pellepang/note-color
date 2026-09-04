@@ -20,7 +20,7 @@ import sys
 import time
 
 import config
-from main import RawKeys, run_score_editor, run_session
+from main import RawKeys, run_score_editor, run_session, run_synth_tool
 from menu_display import MenuDisplay, MENU_ITEMS
 from settings_display import run_settings_screen
 from credits_display import run_credits_screen
@@ -127,6 +127,27 @@ def run_menu_loop(session, fps=None, perf_mode_override=None):
                 continue
             try:
                 result = run_score_editor(path, session=session)
+            except KeyboardInterrupt:
+                return
+            if result == "quit":
+                return
+            continue
+
+        if selection == "synth":
+            # The synth tool (map #99, ticket #119, decision #107) sits in
+            # exactly `edit`'s dispatch slot and for exactly `edit`'s
+            # reason: it returns the same "menu"/"quit" sentinel a real
+            # run_session tool does, so its result has to be interpreted
+            # rather than always looping back like the four
+            # _NON_SESSION_SCREENS entries -- but it is an *instrument*,
+            # with no more business opening the microphone than the score
+            # editor has, so it must not go through run_session()'s
+            # ensure_started(). `session` is handed over for the one thing
+            # it does need: this process's single SoundEngine (#105), so
+            # menu -> synth -> editor -> a live view never tears down and
+            # reopens the output stream.
+            try:
+                result = run_synth_tool(session=session)
             except KeyboardInterrupt:
                 return
             if result == "quit":
