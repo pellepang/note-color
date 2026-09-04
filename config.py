@@ -413,3 +413,35 @@ SAMPLER_CHOKE_SECONDS = 0.006    # fade-out when a zone is cut by another in the
                                   # hi-hat over open). Deliberately much shorter than the release: a choke
                                   # must read as a cutoff, not as a fade, while still being long enough to
                                   # avoid the click of dropping a waveform mid-cycle to zero.
+
+# --- Effects chain (map #99, ticket #114, implementing research #104; effects.py) ---
+# Delay. Defaults are pedalboard/JUCE's own (#104 §2): a quarter-second slap with a
+# third of it fed back, mixed 30% wet. Range ceilings bound the circular buffer.
+EFFECT_DELAY_TIME_SECONDS = 0.25
+EFFECT_DELAY_MIN_SECONDS = 0.001
+EFFECT_DELAY_MAX_SECONDS = 2.0
+EFFECT_DELAY_FEEDBACK = 0.35
+EFFECT_DELAY_MAX_FEEDBACK = 0.95  # |g| < 1 is the stability condition; 0.95 =~ 90 repeats to -60dB,
+                                   # already "forever" musically, so nothing is lost by stopping short of 1
+EFFECT_DELAY_MIX = 0.3
+EFFECT_DELAY_DAMPING = 0.0        # feedback-path high-end rolloff, 0..1 -- OFF by default: #104 measured
+                                   # nothing about damping (it named a one-pole as *convention*), so this is
+                                   # a by-ear knob in PLAYBACK_HARMONIC_WEIGHTS' provisional spirit, not tuned
+# Chorus. Ranges from juce::dsp::Chorus (#104 §3); defaults =~ +-22 cents peak detune.
+EFFECT_CHORUS_RATE_HZ = 1.0
+EFFECT_CHORUS_MAX_RATE_HZ = 100.0
+EFFECT_CHORUS_DEPTH_MS = 2.0
+EFFECT_CHORUS_CENTRE_DELAY_MS = 7.0   # "around 7-8 ms" is the classic chorus; lower + feedback = flanger
+EFFECT_CHORUS_MIN_DELAY_MS = 1.0
+EFFECT_CHORUS_MAX_DELAY_MS = 100.0    # JUCE's own delay-line ceiling; the buffer is ~17KB at 44100Hz
+EFFECT_CHORUS_MIX = 0.5
+EFFECT_CHORUS_FEEDBACK = 0.0          # -1..1 in JUCE (negative is a real variant); clamped to
+                                       # +-EFFECT_DELAY_MAX_FEEDBACK here for the same stability reason
+EFFECT_CHORUS_VOICES = 3              # taps at spread LFO phases sharing one buffer; #104 measured 3 voices
+                                       # at 1.6% of the block budget, i.e. nearly free
+EFFECT_CHORUS_MAX_VOICES = 8
+# Offline-render tail (effects.tail_seconds): how long a delay's repeats are allowed to ring past
+# the last note before a pre-rendered buffer is cut, bounded so a near-1.0 feedback can't ask
+# for minutes of silence-plus-echo.
+EFFECT_TAIL_FLOOR = 0.001             # -60dB: a repeat this quiet counts as gone
+EFFECT_MAX_TAIL_SECONDS = 10.0

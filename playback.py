@@ -142,7 +142,7 @@ def synthesize_note(pitch_class, octave, duration_seconds, sample_rate=None, vel
     return (wave * envelope * velocity).astype(np.float32)
 
 
-def render_offline(notes, sample_rate=None):
+def render_offline(notes, sample_rate=None, effects=None):
     """Pre-renders `notes` (an iterable of `(onset_seconds, pitch_class,
     octave, duration_seconds)` tuples -- a `velocity` 5th element is
     optional, defaulting to 1.0) into one mono float32 NumPy buffer,
@@ -157,7 +157,16 @@ def render_offline(notes, sample_rate=None):
     there is no scheduling jitter to reason about at all -- see this
     module's docstring for why offline pre-render is the right mode for
     `virtualnote transcribe --play` specifically (a whole
-    TranscriptionResult already exists before playback starts)."""
+    TranscriptionResult already exists before playback starts).
+
+    `effects` (ticket #114) is an optional `effects.Effect` -- normally
+    an `EffectsChain` -- applied once to the whole summed mix, after the
+    notes are added together and before the `np.tanh` soft-clip: the
+    same shared-bus placement `sound_engine.SoundEngine._callback()`
+    uses live, so a patch's chain sounds the same offline as it does
+    under the keys. The buffer is extended by `effects.tail_seconds()`
+    so a delay's repeats ring out instead of being cut at the last
+    note's end. `None` (the default) renders exactly as before."""
     sample_rate = sample_rate or config.PLAYBACK_SAMPLE_RATE
     notes = list(notes)
     if not notes:
@@ -176,6 +185,14 @@ def render_offline(notes, sample_rate=None):
     buffer = np.zeros(max(end_samples), dtype=np.float64)
     for onset_sample, samples in rendered:
         buffer[onset_sample:onset_sample + len(samples)] += samples
+    if effects is not None:
+        from effects import tail_seconds
+
+        tail = int(round(tail_seconds(effects) * sample_rate))
+        mix = np.zeros(len(buffer) + tail, dtype=np.float32)
+        mix[:len(buffer)] = buffer
+        effects.prepare(sample_rate, config.PLAYBACK_BLOCK_SIZE)
+        buffer = effects.process(mix)
     return np.tanh(buffer).astype(np.float32)
 
 

@@ -378,3 +378,52 @@ def test_stop_is_idempotent_without_ever_starting_and_drops_voices():
     engine.stop()
     engine.stop()
     assert engine.voices.active_count() == 0
+
+
+# --- the effects bus (ticket #114) ------------------------------------------
+
+def test_engine_starts_with_an_empty_chain_prepared_to_its_own_rate_and_block():
+    from effects import EffectsChain
+
+    engine = make_engine()
+    assert isinstance(engine.effects, EffectsChain) and len(engine.effects) == 0
+    chain = engine.set_effects(EffectsChain([_wet_delay()]))
+    assert engine.effects is chain
+    assert chain[0].sample_rate == 1000 and chain[0].block_size == 100     # prepare()d by set_effects
+    assert engine.set_effects(None) is engine.effects and len(engine.effects) == 0
+
+
+def _wet_delay():
+    from effects import Delay
+
+    return Delay(time=0.1, feedback=0.0, mix=1.0)   # 100 samples at the 1000Hz test rate = one block
+
+
+def test_callback_runs_the_effects_bus_on_the_summed_mix_before_the_clip():
+    from effects import EffectsChain
+
+    engine = make_engine(effects=EffectsChain([_wet_delay()]))
+    engine.note_on(60)
+    engine.note_on(64)                              # two FakeVoices, each rendering 1.0
+    outdata = np.zeros((100, 1), dtype=np.float32)
+    engine._callback(outdata, 100, None, None)
+    assert np.all(outdata[:, 0] == 0.0)             # fully wet, one block of delay: nothing yet
+    engine._callback(outdata, 100, None, None)
+    assert np.allclose(outdata[:, 0], np.tanh(2.0), atol=1e-6)   # the sum arrives one block late, then clips
+
+
+def test_effects_state_survives_all_notes_off_but_not_stop():
+    from effects import EffectsChain
+
+    engine = make_engine(effects=EffectsChain([_wet_delay()]))
+    engine.note_on(60)
+    outdata = np.zeros((100, 1), dtype=np.float32)
+    engine._callback(outdata, 100, None, None)
+    engine.all_notes_off()                          # the tail must keep ringing (#104: the whole point of a delay)
+    engine.voices.clear()                           # (FakeVoice never finishes on its own)
+    engine._callback(outdata, 100, None, None)
+    assert np.all(outdata[:, 0] > 0.0)
+    engine._callback(outdata, 100, None, None)
+    engine.stop()                                   # teardown drops the tail with the voices
+    engine._callback(outdata, 100, None, None)
+    assert np.all(outdata[:, 0] == 0.0)
