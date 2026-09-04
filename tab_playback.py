@@ -48,7 +48,7 @@ heard matches the glyph that is drawn.
 from collections import namedtuple
 
 import config
-from duration_tracker import BEATS_BY_DURATION_CLASS, DEFAULT_DURATION_CLASS
+from duration_tracker import beats_for_duration_class
 from sound_engine import midi_pitch
 
 PlaybackNote = namedtuple(
@@ -108,10 +108,7 @@ def note_duration_seconds(duration_class, bpm):
     `[TAB_PLAYBACK_MIN_NOTE_SECONDS, TAB_PLAYBACK_MAX_NOTE_SECONDS]` so
     neither a very fast nor a very slow tempo estimate can turn a note
     into a click or a drone."""
-    beats = BEATS_BY_DURATION_CLASS.get(
-        duration_class if duration_class is not None else DEFAULT_DURATION_CLASS,
-        BEATS_BY_DURATION_CLASS[DEFAULT_DURATION_CLASS],
-    )
+    beats = beats_for_duration_class(duration_class)
     if not bpm or bpm <= 0:
         bpm = config.TAB_PLAYBACK_DEFAULT_BPM
     seconds = beats * 60.0 / bpm
