@@ -117,3 +117,34 @@ def test_render_offline_buffer_length_matches_latest_ending_note():
     expected_min_len = int(round(1.0 * sample_rate)) + int((0.1 + config.PLAYBACK_RELEASE_SECONDS) * sample_rate)
     # Allow a small tolerance for rounding of onset/duration -> sample counts.
     assert abs(len(buffer) - expected_min_len) <= 2
+
+
+# --- the offline effects bus (ticket #114) ----------------------------------
+
+def test_render_offline_applies_effects_once_on_the_mix_and_appends_the_tail():
+    from effects import Delay, EffectsChain, tail_seconds
+
+    sample_rate = 1000
+    notes = [(0.0, 0, 4, 0.1)]
+    dry = render_offline(notes, sample_rate=sample_rate)
+    chain = EffectsChain([Delay(time=0.2, feedback=0.0, mix=1.0)])
+    wet = render_offline(notes, sample_rate=sample_rate, effects=chain)
+    assert chain[0].sample_rate == sample_rate                # prepared against the render's own rate
+    assert len(wet) == len(dry) + int(round(tail_seconds(chain) * sample_rate))
+    assert np.all(wet[:200] == 0.0)                            # fully wet: nothing until the delay elapses
+    # Then the dry mix, delayed by exactly 200 samples (tanh is monotonic,
+    # and the pre-clip mix is identical apart from the shift).
+    assert np.allclose(wet[200:200 + len(dry)], dry, atol=1e-6)
+
+
+def test_render_offline_with_an_empty_chain_matches_the_plain_render():
+    from effects import EffectsChain
+
+    notes = [(0.0, 0, 4, 0.1), (0.3, 4, 4, 0.1)]
+    plain = render_offline(notes, sample_rate=1000)
+    routed = render_offline(notes, sample_rate=1000, effects=EffectsChain())
+    assert len(routed) == len(plain)
+    # float32-close, not bit-identical: the bus is float32 by contract (the
+    # live callback's own dtype), whereas the effects-free path clips in
+    # float64 -- an empty chain costs one float32 rounding, nothing else.
+    assert np.allclose(routed, plain, atol=1e-6)

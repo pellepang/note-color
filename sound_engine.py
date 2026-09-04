@@ -81,6 +81,7 @@ import numpy as np
 
 import config
 from config_store import store
+from effects import EffectsChain
 
 
 # --------------------------------------------------------------------------
@@ -377,12 +378,15 @@ class SoundEngine:
     the same "timing is an index computation, not a wall-clock one"
     property that makes `playback.render_offline()` sample-accurate."""
 
-    def __init__(self, engine=None, sample_rate=None, block_size=None, detection_active=False):
+    def __init__(self, engine=None, sample_rate=None, block_size=None, detection_active=False,
+                 effects=None):
         self.sample_rate = sample_rate or config.PLAYBACK_SAMPLE_RATE
         self.block_size = block_size or config.PLAYBACK_BLOCK_SIZE
         self.detection_active = detection_active
         self.engine = engine if engine is not None else _default_engine()
         self.voices = VoiceManager(polyphony=self._polyphony)
+        self.effects = EffectsChain()
+        self.set_effects(effects)
         self._stream = None
         self._frame_clock = 0
         self._pending_offs = {}
@@ -422,8 +426,32 @@ class SoundEngine:
             self._stream.close()
             self._stream = None
         self.voices.clear()
+        self.effects.reset()
         with self._pending_lock:
             self._pending_offs = {}
+
+    # -- the effects bus (ticket #114) ------------------------------------
+
+    def set_effects(self, chain):
+        """Installs `chain` (an `effects.Effect`, normally an
+        `EffectsChain`; `None` means an empty chain, i.e. no effects) as
+        the one shared bus applied to the summed voice mix, after voice
+        mixing and before the `np.tanh` soft-clip. #104 settled shared-bus
+        over per-voice by arithmetic: both shipped effects are linear, so
+        per-voice routing gives the identical signal at N times the cost
+        and loses a delay's tail the moment its voice is released.
+
+        `prepare()`d here against this engine's own sample rate and block
+        size, then swapped in by a single attribute assignment -- the audio
+        callback reads `self.effects` once per block, so a swap takes
+        effect at the next block boundary with no lock and no torn state
+        (the old chain, if mid-`process()`, finishes on its own object).
+        Returns the installed chain."""
+        if chain is None:
+            chain = EffectsChain()
+        chain.prepare(self.sample_rate, self.block_size)
+        self.effects = chain
+        return chain
 
     # -- the note vocabulary ----------------------------------------------
 
@@ -484,6 +512,7 @@ class SoundEngine:
         self._resolve_due_offs(self._frame_clock)
         mix = np.zeros(frames, dtype=np.float32)
         self.voices.render_block(mix, frames)
+        mix = self.effects.process(mix)   # the shared bus (#114), before the clip
         outdata[:, 0] = np.tanh(mix)
 
 
