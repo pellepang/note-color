@@ -40,6 +40,15 @@ DEFAULT_DURATION_CLASS = "quarter"
 # hand-duplicated, so the two can never drift apart.
 DURATION_CLASS_ORDER = [name for _, name in _DURATION_CLASSES]
 
+# The inverse of duration_class_for_beats(): a duration_class name -> how
+# many beats (quarter notes) it stands for. Derived from
+# _DURATION_CLASSES itself for the same reason DURATION_CLASS_ORDER is --
+# so the two can never drift. `tab_playback.py` (ticket #121) needs it to
+# turn an already-finalized note's duration_class back into real seconds
+# against a tempo; score_writer.QUARTER_LENGTHS is the same table but
+# lives behind a music21 import, which no live-path module may pay for.
+BEATS_BY_DURATION_CLASS = {name: beats for beats, name in _DURATION_CLASSES}
+
 
 def duration_class_for_beats(beats):
     """Nearest standard note-value name (including dotted variants) for a

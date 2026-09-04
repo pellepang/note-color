@@ -385,6 +385,21 @@ PLAYBACK_HARMONIC_WEIGHTS = (1.0, 0.4, 0.15)  # fundamental + 2nd + 3rd partial 
                                                 # without real modelling work" framing. Picked by ear, not
                                                 # measured -- revisit freely, not a tuned/load-bearing constant.
 
+# --- tab-view frozen playback (map #99, ticket #121, decision #109) ---
+TAB_PLAYBACK_DEFAULT_BPM = 90.0   # tempo used to turn a note's duration_class back into real seconds when
+                                   # no live/reanalysis bpm estimate is available (silence, or too little
+                                   # material to lock a tempo). Same value score_editor_state.
+                                   # new_blank_score() defaults a new score's tempo to -- a plain, neutral
+                                   # walking tempo, not a measurement.
+TAB_PLAYBACK_MIN_NOTE_SECONDS = 0.05   # floor on one played note's length, so a thirtysecond at a fast
+                                        # estimated tempo is still audible rather than a click
+TAB_PLAYBACK_MAX_NOTE_SECONDS = 8.0    # ceiling, so an absurd (very low) bpm estimate can't leave a note
+                                        # ringing for most of a minute
+TAB_PLAYBACK_VELOCITY = 0.8       # fixed velocity for every played-back note: nothing in this app's
+                                   # detection pipeline produces a real per-note velocity yet (rms is a
+                                   # whole-frame measure, not a note's own attack strength), so inventing
+                                   # a dynamic from it would be dressing up data that was never captured.
+
 # --- Sound engine (map #99, decision #105; figures measured by prototype #100) ---
 POLYPHONY_STANDALONE = 40        # hard voice cap when nothing else in the process is doing heavy work (the
                                   # standalone synth tool, the score editor, `virtualnote replay`). #100

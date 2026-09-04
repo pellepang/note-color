@@ -770,3 +770,64 @@ def test_frozen_with_no_scroll_offset_still_pins_to_full_brightness(monkeypatch)
     luminances = _bg_luminances(out)
     assert len(luminances) == 2
     assert luminances[0] == luminances[1]
+
+
+# -- visible-column selection (ticket #121: frozen playback's default scope)
+
+def test_select_visible_entries_walks_newest_first_within_the_width_budget():
+    from terminal_tab_display import BarlineEntry, TabEntry, select_visible_entries
+
+    entries = [TabEntry([], None, float(i)) for i in range(10)]
+    visible, used = select_visible_entries(entries, available_width=9, width=3)
+    assert [e.t for e in visible] == [7.0, 8.0, 9.0]
+    assert used == 9
+
+
+def test_select_visible_entries_counts_a_barline_at_its_own_narrower_width():
+    from terminal_tab_display import BarlineEntry, TabEntry, select_visible_entries
+
+    entries = [TabEntry([], None, 0.0), BarlineEntry(1.0), TabEntry([], None, 2.0)]
+    visible, used = select_visible_entries(entries, available_width=100, width=3)
+    assert used == 3 + config.TAB_BARLINE_WIDTH + 3
+    assert [type(e).__name__ for e in visible] == ["TabEntry", "BarlineEntry", "TabEntry"]
+
+
+def test_select_visible_entries_always_keeps_the_newest_column_even_if_it_alone_overflows():
+    from terminal_tab_display import TabEntry, select_visible_entries
+
+    entries = [TabEntry([], None, 0.0), TabEntry([], None, 1.0)]
+    visible, _used = select_visible_entries(entries, available_width=1, width=9)
+    assert [e.t for e in visible] == [1.0]
+
+
+def test_select_visible_entries_hides_scroll_offset_entries_off_the_tail_first():
+    from terminal_tab_display import TabEntry, select_visible_entries
+
+    entries = [TabEntry([], None, float(i)) for i in range(10)]
+    visible, _used = select_visible_entries(entries, available_width=9, width=3, scroll_offset=2)
+    assert [e.t for e in visible] == [5.0, 6.0, 7.0]
+
+
+def test_column_width_for_matches_the_three_render_cases():
+    from terminal_tab_display import column_width_for
+
+    assert column_width_for(True, "symbol") == config.TAB_COLUMN_WIDTH_CHORD
+    assert column_width_for(False, "name") == config.TAB_COLUMN_WIDTH_NAME
+    assert column_width_for(False, "symbol") == config.TAB_COLUMN_WIDTH
+
+
+def test_visible_entries_reports_what_render_would_draw(monkeypatch):
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=None: (30, 24))
+    display = TabDisplay(fps=20)
+    for i in range(20):
+        display.push(i % 12, 4, (200, 50, 50), "X")
+
+    # 30 cols - TAB_LEGEND_WIDTH, at TAB_COLUMN_WIDTH per column.
+    expected = (30 - config.TAB_LEGEND_WIDTH) // config.TAB_COLUMN_WIDTH
+    visible = display.visible_entries()
+    assert len(visible) == expected
+    assert visible[-1] is display.entries[-1]
+    # legend off reclaims its width, so strictly more columns fit
+    assert len(display.visible_entries(legend_on=False)) > len(visible)
+    # scrollback moves the window back without changing its size
+    assert display.visible_entries(scroll_offset=3)[-1] is list(display.entries)[-4]
