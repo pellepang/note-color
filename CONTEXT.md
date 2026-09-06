@@ -74,3 +74,24 @@ One independently spinnable, typeahead-able component of the **Chord builder** �
 
 **Score properties (inline header editor)**:
 The three score-level properties a blank score is seeded with — time signature, key signature, and tempo — shown at all times in the main editor view's own status line (`time=`/`key=`/`tempo=`) and made interactively editable in place by pressing `score_properties` (`t`): Left/Right selects a field, Up/Down (or, for time signature/tempo, typing a value directly) changes it, Enter returns to normal cursor editing. Originally a second, separate reel-based screen with the same shape as the **Chord builder** — its own local keys, one key back to the main view — reversed after direct user feedback that leaving the main view for this was unwanted friction, not from a new abstract argument (see docs/DECISIONS.md). Distinct from the **Chord builder**, which edits one column's notes rather than the whole score's properties.
+
+### Audio-to-score conversion (wayfinder map [#123](https://github.com/pellepang/note-color/issues/123))
+
+**Conversion**:
+Turning a recorded audio file into an editable **Score project**, offline and non-causally — the whole file is available at once, and the work may take up to an hour. Distinct from **Transcription** in the live sense the rest of this app uses (`virtualnote transcribe`, the detection pipeline), which is causal and per-hop. The two share an output format and nothing else; the live path is explicitly untouched by this effort.
+
+**Stem**:
+One instrument's audio, separated out of a mixed recording (vocals, bass, drums, other). An intermediate artifact of conversion, cached to disk while converting and never part of the saved result — this project persists symbolic scores, not audio.
+_Avoid_: Track, for this. A stem is audio; a **Track** is notation.
+
+**Track**:
+One instrument's notated part inside a **Score project** — what a **Stem** becomes after conversion. Viewable and editable alone or alongside the others.
+
+**Score project**:
+A saved conversion result: several **Tracks** together, rather than the single two-staff grand staff a score file has meant in this repo until now. Its on-disk shape is not yet decided.
+
+**Timing oracle**:
+Use of the drum **Stem** to establish beat, downbeat and meter for the whole piece, because percussion carries that information far more clearly than pitched material does. Distinct from drum *notation*, which is a separate output; the same stem serves both purposes.
+
+**Pass**:
+One stage of a conversion that consumes the previous stage's output — separation and global estimates, then transcription conditioned on those estimates, then quantization against a fixed grid. Whether more passes genuinely buy accuracy is a hypothesis this map tests, not an assumption it builds on.
