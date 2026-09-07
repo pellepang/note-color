@@ -23,6 +23,8 @@ instead of duplicating them (see docs/DECISIONS.md for the rationale).
 import numpy as np
 from music21 import chord, clef, key as m21key, layout, meter, note, pitch, stream
 
+from fractions import Fraction
+
 import config
 from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
 from config_store import store
@@ -38,6 +40,16 @@ from staff_map import staff_row
 # every duration_class name is already a plain, possibly-dotted,
 # power-of-two note value.
 QUARTER_LENGTHS = {
+    # Triplets (map #123, issue #130) are exact Fractions, not floats:
+    # music21 normalises a quarterLength through `opFrac` and builds the
+    # matching `duration.Tuplet` automatically from it (verified: 1/3 ->
+    # type "eighth" + Tuplet 3/2/eighth), so a triplet needs no explicit
+    # Tuplet construction here -- but it does need a value that is exactly
+    # a third, which a float is not.
+    "triplet-half": Fraction(4, 3),
+    "triplet-quarter": Fraction(2, 3),
+    "triplet-eighth": Fraction(1, 3),
+    "triplet-sixteenth": Fraction(1, 6),
     "whole": 4.0,
     "dotted-half": 3.0,
     "half": 2.0,
@@ -49,6 +61,14 @@ QUARTER_LENGTHS = {
     "sixteenth": 0.25,
     "thirtysecond": 0.125,
 }
+
+# Divisors for the offset-quantization guard both writers apply. 8 is a
+# 32nd-note grid, matching QUARTER_LENGTHS' finest dyadic grain; 12 is
+# what a triplet needs, since a triplet-eighth onset falls at 1/3 of a
+# quarter and an 8-only grid would shift it to 3/8. music21 picks the
+# divisor that fits each element best, so a dyadic offset still lands
+# exactly on the 8 grid.
+OFFSET_QUANTIZE_DIVISORS = (8, 12)
 
 # A fallback tempo used ONLY to convert each note's onset_time (seconds)
 # into a beat offset for positioning within the score when
@@ -154,8 +174,15 @@ def _staff_for(pitch_class, octave):
 def _duration_quarter_length(note_event, result):
     """This note's music21 quarterLength, via the same duration_class
     computation `main.run_batch_transcribe()` already performs (see that
-    function, ~line 994) -- no tuplet handling needed (issue #62 deferred
-    it), so the duration_class name maps straight to a quarterLength."""
+    function, ~line 994).
+
+    Deliberately does NOT pass `allow_tuplets=True`, even though
+    QUARTER_LENGTHS can now express a triplet (issue #130). This path
+    derives beats from `result.bpm`, a single tempo scalar for the whole
+    recording -- exactly the input #130 found a triplet cannot be
+    distinguished from ordinary timing jitter against. Tuplets are for the
+    offline converter, which has a real per-beat grid from Beat This! to
+    quantize against."""
     note_beats = (
         (note_event.duration_hops * result.hop_seconds * result.bpm / 60.0) if result.bpm else None
     )
@@ -250,9 +277,9 @@ def write_score(result, path, time_signature=config.DEFAULT_TIME_SIGNATURE):
     # integration test. (8,) matches QUARTER_LENGTHS' finest grain
     # (thirtysecond = 0.125 quarterLength = 1/8) so no real duration class
     # gets coarsened by the snap.
-    treble.quantize(quarterLengthDivisors=(8,), processOffsets=True, processDurations=False,
+    treble.quantize(quarterLengthDivisors=OFFSET_QUANTIZE_DIVISORS, processOffsets=True, processDurations=False,
                      inPlace=True, recurse=True)
-    bass.quantize(quarterLengthDivisors=(8,), processOffsets=True, processDurations=False,
+    bass.quantize(quarterLengthDivisors=OFFSET_QUANTIZE_DIVISORS, processOffsets=True, processDurations=False,
                    inPlace=True, recurse=True)
 
     score = stream.Score()

@@ -37,7 +37,12 @@ from music21 import tempo as m21tempo
 
 import config
 from duration_tracker import DEFAULT_DURATION_CLASS, duration_class_for_beats
-from score_writer import QUARTER_LENGTHS, note_hex_color, pitch_for
+from score_writer import (
+    OFFSET_QUANTIZE_DIVISORS,
+    QUARTER_LENGTHS,
+    note_hex_color,
+    pitch_for,
+)
 from staff_map import staff_row
 
 # Fallback tempo for a parsed file with no MetronomeMark at all -- true of
@@ -158,12 +163,13 @@ def save_score(score: EditorScore, path) -> None:
         offset += quarter_length
 
     # Same inexpressible-duration guard write_score() applies (see that
-    # function's own comment) -- offsets here are already exact sums of
-    # QUARTER_LENGTHS' dyadic values, so this is cheap insurance, not a
-    # correction of any expected drift.
-    treble.quantize(quarterLengthDivisors=(8,), processOffsets=True, processDurations=False,
+    # function's own comment). Offsets here are exact sums of
+    # QUARTER_LENGTHS' values -- dyadic, or exact thirds once a tuplet
+    # column is present (issue #130), which is why the divisor set
+    # includes 12 as well as 8.
+    treble.quantize(quarterLengthDivisors=OFFSET_QUANTIZE_DIVISORS, processOffsets=True, processDurations=False,
                      inPlace=True, recurse=True)
-    bass.quantize(quarterLengthDivisors=(8,), processOffsets=True, processDurations=False,
+    bass.quantize(quarterLengthDivisors=OFFSET_QUANTIZE_DIVISORS, processOffsets=True, processDurations=False,
                    inPlace=True, recurse=True)
 
     m21_score = stream.Score()
@@ -262,12 +268,40 @@ def load_score(path) -> EditorScore:
     if tempo_list and tempo_list[0].number is not None:
         tempo_bpm = float(tempo_list[0].number)
 
-    by_offset = {}  # rounded offset -> {"notes": [EditorNote, ...], "quarter_length": float}
+    # rounded offset -> {"notes": [...], "quarter_length": float (rests),
+    #                     "sounding_quarter_length": float or None, "has_tuplet": bool}
+    #
+    # Rest and note durations are accumulated SEPARATELY, and a sounding
+    # note's duration wins wherever both are present at one offset (issue
+    # #130). The reason is a real behaviour of music21's own writing: it
+    # consolidates consecutive rests, so three triplet-eighth Rests written
+    # to the bass staff come back as ONE quarter Rest at offset 0. A plain
+    # max() over both then reads that column as a "quarter" and the
+    # triplet is lost at the very first column. The rest carries no
+    # information about the column's length when a note is sounding
+    # against it, so preferring the note is also just more correct.
+    by_offset = {}
     for part in parsed.parts:
         for element in part.flatten().notesAndRests:
             offset_key = round(float(element.offset), 6)
-            entry = by_offset.setdefault(offset_key, {"notes": [], "quarter_length": 0.0})
-            entry["quarter_length"] = max(entry["quarter_length"], float(element.quarterLength))
+            entry = by_offset.setdefault(
+                offset_key,
+                {"notes": [], "quarter_length": 0.0, "sounding_quarter_length": None,
+                 "has_tuplet": False},
+            )
+            quarter_length = float(element.quarterLength)
+            if isinstance(element, m21note.Rest):
+                entry["quarter_length"] = max(entry["quarter_length"], quarter_length)
+            else:
+                entry["sounding_quarter_length"] = max(
+                    entry["sounding_quarter_length"] or 0.0, quarter_length
+                )
+            # A triplet's own duration_class is only recoverable if the
+            # snapping is allowed to consider tuplet values (issue #130);
+            # only a sounding note's tuplet counts, for the same
+            # rest-consolidation reason.
+            if not isinstance(element, m21note.Rest):
+                entry["has_tuplet"] = entry["has_tuplet"] or bool(element.duration.tuplets)
             if isinstance(element, m21chord.Chord):
                 for p in element.pitches:
                     entry["notes"].append(EditorNote(pitch_class=p.pitchClass, octave=p.octave))
@@ -283,7 +317,14 @@ def load_score(path) -> EditorScore:
         columns = []
         for offset_key in sorted(by_offset):
             entry = by_offset[offset_key]
-            duration_class = duration_class_for_beats(entry["quarter_length"])
+            quarter_length = (
+                entry["sounding_quarter_length"]
+                if entry["sounding_quarter_length"] is not None
+                else entry["quarter_length"]
+            )
+            duration_class = duration_class_for_beats(
+                quarter_length, allow_tuplets=entry["has_tuplet"]
+            )
             columns.append(EditorColumn(notes=entry["notes"], duration_class=duration_class))
 
     return EditorScore(

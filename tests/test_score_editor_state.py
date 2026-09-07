@@ -286,3 +286,95 @@ def test_load_score_still_accepts_its_own_grand_staff(tmp_path):
     loaded = score_editor_state.load_score(path)
     assert len(loaded.columns) == 1
     assert {(n.pitch_class, n.octave) for n in loaded.columns[0].notes} == {(0, 4), (7, 2)}
+
+
+# --- Tuplets (map #123, issue #130) ---------------------------------------
+
+
+def test_triplet_column_round_trips_through_save_and_load(tmp_path):
+    """The point of issue #130's tuplet work: a triplet written to
+    MusicXML has to come back as the same duration_class, not as the
+    dotted-sixteenth its quarterLength would otherwise snap to.
+
+    Three triplet-eighths are used deliberately -- they sum to exactly one
+    beat, so the score stays measure-aligned and music21's own
+    tie-splitting can't confound the assertion (same construction rule the
+    other round-trip tests in this file follow)."""
+    score = score_editor_state.new_blank_score()
+    score.columns = [
+        EditorColumn(notes=[EditorNote(pitch_class=pc, octave=4)], duration_class="triplet-eighth")
+        for pc in (0, 4, 7)
+    ]
+    path = tmp_path / "triplets.musicxml"
+    save_score(score, path)
+
+    loaded = load_score(path)
+    assert [c.duration_class for c in loaded.columns] == ["triplet-eighth"] * 3
+    assert [c.notes[0].pitch_class for c in loaded.columns] == [0, 4, 7]
+
+
+def test_saved_triplet_carries_a_real_music21_tuplet(tmp_path):
+    """A fractional quarterLength alone is not a triplet -- correct
+    notation needs a Tuplet, which is what makes MusicXML emit
+    <time-modification>. music21 builds it from the exact Fraction in
+    QUARTER_LENGTHS, so this asserts that actually happened rather than
+    trusting the mechanism."""
+    from music21 import converter
+
+    score = score_editor_state.new_blank_score()
+    score.columns = [
+        EditorColumn(notes=[EditorNote(pitch_class=0, octave=4)], duration_class="triplet-eighth")
+        for _ in range(3)
+    ]
+    path = tmp_path / "tuplet_marks.musicxml"
+    save_score(score, path)
+
+    parsed = converter.parse(str(path))
+    sounding = [n for n in parsed.recurse().notes]
+    assert sounding, "expected at least one sounding note"
+    for element in sounding:
+        assert element.duration.tuplets, "triplet lost its Tuplet on the way to MusicXML"
+        assert element.duration.tuplets[0].numberNotesActual == 3
+
+    assert "<time-modification>" in path.read_text(encoding="utf-8")
+
+
+def test_triplet_offsets_survive_the_offset_quantizer(tmp_path):
+    """The hazard the divisor change guards: a triplet-eighth onset falls
+    at 1/3 of a quarter, and the previous 32nd-note-only grid (divisor 8)
+    would have shifted it to 3/8. Asserts the second and third onsets are
+    exact thirds, not eighths."""
+    from fractions import Fraction
+    from music21 import converter
+
+    score = score_editor_state.new_blank_score()
+    score.columns = [
+        EditorColumn(notes=[EditorNote(pitch_class=0, octave=4)], duration_class="triplet-eighth")
+        for _ in range(3)
+    ]
+    path = tmp_path / "triplet_offsets.musicxml"
+    save_score(score, path)
+
+    parsed = converter.parse(str(path))
+    treble = parsed.parts[0]
+    offsets = sorted({n.getOffsetInHierarchy(parsed) for n in treble.recurse().notes})
+    assert offsets[:3] == [Fraction(0), Fraction(1, 3), Fraction(2, 3)]
+
+
+def test_plain_durations_are_unaffected_by_the_widened_divisors(tmp_path):
+    """Adding divisor 12 must not perturb ordinary dyadic scores -- the
+    regression this change most plausibly causes."""
+    score = score_editor_state.new_blank_score()
+    score.columns = [
+        EditorColumn(notes=[EditorNote(pitch_class=0, octave=4)], duration_class="quarter"),
+        EditorColumn(notes=[EditorNote(pitch_class=4, octave=4)], duration_class="dotted-eighth"),
+        EditorColumn(notes=[EditorNote(pitch_class=7, octave=4)], duration_class="sixteenth"),
+        EditorColumn(notes=[EditorNote(pitch_class=9, octave=4)], duration_class="half"),
+    ]
+    path = tmp_path / "plain.musicxml"
+    save_score(score, path)
+
+    loaded = load_score(path)
+    assert [c.duration_class for c in loaded.columns] == [
+        "quarter", "dotted-eighth", "sixteenth", "half",
+    ]
