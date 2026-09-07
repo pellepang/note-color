@@ -248,6 +248,12 @@ class DspNoteTranscriber:
         return notes
 
 
+#: Shortest span worth naming as a chord. Below this a "chord" is an
+#: artifact of where the analysis window happened to end, not something
+#: anyone played.
+MIN_CHORD_SPAN_SECONDS = 0.2
+
+
 class TemplateChordEstimator:
     """Chord spans from this repo's own chroma folding and ~360-template
     matcher -- no new dependency, no download, no extra.
@@ -299,9 +305,16 @@ class TemplateChordEstimator:
             if len(edges) >= 2:
                 spans = list(zip(edges, edges[1:]))
                 # The tail after the last beat is real audio and may hold
-                # the final chord; a beat grid ends at the last detected
-                # beat, not at the end of the file.
-                if duration_seconds - edges[-1] > 1e-3:
+                # the final chord -- a beat grid ends at the last detected
+                # beat, not at the end of the file. But only when it is
+                # long enough to be a chord: a bare `> 0` test appends a
+                # sliver whenever the last beat lands near the end, and a
+                # 0.02-second span produced a spurious "C13/F" on the
+                # first real end-to-end run. Half a beat is the shortest
+                # span worth naming.
+                tail = duration_seconds - edges[-1]
+                median_beat = float(np.median(np.diff(edges))) if len(edges) > 1 else 0.0
+                if tail > max(median_beat * 0.5, MIN_CHORD_SPAN_SECONDS):
                     spans.append((edges[-1], duration_seconds))
                 return spans
         step = max(self.window_seconds, 1e-3)

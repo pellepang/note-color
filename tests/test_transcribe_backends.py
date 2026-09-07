@@ -991,3 +991,33 @@ def test_separator_refuses_with_an_install_line_when_demucs_is_absent(monkeypatc
     with pytest.raises(ConversionUnavailable) as excinfo:
         DemucsSeparator().separate(np.zeros(1000), 22050)
     assert excinfo.value.install_hint == "pip install -e .[convert]"
+
+
+def test_a_tail_sliver_after_the_last_beat_is_not_named_as_a_chord():
+    """Regression from the first real end-to-end run: the tail past the
+    last detected beat was appended whenever it was longer than zero, so a
+    beat landing 0.02s before the end produced a spurious 20-millisecond
+    chord ("C13/F") at the end of an otherwise correct progression."""
+    from transcribe_backends import BeatGrid, TemplateChordEstimator
+
+    sample_rate = 22050
+    audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
+    # Last beat at 1.98s, audio ends at 2.0 -- a 0.02s tail.
+    grid = BeatGrid(beat_seconds=(0.0, 0.66, 1.32, 1.98), downbeat_seconds=(0.0,))
+
+    spans = TemplateChordEstimator().estimate(audio, sample_rate, beats=grid)
+    assert spans
+    shortest = min(s.end_seconds - s.start_seconds for s in spans)
+    assert shortest > 0.1, [(round(s.start_seconds, 2), round(s.end_seconds, 2)) for s in spans]
+
+
+def test_a_real_tail_is_still_covered():
+    """The other half: a genuine final chord held past the last detected
+    beat must not be dropped just because slivers are."""
+    from transcribe_backends import BeatGrid, TemplateChordEstimator
+
+    sample_rate = 22050
+    audio = _chord_audio(C_MAJOR, 3.0, sample_rate)
+    grid = BeatGrid(beat_seconds=(0.0, 0.5, 1.0), downbeat_seconds=(0.0,))
+    spans = TemplateChordEstimator().estimate(audio, sample_rate, beats=grid)
+    assert spans[-1].end_seconds == pytest.approx(3.0, abs=0.01)

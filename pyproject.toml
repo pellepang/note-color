@@ -75,6 +75,13 @@ sf2 = [
 piano = [
     "transkun>=2.0",  # MIT code, MIT weights inside the wheel, CPU by default (0.95 onset F1)
 ]
+# THIRD gotcha, also learned the hard way: `torchaudio` must match
+# `torch`'s build. Installing CPU torch first and then this extra pulls
+# torchaudio from the DEFAULT index, whose build fails to load its
+# compiled extension against a +cpu torch ("Could not load this library:
+# _torchaudio.abi3.so"). Install it from the same CPU index:
+#
+#     pip install --upgrade torchaudio --index-url https://download.pytorch.org/whl/cpu
 convert = [
     "transkun>=2.0",
     "demucs>=4.1.0",    # MIT code; weights are research-use-only and prompted for, never bundled
