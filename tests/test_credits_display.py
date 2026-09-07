@@ -27,5 +27,15 @@ def test_credits_names_claude_ai_assistance():
 def test_credits_lists_every_third_party_library():
     lines = credits_lines()
     joined = "\n".join(lines)
-    for name, _blurb in THIRD_PARTY_LIBRARIES:
+    for name, licence, _blurb in THIRD_PARTY_LIBRARIES:
         assert name in joined
+        assert licence in joined
+
+
+def test_credits_states_the_project_licence_and_copyright_holder():
+    """Issue #139: MIT is what makes this project actually free to use, and
+    the Credits screen is where a user meets that fact."""
+    joined = "\n".join(credits_lines())
+    assert "MIT" in joined
+    assert config.COPYRIGHT_HOLDER in joined
+    assert str(config.COPYRIGHT_YEAR) in joined

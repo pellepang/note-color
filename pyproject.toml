@@ -1,11 +1,13 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]  # >=77 for PEP 639 `license`/`license-files`
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "note-color"
 version = "0.1.0"
 description = "Real-time audio-to-color visualizer -- listens to the microphone, detects the musical note currently being played, and displays a corresponding color."
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",

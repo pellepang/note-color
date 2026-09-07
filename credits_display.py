@@ -22,14 +22,24 @@ import time
 import config
 from menu_display import osc8_link
 
-# (library name, one-line blurb) -- mirrors requirements.txt; not
-# generated from it so the blurb text stays hand-written and stable even
-# if a version pin changes.
+# (library name, SPDX licence, one-line blurb) -- mirrors pyproject.toml's
+# dependencies and extras; not generated from them so the blurb text stays
+# hand-written and stable even if a version pin changes. The licence field
+# is the attribution obligation these permissive licences carry, surfaced
+# here rather than in a separate file (issue #139, Q8): every entry below
+# is BSD/MIT/ISC/LGPL, where a name-and-licence line satisfies the notice
+# requirement. A THIRD_PARTY_LICENSES.md carrying full texts arrives with
+# the first *model* whose terms are non-obvious -- see docs/DECISIONS.md.
 THIRD_PARTY_LIBRARIES = [
-    ("numpy", "FFT/array math behind pitch detection, chroma folding, and multipitch peak-picking."),
-    ("sounddevice", "PortAudio bindings -- the microphone/loopback capture stream."),
-    ("pygame-ce", "the GUI window (issue #40's virtualnote gui)."),
-    ("blessed", "form controls on the Settings screen (issue #43)."),
+    ("numpy", "BSD-3-Clause", "FFT/array math behind pitch detection, chroma folding, and multipitch peak-picking."),
+    ("sounddevice", "MIT", "PortAudio bindings -- the microphone/loopback capture stream."),
+    ("pygame-ce", "LGPL-2.1", "the GUI window (issue #40's virtualnote gui)."),
+    ("blessed", "MIT", "form controls on the Settings screen (issue #43)."),
+    ("wcwidth", "MIT", "display-width-aware cell padding for the tab view's combining duration glyphs."),
+    ("librosa", "ISC", "offline beat tracking for virtualnote transcribe and the tab view's R-key reanalysis ([batch] extra)."),
+    ("music21", "BSD-3-Clause", "MusicXML reading and writing behind --write-score and the score editor ([batch] extra)."),
+    ("scipy", "BSD-3-Clause", "the subtractive synth's resonant filter ([synth] extra)."),
+    ("pyfluidsynth", "MIT", "SF2 soundfont playback ([sf2] extra; the system libfluidsynth it binds to is LGPL-2.1 and is not bundled)."),
 ]
 
 
@@ -53,10 +63,12 @@ def credits_lines(donation_line=None):
         "",
         "Built with AI assistance from Claude (Anthropic).",
         "",
+        f"note-color is free software under the MIT licence. (c) {config.COPYRIGHT_YEAR} {config.COPYRIGHT_HOLDER}",
+        "",
         "Third-party libraries:",
     ]
-    for name, blurb in THIRD_PARTY_LIBRARIES:
-        lines.append(f"  {name} -- {blurb}")
+    for name, licence, blurb in THIRD_PARTY_LIBRARIES:
+        lines.append(f"  {name} ({licence}) -- {blurb}")
     lines.append("")
     lines.append("Press any key to return to the menu.")
     return lines

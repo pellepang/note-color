@@ -265,6 +265,11 @@ EDITOR_METRONOME_CLICK_SECONDS = 0.05
 # than block on a Patreon account existing; swapping in the real URL once
 # one does is a one-line fill-in, not a reason this was withheld.
 AUTHOR_NAME = "Pelle"
+# Legal copyright line for the LICENSE and the Credits screen (issue
+# #139). Distinct from AUTHOR_NAME, which is the short display name the
+# menu callout uses -- a copyright grant needs the full legal name.
+COPYRIGHT_HOLDER = "Pelle Ørevik Evensen"
+COPYRIGHT_YEAR = 2026
 DONATION_PLATFORM = "Patreon"
 DONATION_URL = "https://patreon.com/notecolor"
 

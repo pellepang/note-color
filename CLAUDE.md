@@ -12,6 +12,35 @@ fast enough to feel live during actual music.
 - User deferred most technical tradeoffs to "best-performing + easiest to
   build" judgment rather than specifying them.
 
+## Licence
+
+MIT, `Copyright (c) 2026 Pelle Ørevik Evensen` (`LICENSE`, `pyproject.toml`
+via PEP 639, and the Credits screen). Settled by issue
+[#139](https://github.com/pellepang/note-color/issues/139) because map
+[#123](https://github.com/pellepang/note-color/issues/123)'s offline
+converter downloads third-party neural weights whose terms could not be
+evaluated against a repo that had no licence of its own — until then a
+public repo with no LICENSE was *all rights reserved*, the opposite of the
+intent.
+
+Third-party material is judged in four categories, not one (full rules and
+rationale in `docs/DECISIONS.md`):
+
+| Category | Rule |
+|---|---|
+| Code this repo ships | Permissive or weak copyleft. **Full GPL refused outright**, even behind an optional extra. LGPL is fine (`pygame-ce` already is). |
+| Weights fetched at runtime | Never bundled, never fetched silently — **downloaded only after an explicit prompt naming the terms**, pre-answerable via `[preferences].accept_model_terms` for batch use. Same bundle-nothing posture `sf2_playback.py` takes with soundfonts. |
+| Training data | Never distributed; judged like evaluation corpora. |
+| Evaluation corpora | **Non-commercial is acceptable** — private evaluation is not distribution. Audio never enters the repo; derived numbers are facts and are publishable. |
+
+The load-bearing line: **non-commercial and unlicensed material may inform
+a decision, never ship inside one.** An absent licence is forbidden for
+anything shipped and permitted for private evaluation; a contradictory one
+takes the most restrictive reading unless upstream clarifies. Permissively
+licensed weights may be committed under a **1 MB ceiling**; anything larger
+downloads. Contributions are inbound = outbound MIT, no CLA, and one
+licence covers the whole repo including `docs/research/`.
+
 ## Status
 
 Working end-to-end and verified live: unit tests pass (`pytest tests/`,
@@ -841,6 +870,10 @@ behavior for a bounded real-world quantity like a time window.
 One-liners; full rationale in `docs/DECISIONS.md`.
 
 - Python + NumPy — cheap enough at these buffer sizes, no build toolchain.
+- MIT, and third-party models/weights judged in four categories with full
+  GPL refused outright and NC/unlicensed material allowed to inform a
+  decision but never to ship inside one (issue #139) — see the Licence
+  section above.
 - Hand-rolled YIN, not `aubio`/`librosa` — wheel/dependency risk on Pi.
 - `pitch_detect.detect_pitch()` corrects octave-doubling in the low
   register (issue #69, real acoustic testing found ~65-123Hz notes
