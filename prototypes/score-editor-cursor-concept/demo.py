@@ -38,13 +38,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root
 
-from color_map import NOTE_NAMES_FIFTHS, fifths_index, hsl_to_rgb255, note_to_hsl  # noqa: E402
-from staff_map import (  # noqa: E402
+from notecolor.analysis.color_map import NOTE_NAMES_FIFTHS, fifths_index, hsl_to_rgb255, note_to_hsl  # noqa: E402
+from notecolor.analysis.staff_map import (  # noqa: E402
     BASS_CLEF_ROW, BOTTOM_ROW, GRAND_STAFF_REF_STEP, LETTER_INDEX, STAFF_LINE_ROWS,
     TOP_ROW, TREBLE_CLEF_ROW, ledger_rows, staff_row,
 )
-from terminal_tab_display import LEDGER_CHAR, NOTEHEAD_GLYPH, SYMBOL_ACCIDENTALS  # noqa: E402
-from main import RawKeys  # noqa: E402
+from notecolor.tui.terminal_tab_display import LEDGER_CHAR, NOTEHEAD_GLYPH, SYMBOL_ACCIDENTALS  # noqa: E402
+from notecolor.tui.app import RawKeys  # noqa: E402
 
 RESET = "\033[0m"
 INVERT = "\033[7m"

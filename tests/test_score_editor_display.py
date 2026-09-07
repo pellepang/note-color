@@ -3,9 +3,9 @@ logic and viewport math. Per this repo's test convention, `render()`'s
 actual screen layout is smoke-tested manually, not here (see the module
 docstring)."""
 
-import score_editor_display as sed
-from score_editor_state import EditorColumn, EditorNote
-from staff_map import staff_row
+from notecolor.tui import score_editor_display as sed
+from notecolor.notation.score_editor_state import EditorColumn, EditorNote
+from notecolor.analysis.staff_map import staff_row
 
 
 def _col(*pcs_octs, duration_class="quarter"):
@@ -64,7 +64,7 @@ def test_legend_letter_shows_flat_accidental():
 # --- clamping ------------------------------------------------------------
 
 def test_clamp_row_stays_within_staff_bounds():
-    from staff_map import TOP_ROW, BOTTOM_ROW
+    from notecolor.analysis.staff_map import TOP_ROW, BOTTOM_ROW
     assert sed.clamp_row(TOP_ROW + 5) == TOP_ROW
     assert sed.clamp_row(BOTTOM_ROW - 5) == BOTTOM_ROW
     assert sed.clamp_row(10) == 10
@@ -160,7 +160,7 @@ def test_transpose_is_a_noop_when_nothing_at_row():
 # --- duration cycling ------------------------------------------------------
 
 def test_cycle_duration_shorten_moves_toward_shorter_values():
-    from duration_tracker import DURATION_CLASS_ORDER
+    from notecolor.analysis.duration_tracker import DURATION_CLASS_ORDER
     column = _col((0, 4), duration_class="quarter")
     sed.cycle_duration(column, +1)
     idx = DURATION_CLASS_ORDER.index("quarter")
@@ -168,7 +168,7 @@ def test_cycle_duration_shorten_moves_toward_shorter_values():
 
 
 def test_cycle_duration_lengthen_moves_toward_longer_values():
-    from duration_tracker import DURATION_CLASS_ORDER
+    from notecolor.analysis.duration_tracker import DURATION_CLASS_ORDER
     column = _col((0, 4), duration_class="quarter")
     sed.cycle_duration(column, -1)
     idx = DURATION_CLASS_ORDER.index("quarter")
@@ -198,7 +198,7 @@ def test_clear_to_rest_empties_the_column():
 # --- insert/delete columns ---------------------------------------------
 
 def test_insert_column_at_inserts_a_rest_before_index():
-    from score_editor_state import new_blank_score
+    from notecolor.notation.score_editor_state import new_blank_score
     score = new_blank_score()
     score.columns.append(_col((0, 4)))
     sed.insert_column_at(score, 0)
@@ -207,7 +207,7 @@ def test_insert_column_at_inserts_a_rest_before_index():
 
 
 def test_delete_column_at_removes_and_returns_true():
-    from score_editor_state import new_blank_score
+    from notecolor.notation.score_editor_state import new_blank_score
     score = new_blank_score()
     score.columns.append(_col((0, 4)))
     assert sed.delete_column_at(score, 0) is True
@@ -215,7 +215,7 @@ def test_delete_column_at_removes_and_returns_true():
 
 
 def test_delete_column_at_refuses_the_last_column():
-    from score_editor_state import new_blank_score
+    from notecolor.notation.score_editor_state import new_blank_score
     score = new_blank_score()
     assert len(score.columns) == 1
     assert sed.delete_column_at(score, 0) is False
@@ -304,7 +304,7 @@ def test_place_note_at_pitch_is_idempotent_and_never_removes():
 
 
 def test_append_column_adds_an_empty_column_inheriting_a_duration():
-    from score_editor_state import new_blank_score
+    from notecolor.notation.score_editor_state import new_blank_score
 
     score = new_blank_score()
     index = sed.append_column(score, "eighth")
@@ -314,8 +314,8 @@ def test_append_column_adds_an_empty_column_inheriting_a_duration():
 
 
 def test_append_column_falls_back_to_the_default_duration():
-    from duration_tracker import DEFAULT_DURATION_CLASS
-    from score_editor_state import new_blank_score
+    from notecolor.analysis.duration_tracker import DEFAULT_DURATION_CLASS
+    from notecolor.notation.score_editor_state import new_blank_score
 
     score = new_blank_score()
     index = sed.append_column(score)

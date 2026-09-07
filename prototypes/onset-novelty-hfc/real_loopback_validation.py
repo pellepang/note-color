@@ -31,10 +31,10 @@ sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import config
-from audio_capture import AudioCapture, resolve_loopback_device
-from pitch_detect import compute_spectrum
-from onset_detect import spectral_flux
+from notecolor.settings import config
+from notecolor.audio.audio_capture import AudioCapture, resolve_loopback_device
+from notecolor.analysis.pitch_detect import compute_spectrum
+from notecolor.analysis.onset_detect import spectral_flux
 
 from novelty import hfc_novelty, complex_domain_novelty
 

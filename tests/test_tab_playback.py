@@ -7,11 +7,11 @@ Nothing here opens an audio device or a terminal -- `main.py`'s
 smoke-tested-only, per this repo's standing convention.
 """
 
-import config
-import tab_playback
-from duration_tracker import DEFAULT_DURATION_CLASS
-from sound_engine import midi_pitch
-from terminal_tab_display import BarlineEntry, TabEntry
+from notecolor.settings import config
+from notecolor.tui import tab_playback
+from notecolor.analysis.duration_tracker import DEFAULT_DURATION_CLASS
+from notecolor.audio.sound_engine import midi_pitch
+from notecolor.tui.terminal_tab_display import BarlineEntry, TabEntry
 
 
 def _note(pitch_class, octave=4, duration_class=None):

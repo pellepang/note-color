@@ -19,10 +19,10 @@ import json
 import numpy as np
 import pytest
 
-import config
-import main
-import playback
-import sound_engine
+from notecolor.settings import config
+from notecolor.tui import app as main
+from notecolor.audio import playback
+from notecolor.audio import sound_engine
 
 
 # --- transcribe --play: still the untouched offline pre-render ---------

@@ -98,10 +98,10 @@ import sounddevice as sd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config
-import main
-from color_map import NOTE_NAMES_FIFTHS
-from duration_tracker import duration_class_for_beats
+from notecolor.settings import config
+from notecolor.tui import app as main
+from notecolor.analysis.color_map import NOTE_NAMES_FIFTHS
+from notecolor.analysis.duration_tracker import duration_class_for_beats
 
 HOP_SECONDS = config.BLOCK_SIZE / config.SAMPLE_RATE
 

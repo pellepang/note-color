@@ -11,7 +11,7 @@ Nothing here scores a transcription -- that is `test_evaluate.py`.
 import numpy as np
 import pytest
 
-import synth_corpus as sc
+from notecolor.convert import synth_corpus as sc
 
 
 def test_track_is_deterministic_from_its_seed():
@@ -119,7 +119,7 @@ def test_rendered_audio_is_finite_and_within_range():
 
 
 def test_rendered_audio_covers_the_whole_arrangement():
-    import config as cfg
+    from notecolor.settings import config as cfg
 
     track = sc.make_track(repeats=1, seed=0)
     audio = sc.render_audio(track)

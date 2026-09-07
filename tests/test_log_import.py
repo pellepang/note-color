@@ -13,8 +13,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config  # noqa: E402
-import log_import  # noqa: E402
+from notecolor.settings import config  # noqa: E402
+from notecolor.notation import log_import  # noqa: E402
 
 
 def _note(t, pc, octave=4, duration=0.5, **extra):
@@ -141,7 +141,7 @@ def test_the_same_log_can_be_requantized_at_another_grid():
 # --- the editor's own structures -----------------------------------------
 
 def test_score_from_events_builds_real_editor_columns():
-    import score_editor_state as ses
+    from notecolor.notation import score_editor_state as ses
 
     score = log_import.score_from_events([_note(0.0, 0), _note(0.01, 4)], tempo_bpm=120.0,
                                           grid="sixteenth", time_signature=(3, 4), key_fifths=2)
@@ -158,7 +158,7 @@ def test_an_empty_log_still_opens_as_a_usable_blank_score():
 
 
 def test_import_log_reads_a_real_file_and_default_path_is_a_musicxml_sibling(tmp_path):
-    import session_recorder
+    from notecolor.notation import session_recorder
 
     path = str(tmp_path / "session_log_20260101_000000.jsonl")
     recorder = session_recorder.SessionRecorder(path=path)

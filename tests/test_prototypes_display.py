@@ -1,4 +1,4 @@
-from prototypes_display import _find_entry_script, _visible_slice, _wrap_readme, list_prototypes
+from notecolor.tui.prototypes_display import _find_entry_script, _visible_slice, _wrap_readme, list_prototypes
 
 
 def _make_prototype(root, name, readme_text):

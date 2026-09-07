@@ -1,0 +1,3142 @@
+"""Real-time audio -> color display.
+
+mic or system-output loopback -> AudioCapture (callback thread)
+    -> analysis thread: ring buffer -> YIN pitch detect -> NoteSmoother -> color_map
+    -> single-slot queue
+    -> main thread: ColorAnimator -> Display (pygame window, or terminal)
+
+GUI controls: Esc/close window to quit, F to toggle fullscreen, D to toggle
+debug overlay, Up/Down to adjust pitch-detection sensitivity, H to toggle
+the keybind-legend line, backslash (unshifted '|') to return to the menu
+when run via virtualnote.py's shell (a no-op quit when run standalone --
+see main()).
+Terminal mode: Ctrl+C to quit, Up/Down for sensitivity, M to toggle the
+audio source (mic <-> loopback) live, P to toggle chord mode (chroma-vector
+chord recognition, up to 6 simultaneous notes) live -- terminal views only,
+not the GUI. 'fill'/'wheel' start monophonic and P opts *up* into chord
+mode; 'tab' starts polyphonic (chord mode on) by default and P opts *down*
+to monophonic instead -- same P key, same boolean flip, just a different
+starting value for 'tab'. 'tab' view only: N toggles the notehead render
+style (symbol glyph <-> bare letter name), L toggles the clef+note-letter
+legend column on/off, Space freezes/un-freezes the view (scrolling and
+per-column dimming pause; the pipeline keeps running in the background).
+'tab' view only, freeze-mode-only (issue #77): R triggers a non-causal
+rhythm re-analysis over a rolling buffer of recent hops, correcting
+duration glyphs/tempo/barlines already on screen in place; Left/Right
+scroll back/forward through retained note-column history.
+Global across every terminal view (issue #40): '|' returns to virtualnote's
+menu (a harmless quit when this module is run standalone via `main.py`,
+which has no menu), H toggles a context-sensitive keybind-legend line
+below the status line, on by default.
+No display server required.
+"""
+
+import argparse
+import math
+import os
+import queue
+import select
+import sys
+import threading
+import time
+from collections import deque
+from typing import NamedTuple, Optional
+
+import numpy as np
+
+from notecolor.analysis import batch_transcribe
+from notecolor.analysis import chroma
+from notecolor.settings import config
+from notecolor.tui import kitty_keys
+from notecolor.analysis import multipitch
+from notecolor.analysis import rhythm_reanalysis
+from notecolor.notation import score_audition
+from notecolor.settings.config_store import store
+from notecolor.audio.audio_capture import AudioCapture, resolve_loopback_device
+from notecolor.analysis.detection_backends import default_pitch_backend, default_poly_backend
+from notecolor.analysis.pitch_detect import compute_spectrum
+from notecolor.analysis.note_smoother import NoteSmoother
+from notecolor.analysis.chord_smoother import ChordSmoother
+from notecolor.analysis.duration_tracker import DurationTracker, duration_class_for_beats
+from notecolor.analysis.onset_detect import chroma_flux
+from notecolor.analysis.tempo_tracker import TempoTracker
+from notecolor.analysis.color_map import note_to_hsl, hsl_to_rgb255, fifths_index, NOTE_NAMES, NOTE_NAMES_FIFTHS
+from notecolor.analysis.animation import ColorAnimator
+from notecolor.notation.session_recorder import SessionRecorder
+from notecolor.notation.session_player import load_events, group_columns
+from notecolor.analysis.staff_map import staff_row
+from notecolor.settings.paths import data_dir
+from notecolor.audio.session import (  # noqa: F401  -- re-exported for callers/tests
+    SENSITIVITY_STEP,
+    SENSITIVITY_MIN,
+    SENSITIVITY_MAX,
+    SourceState,
+    Sensitivity,
+    ReanalysisBuffer,
+    ReanalysisState,
+    RenderItem,
+    analysis_loop,
+    _overwrite,
+    SessionState,
+)
+
+try:
+    import termios
+    import tty
+    _HAS_TERMIOS = True
+except ImportError:  # Windows has neither module
+    _HAS_TERMIOS = False
+
+
+
+class PlaybackState:
+    """Frozen-buffer playback's render-thread/worker-thread handshake (map
+    #99, ticket #121, decision #109) -- the same shape as ReanalysisState
+    above, for the same reason: the render loop needs one flag to show in
+    the status line and to tell a second Enter press "stop" rather than
+    "start again", and the worker needs one flag to know it has been
+    asked to stop. Plain attribute access, safe under CPython's GIL
+    (`threading.Event` for `stop` only because the worker *waits* on it,
+    which an attribute can't do).
+
+    `note_count` is what was scheduled, kept purely for the status line
+    -- "playing N notes" is the one piece of feedback that tells a user
+    the marked range they set actually covers what they thought it
+    did."""
+
+    def __init__(self):
+        self.in_progress = False
+        self.stop = threading.Event()
+        self.note_count = 0
+        self.unavailable = None
+
+
+_ARROW_BY_FINAL_BYTE = {"A": "UP", "B": "DOWN", "C": "RIGHT", "D": "LEFT"}
+
+# The final byte(s) that mean "this was a Shift-modified arrow" once a CSI
+# sequence's parameter bytes are known -- xterm's modifier encoding puts a
+# ";2" second parameter (shift=2, out of a small fixed vocabulary of
+# modifier codes: 2=shift, 3=alt, 4=shift+alt, 5=ctrl, ...) after the
+# always-"1" first parameter for a *modified* arrow (an unmodified arrow
+# sends no parameter bytes at all -- see _parse_csi_params()'s docstring).
+_SHIFT_ARROW_FINAL_BYTES = {"A": "SHIFT_UP", "B": "SHIFT_DOWN"}
+
+
+def _parse_csi_params(param_bytes, final_byte):
+    """Pure: interprets one CSI arrow sequence's parameter bytes (whatever
+    ASCII digits/semicolons `RawKeys.poll()` read between 'ESC [' and the
+    final letter) plus that final letter, into the token `poll()` should
+    return. `param_bytes == ""` is a bare, unmodified arrow burst (`ESC [
+    <letter>`, this app's original and by far most common case) -- maps
+    straight through `_ARROW_BY_FINAL_BYTE`, unchanged from before this
+    function existed. `param_bytes == "1;2"` is the standard xterm
+    encoding for a Shift-held arrow (`ESC [ 1 ; 2 <letter>`) -- 'A'/'B'
+    (Up/Down) map to `"SHIFT_UP"`/`"SHIFT_DOWN"`, the two tokens
+    Shift+Up/Down transpose (issue #98 follow-up) needs; Shift+Left/Right
+    aren't consumed by anything in this app yet, so they -- and every
+    *other* modifier code (Alt, Ctrl, combinations) -- fall back to the
+    plain, unmodified direction for `final_byte` rather than dropping the
+    keystroke, same graceful-degradation posture `poll()`'s own docstring
+    already documents for a laggy/multiplexed pty (a modifier this app
+    doesn't recognize is still "the user pressed an arrow key"). Returns
+    None only when `final_byte` isn't a known arrow final byte at all."""
+    direction = _ARROW_BY_FINAL_BYTE.get(final_byte)
+    if direction is None:
+        return None
+    if param_bytes == "1;2":
+        return _SHIFT_ARROW_FINAL_BYTES.get(final_byte, direction)
+    return direction
+
+
+class RawKeys:
+    """Non-blocking single-key reads from stdin, for terminal hotkeys.
+    Inert (poll() always returns None) when stdin isn't a real TTY or
+    termios/tty aren't available (Windows) -- terminal modes keep working,
+    just without live hotkeys, in that case.
+
+    Optionally (``want_kitty=True``) negotiates the kitty keyboard
+    protocol (`kitty_keys.py`, wayfinder map #99 / ticket #118), which is
+    the only way a terminal reports key *releases* -- and therefore the
+    only way a held key can sustain a note rather than machine-gunning
+    it. Off by default, and deliberately so: negotiation is per-view, not
+    process-wide, so `|` back-to-menu never pays the (<=0.25s worst case)
+    round trip, which would work directly against the "instant
+    transition" reason `|` exists at all. Every existing caller
+    constructs `RawKeys()` with no arguments and gets byte-for-byte
+    today's behaviour, including today's exact `poll()` contract.
+
+    With the protocol active, `poll()` still returns exactly the same
+    tokens it always has (`kitty_keys.legacy_token()` maps the richer
+    event stream back down: releases are skipped rather than returned as
+    None, auto-repeat maps to the same token a press does so holding Down
+    on a menu still scrolls, and a bare modifier press maps to nothing so
+    a "press any key" screen isn't dismissed by a stray Shift).
+    `poll_event()` is the new, opt-in richer view: one
+    `kitty_keys.KeyEvent` per call, with press/repeat/release
+    distinguished. On a terminal without the protocol it synthesises a
+    PRESS event from whatever `poll()` would have returned, so a caller
+    written against events works everywhere (with the degraded
+    fixed-duration note policy).
+    """
+
+    def __init__(self, fd=None, out_fd=None, want_kitty=False,
+                 kitty_flags=kitty_keys.SYNTH_FLAGS,
+                 negotiation_timeout=config.KITTY_NEGOTIATION_TIMEOUT,
+                 set_cbreak=True):
+        # `fd` is a constructor parameter rather than sys.stdin.fileno()
+        # read inline (as it was before ticket #118) purely for
+        # testability: it is what lets every byte path below -- the
+        # negotiation, the fallback, the parser -- be exercised against an
+        # os.pipe() in an environment with no TTY at all, per this repo's
+        # "pure logic unit-tested, real terminal I/O smoke-tested"
+        # convention. `out_fd` splits the write side off for the same
+        # reason; on a real terminal the two are the same fd.
+        self._fd = sys.stdin.fileno() if fd is None else fd
+        self._out_fd = self._fd if out_fd is None else out_fd
+        self._active = _HAS_TERMIOS and os.isatty(self._fd)
+        self._old_settings = None
+        self._pushed = False
+        self._kitty_flags_wanted = kitty_flags
+        self._pending = deque()
+        self._queued_events = deque()
+        self._held = {}
+        self.kitty = False
+        self.kitty_flags = None
+        self.kitty_flags_before = None
+        self.negotiation = "skipped"
+        if self._active and set_cbreak:
+            self._old_settings = termios.tcgetattr(self._fd)
+            tty.setcbreak(self._fd)
+        if want_kitty:
+            self._negotiate(negotiation_timeout)
+
+    @property
+    def active(self):
+        """True once a real TTY was found and raw mode entered -- lets a
+        caller that *requires* a keypress to proceed (unlike every
+        run_terminal_* loop, which just keeps rendering regardless) avoid
+        blocking forever on poll(), which always returns None when this is
+        False."""
+        return self._active
+
+    # -- kitty keyboard protocol negotiation ----------------------------
+
+    def _negotiate(self, timeout):
+        """Ask whether the terminal speaks the kitty keyboard protocol,
+        wait a bounded time, and push the mode only on success.
+
+        The *failure* path is the one that matters, since it is what every
+        non-kitty terminal takes. `kitty_keys.PROBE_SEQUENCE` sends the
+        protocol query immediately followed by a DA1 request -- and every
+        VT-lineage terminal answers DA1. So a terminal without the
+        protocol settles the question the moment its DA1 reply lands,
+        rather than waiting out a timeout; the timeout only covers
+        something pathological (a pty with nothing on the far end).
+        Bytes the user typed ahead during the probe are recovered from
+        `probe.leftover` and queued as ordinary input rather than eaten.
+        On any non-supported outcome no mode is ever pushed, and poll()
+        behaves exactly as it did before this existed.
+        """
+        if not self._active:
+            self.negotiation = "no-tty"
+            return
+        if not self._write(kitty_keys.PROBE_SEQUENCE):
+            self.negotiation = "write-failed"
+            return
+        probe = kitty_keys.CapabilityProbe()
+        deadline = time.monotonic() + timeout
+        while not probe.settled:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if not select.select([self._fd], [], [], remaining)[0]:
+                continue
+            chunk = os.read(self._fd, 1024)
+            if not chunk:
+                break
+            probe.feed(chunk)
+        self.negotiation = probe.state
+        for byte in probe.leftover.decode("utf-8", "ignore"):
+            self._pending.append(byte)
+        if not probe.supported:
+            return
+        self._write(kitty_keys.push_sequence(self._kitty_flags_wanted))
+        self._write(kitty_keys.FOCUS_TRACKING_ON)
+        self._pushed = True
+        self.kitty = True
+        # The flags *pushed*, not the ones the query reported: the query
+        # answers with the terminal's flag state as it was *before* the
+        # push, which is 0 in a fresh kitty. Reporting that reads as "the
+        # protocol isn't on" when reaching this branch at all proves it
+        # is -- only a kitty-protocol terminal answers CSI ? u, and one
+        # that doesn't settles as unsupported via the DA1 sentinel. That
+        # exact misreport was found and fixed during issue #101's live
+        # verification; `kitty_flags_before` keeps the queried value,
+        # which is the honest answer to "what was already active".
+        self.kitty_flags = self._kitty_flags_wanted
+        self.kitty_flags_before = probe.flags
+
+    def _write(self, data):
+        """Emit an escape sequence. Never raises -- a terminal that has
+        gone away must degrade to "no protocol", not crash a render
+        loop."""
+        try:
+            os.write(self._out_fd, data)
+            return True
+        except OSError:
+            return False
+
+    # -- reading --------------------------------------------------------
+
+    def poll(self):
+        """One key token, or None -- the exact contract every existing
+        caller depends on, unchanged by the kitty protocol."""
+        while True:
+            item = self._next()
+            if item is None:
+                return None
+            if isinstance(item, str):
+                return item
+            token = kitty_keys.legacy_token(item)
+            if token is not None:
+                return token
+            # A release (or a bare modifier press): invisible to a legacy
+            # caller. Keep draining rather than returning None -- a
+            # note-off must never make a menu look like nothing was
+            # pressed.
+
+    def poll_event(self):
+        """One `kitty_keys.KeyEvent`, or None when there's no input.
+
+        On a terminal without the protocol, whatever `poll()` would have
+        returned is synthesised as a PRESS with no modifiers, so a caller
+        written against events keeps working everywhere -- it just never
+        sees a release there, and must fall back to
+        `kitty_keys.FixedDurationKeys`."""
+        item = self._next()
+        if item is None:
+            return None
+        if isinstance(item, str):
+            return _synthetic_press(item)
+        return item
+
+    def release_all(self):
+        """Synthetic RELEASE events for every key this instance currently
+        believes is held down, and forget them. Returns [] when the
+        protocol isn't active (nothing is ever tracked as held there).
+
+        Called automatically on focus-out, and worth calling explicitly
+        when a view exits: a stuck note is the single worst failure mode
+        of a held-note instrument, and a release delivered to whichever
+        window has focus *now* never reaches us."""
+        events = [
+            kitty_keys.KeyEvent(key=key, event=kitty_keys.RELEASE, mods=0,
+                                text="", codepoint=codepoint)
+            for key, codepoint in sorted(self._held.items())
+        ]
+        self._held.clear()
+        return events
+
+    def _next(self):
+        """Next queued item, else read the fd once. Items are either a str
+        (a legacy token, when the protocol isn't active) or a KeyEvent."""
+        if self._queued_events:
+            return self._queued_events.popleft()
+        if self._pending:
+            return self._decode_pending()
+        # Reads via os.read() on the raw fd, never sys.stdin.read() --
+        # sys.stdin is a buffered TextIOWrapper, and mixing select()
+        # (which only sees data still sitting at the OS level) with a
+        # buffered read() is a classic trap: read(1) can slurp every byte
+        # the pty already delivered into Python's internal buffer while
+        # only handing back the one requested, so the *next* select()
+        # call sees nothing left at the fd and falsely reports "no more
+        # input yet" -- even though the rest of an ESC [ <letter> arrow
+        # burst was sitting right there. That's what made Up/Down on the
+        # menu screen require holding the key instead of registering on a
+        # single tap. os.read() is unbuffered, so select() and read() stay
+        # in sync with the actual fd state.
+        if not self._active or not select.select([self._fd], [], [], 0)[0]:
+            return None
+        chunk = os.read(self._fd, 1024)
+        for byte in chunk.decode("utf-8", "ignore"):
+            self._pending.append(byte)
+        if not self._pending:
+            return None
+        return self._decode_pending()
+
+    def _decode_pending(self):
+        ch = self._pending.popleft()
+        if ch != "\x1b":
+            return ch
+        # Arrow keys send ESC [ <letter> as one burst, but under a
+        # multiplexer (tmux) or a laggy pty the two continuation bytes can
+        # arrive a few ms after ESC itself rather than in the same read --
+        # a 0-timeout select() right here would misread that as a lone
+        # Escape keypress and silently drop the arrow key.
+        # config.ESCAPE_SEQUENCE_TIMEOUT gives the rest of the burst a
+        # brief window to show up.
+        if not self._await_bytes():
+            # With the protocol active a bare Escape is impossible (it
+            # arrives as CSI 27 u), so an ESC with nothing behind it is
+            # genuinely the Escape key only when the protocol is off --
+            # where nothing in this app binds it, so returning None
+            # preserves today's behaviour exactly.
+            return "\x1b" if self.kitty else None
+        if self._pending[0] != "[":
+            return None
+        self._pending.popleft()
+        # A bare arrow is 'ESC [ <letter>' -- no parameter bytes at all.
+        # A modified arrow (issue #98's Shift+Up/Down) instead sends
+        # 'ESC [ <params> <letter>'; a kitty key event sends the same
+        # shape with richer parameters (see kitty_keys.parse_key_event()).
+        # Keep reading for as long as each byte is a parameter byte; the
+        # first byte that isn't one is the sequence's final letter.
+        params = ""
+        while True:
+            if not self._await_bytes():
+                return None
+            ch = self._pending.popleft()
+            if ch and ch in "0123456789;:<>?":
+                params += ch
+                continue
+            if not self.kitty:
+                return _parse_csi_params(params, ch)
+            if params == "" and ch in (kitty_keys.FOCUS_IN_FINAL,
+                                       kitty_keys.FOCUS_OUT_FINAL):
+                return self._handle_focus(ch)
+            event = kitty_keys.parse_key_event(params, ch)
+            if event is not None:
+                self._note_held(event)
+            return event
+
+    def _handle_focus(self, final_byte):
+        """Focus reporting (DECSET 1004, enabled alongside the keyboard
+        mode). On focus-out, every key still held is released *to whoever
+        has focus now* -- we will never see those releases -- so synthesise
+        them here rather than let the notes hang. Returns the first such
+        event (the rest are queued), or None on focus-in / nothing held."""
+        if final_byte == kitty_keys.FOCUS_IN_FINAL:
+            return None
+        events = self.release_all()
+        if not events:
+            return None
+        self._queued_events.extend(events[1:])
+        return events[0]
+
+    def _note_held(self, event):
+        if event.event == kitty_keys.RELEASE:
+            self._held.pop(event.key, None)
+        else:
+            self._held[event.key] = event.codepoint
+
+    def _await_bytes(self):
+        """Ensure at least one byte is queued, giving a split escape burst
+        the same brief grace window poll() has always given it."""
+        if self._pending:
+            return True
+        timeout = config.ESCAPE_SEQUENCE_TIMEOUT
+        if not select.select([self._fd], [], [], timeout)[0]:
+            return False
+        chunk = os.read(self._fd, 1024)
+        for byte in chunk.decode("utf-8", "ignore"):
+            self._pending.append(byte)
+        return bool(self._pending)
+
+    # -- teardown -------------------------------------------------------
+
+    def restore(self):
+        """Leave the terminal exactly as it was found. Idempotent, and
+        safe on any error path -- popping the keyboard mode is not
+        optional: without it the user's shell inherits a terminal that
+        reports every keystroke as an escape code."""
+        if self._pushed:
+            self._write(kitty_keys.FOCUS_TRACKING_OFF)
+            self._write(kitty_keys.pop_sequence())
+            self._pushed = False
+            self.kitty = False
+        if self._active and self._old_settings is not None:
+            termios.tcsetattr(self._fd, termios.TCSADRAIN, self._old_settings)
+            self._old_settings = None
+
+
+def _synthetic_press(token):
+    """A `poll()`-shaped token seen as a KeyEvent, for `poll_event()` on a
+    terminal with no kitty protocol."""
+    single = len(token) == 1
+    return kitty_keys.KeyEvent(
+        key=token.lower() if single else token,
+        event=kitty_keys.PRESS,
+        mods=kitty_keys.MOD_SHIFT if single and token.isupper() else 0,
+        text=token if single else "",
+        codepoint=ord(token) if single else 0,
+    )
+
+
+def _positive_float(text):
+    value = float(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return value
+
+
+def _parse_time_signature(text):
+    """'N/D' -> (N, D) as positive ints, for --time-signature. Mirrors
+    _positive_float's style: raises argparse.ArgumentTypeError on anything
+    that isn't exactly two positive-integer parts separated by '/'."""
+    parts = text.split("/")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("must be in N/D form, e.g. 3/4")
+    try:
+        numerator, denominator = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be in N/D form, e.g. 3/4") from None
+    if numerator <= 0 or denominator <= 0:
+        raise argparse.ArgumentTypeError("both N and D must be > 0")
+    return numerator, denominator
+
+
+def _handle_sensitivity_key(key, sensitivity):
+    if key == "DOWN":
+        sensitivity.adjust(1.0 / SENSITIVITY_STEP)
+    elif key == "UP":
+        sensitivity.adjust(SENSITIVITY_STEP)
+
+
+def _key_hint(action):
+    """Status-line hint for a remappable action's bound key (issue #41) --
+    'space' spelled out instead of the literal, invisible character."""
+    bound = store.keybind(action)
+    return "space" if bound == " " else bound
+
+
+def _handle_source_key(key, capture, source_state):
+    if key is None or key.lower() != store.keybind("source_toggle").lower():
+        return
+    new_source = "loopback" if source_state.value == "mic" else "mic"
+    try:
+        if new_source == "loopback":
+            device = resolve_loopback_device()
+        else:
+            os.environ.pop("PULSE_SOURCE", None)
+            device = None
+    except RuntimeError as exc:
+        source_state.error = str(exc)
+        return
+    capture.restart(device)
+    source_state.value = new_source
+    source_state.error = None
+
+
+def _handle_session_record_key(key, session_recorder):
+    """Opt-in live session recorder toggle (default 's'), available in
+    every terminal view (fill/wheel/tab) -- GUI has no live-hotkey
+    mechanism for toggles like this, same established out-of-scope
+    precedent as chord mode's 'P'. Mutates session_recorder in place
+    (opens/closes its backing file), same shape as _handle_source_key."""
+    bound = store.keybind("session_record_toggle")
+    if key is not None and key.lower() == bound.lower():
+        session_recorder.toggle()
+
+
+
+
+def _status_text(label, freq, confidence, rms, sensitivity, source_state=None, chord_name=None, chord_mode=False):
+    if chord_mode:
+        text = f"chord={(chord_name or ''):<14s} sens={sensitivity.value:.2f} (up/down)"
+    else:
+        freq_str = f"{freq:6.1f}Hz" if freq else "  --  "
+        text = (f"note={label:<4s} freq={freq_str} conf={confidence:.2f} rms={rms:.4f} "
+                f"sens={sensitivity.value:.2f} (up/down)")
+    if source_state is not None:
+        text += f"  src={source_state.value} ({_key_hint('source_toggle')})"
+        if source_state.error:
+            text += f"  [source switch failed: {source_state.error}]"
+    return text
+
+
+def _handle_chord_mode_key(key, chord_mode):
+    """P toggles chord_mode -- a plain boolean flip, direction-agnostic.
+    fill/wheel start False (opt *up* into chord mode); tab starts True
+    (opt *down* to monophonic) -- the starting value lives in each view's
+    own run_terminal_* function, not here."""
+    bound = store.keybind("chord_mode_toggle")
+    return not chord_mode if (key is not None and key.lower() == bound.lower()) else chord_mode
+
+
+def _handle_notehead_style_key(key, notehead_style):
+    """'tab' view only: N toggles the notehead render style (issue #21) --
+    *symbol* (open notehead glyph + Unicode accidental) <-> *name* (bare
+    letter + ASCII accidental, no octave digit)."""
+    bound = store.keybind("notehead_style_toggle")
+    if key is None or key.lower() != bound.lower():
+        return notehead_style
+    return "name" if notehead_style == "symbol" else "symbol"
+
+
+def _handle_legend_key(key, legend_on):
+    """'tab' view only: L toggles the clef+note-letter legend column on/off
+    live (issue #19), reclaiming its width for note columns when off."""
+    bound = store.keybind("legend_toggle")
+    return not legend_on if (key is not None and key.lower() == bound.lower()) else legend_on
+
+
+def _handle_back_to_menu_key(key):
+    """Global (every terminal tool, issue #40): '|' is the always-live
+    back-to-menu keybind, same tier as M/P/H -- a run_terminal_* loop
+    returns the "menu" sentinel the instant this fires, through its
+    existing finally block (keys.restore()/display.quit() still run).
+    GUI wires its own pygame K_BACKSLASH check directly in run_gui rather
+    than sharing this raw-key-string handler (the shifted '|' character
+    isn't how pygame reports the unshifted physical key)."""
+    return key == "|"
+
+
+def _handle_help_legend_key(key, help_legend_on):
+    """Global (every terminal tool, issue #40): H toggles the persistent,
+    context-sensitive keybind-legend line shown below the status line.
+    Default True; session-local only -- no persistence across runs, that's
+    issue #41's job. Direction-agnostic boolean flip, same shape as
+    _handle_chord_mode_key's P. Named to avoid colliding with tab's older,
+    unrelated _handle_legend_key/legend_on (the staff clef+letter legend
+    *column*, a different feature -- see that function's docstring)."""
+    return not help_legend_on if (key is not None and key.lower() == "h") else help_legend_on
+
+
+def _legend_line(view_hints):
+    """Builds the optional extra status-line row shown when the H toggle
+    is on: '|'/'h' first (always live, every view), then whatever hotkeys
+    the calling view actually has. Deliberately a plain joined string, not
+    a UI framework -- issue #40 owns only the toggle plumbing; the visual
+    design of the whole shell (including this line) is #42's job."""
+    return "  ".join(["|=menu", "h=legend"] + view_hints)
+
+
+_EDITOR_ACTIONS = [
+    "note_toggle", "duration_shorten", "duration_lengthen",
+    "clear_to_rest", "insert_column", "delete_column", "undo", "redo", "zoom_cycle",
+    "chords_only_toggle", "save", "score_properties",
+    # Audition/piano mode/playback (map #99, ticket #120, decision #108).
+    # mark_range_start/mark_range_end are the tab view's own existing
+    # bindings ('['/']'), reused verbatim rather than duplicated: #108
+    # settled that the editor's loop region is the same "mark a range at
+    # the point you're looking at" gesture applied to columns instead of
+    # history timestamps, so it must be the same gesture.
+    "piano_mode", "play_from_cursor", "metronome_toggle", "audition_toggle",
+    "mark_range_start", "mark_range_end",
+]
+# transpose_up/transpose_down (issue #98 follow-up) are deliberately *not*
+# in _EDITOR_ACTIONS/config.DEFAULT_KEYBINDS -- they were remappable
+# [keybinds]-table actions bound to '+'/'-' by default, but direct user
+# feedback after hands-on use found '+'/'-' too far from the arrow keys
+# already used for cursor movement. Replaced with hardcoded Shift+Up/
+# Shift+Down (below, resolve_editor_action()'s SHIFT_UP/SHIFT_DOWN cases)
+# -- same tier as Left/Right/Up/Down/Enter, never remappable, a modifier-
+# arrow combo being a natural extension of "arrows are never remapped in
+# this app" rather than something settings_display.is_valid_remap_key()
+# could represent anyway (it validates a single character). See
+# docs/DECISIONS.md.
+# undo/redo (issue #98) intentionally share a letter ('u'/'U' by default) --
+# matched case-sensitively below, unlike every other remappable action in
+# this codebase (matched case-insensitively, e.g. 'M' also toggles source
+# the same as 'm'). See docs/DECISIONS.md.
+# piano_mode/play_from_cursor/metronome_toggle/audition_toggle (ticket
+# #120) join undo/redo in exact-case matching for a related reason: they
+# default to Shift+letter, and their unshifted letters are live notes on
+# piano mode's two-octave keyboard ('m' is B, 'p' is unused, 'l'/'a' are
+# not on it) -- a case-insensitive 'M' would be indistinguishable from
+# playing B. See docs/DECISIONS.md.
+_EDITOR_CASE_SENSITIVE_ACTIONS = ("undo", "redo", "piano_mode", "play_from_cursor",
+                                  "metronome_toggle", "audition_toggle")
+
+
+def _match_editor_action(key, action, keybind_store):
+    if key is None:
+        return False
+    bound = keybind_store.keybind(action)
+    if action in _EDITOR_CASE_SENSITIVE_ACTIONS:
+        return key == bound
+    return key.lower() == bound.lower()
+
+
+def resolve_editor_action(key, keybind_store=None):
+    """Pure keypress-to-action mapping for the score editor's main view
+    (issue #98, run_score_editor). Left/Right/Up/Down (cursor movement),
+    Shift+Up/Shift+Down (transpose, issue #98 follow-up -- see
+    _EDITOR_ACTIONS' own comment for why this replaced a remappable
+    '+'/'-'), and Enter (open the Chord builder) are hardcoded, never
+    remappable -- same tier as every other view's arrow-key cursor
+    handling; every other action goes through config_store's remappable
+    [keybinds] table (config.DEFAULT_KEYBINDS' score-editor entries).
+    Returns the matched action name ('LEFT'/'RIGHT'/'UP'/'DOWN'/'ENTER',
+    'transpose_up'/'transpose_down' for the Shift+arrow tokens
+    RawKeys.poll() returns, or one of _EDITOR_ACTIONS), or None if `key`
+    doesn't match anything.
+
+    `keybind_store` defaults to the module-level config_store.store
+    singleton; a test can pass any object exposing a compatible
+    `.keybind(action)` method instead, without needing to monkeypatch
+    the module attribute."""
+    keybind_store = keybind_store if keybind_store is not None else store
+    if key in ("LEFT", "RIGHT", "UP", "DOWN"):
+        return key
+    if key == "SHIFT_UP":
+        return "transpose_up"
+    if key == "SHIFT_DOWN":
+        return "transpose_down"
+    if key in ("\r", "\n"):
+        return "ENTER"
+    for action in _EDITOR_ACTIONS:
+        if _match_editor_action(key, action, keybind_store):
+            return action
+    return None
+
+
+def _handle_freeze_key(key, frozen):
+    """'tab' view only: Space toggles freeze-frame (issue #23) -- while
+    frozen, run_terminal_tab stops pulling new items off result_queue (so
+    no new columns get pushed and no stale label/freq/etc. get overwritten)
+    and TabDisplay.render() is called with frozen=True (every visible
+    column pinned to age 0, overriding issue #22's fade). The underlying
+    analysis pipeline keeps running regardless -- result_queue is a
+    single-slot always-overwritten queue, so simply not draining it while
+    frozen causes no backlog, matching how every other view already
+    behaves under backpressure. Un-freezing resumes live immediately, no
+    catch-up of anything that happened while frozen."""
+    bound = store.keybind("freeze_toggle")
+    return not frozen if (key is not None and key.lower() == bound.lower()) else frozen
+
+
+def _handle_scroll_keys(key, frozen, scroll_offset, max_offset):
+    """'tab' view only: Left/Right scroll back/forward through TabDisplay's
+    retained history while frozen (issue #77) -- a no-op outside freeze,
+    since scroll_offset is meaningless against a live-scrolling tail (and
+    run_terminal_tab resets it to 0 the moment freeze is turned back off,
+    same "no catch-up" convention Space itself already follows). `key` is
+    the raw "LEFT"/"RIGHT" token RawKeys.poll() returns. `max_offset`
+    should be `len(display.entries) - 1` -- offset can't hide every
+    retained entry off the tail; at least one must stay visible to play
+    the role of "the newest visible column" for that offset. Left
+    increases the offset (scrolls further back); Right decreases it
+    (scrolls back toward live)."""
+    if not frozen:
+        return scroll_offset
+    if key == "LEFT":
+        return min(scroll_offset + 1, max(max_offset, 0))
+    if key == "RIGHT":
+        return max(scroll_offset - 1, 0)
+    return scroll_offset
+
+
+def _handle_mark_keys(key, frozen, mark_start, mark_end, timestamp):
+    """'tab' view only: loop/section markers -- `mark_range_start`/
+    `mark_range_end` each capture `timestamp` (the point in history
+    currently being looked at; see TabDisplay.timestamp_at_offset(), which
+    already accounts for any active Left/Right scrollback) as one end of a
+    range that `_handle_reanalysis_key()` later scopes the R-key non-causal
+    reanalysis to, instead of the whole rolling buffer -- see notation-
+    and-feature-ideas.md's "Loop/section markers for review".
+
+    A no-op (returns the marks unchanged) unless frozen -- same gating as
+    scrollback/reanalysis themselves, since a live-scrolling tail has no
+    stable "point in history" to mark -- or when `timestamp` is None (no
+    entries pushed yet, nothing to mark). Order-independent: whichever
+    mark's key is pressed just gets overwritten with the current
+    timestamp; `_mark_range()` normalizes the pair into (lo, hi) only
+    where the range is actually consumed, so pressing end-then-start
+    works the same as start-then-end."""
+    if not frozen or timestamp is None or key is None:
+        return mark_start, mark_end
+    if key.lower() == store.keybind("mark_range_start").lower():
+        return timestamp, mark_end
+    if key.lower() == store.keybind("mark_range_end").lower():
+        return mark_start, timestamp
+    return mark_start, mark_end
+
+
+def _mark_range(mark_start, mark_end):
+    """Returns a (lo, hi) tuple once both loop/section markers are set, or
+    None otherwise (no marks, or only one end placed so far) -- the shape
+    `_handle_reanalysis_key()`'s `mark_range=` param and the status line's
+    mark hint both consume. Normalizes order since mark_range_start/
+    mark_range_end can be pressed in either order relative to each other
+    in time (see _handle_mark_keys)."""
+    if mark_start is None or mark_end is None:
+        return None
+    return (min(mark_start, mark_end), max(mark_start, mark_end))
+
+
+def _filter_hop_records_to_range(hop_records, mark_range, hop_seconds):
+    """Restricts `hop_records` (see ReanalysisBuffer.snapshot()) to those
+    whose real timestamp (`hop_index * hop_seconds`) falls within the
+    inclusive `[lo, hi]` loop/section-marked range -- or returns
+    `hop_records` unchanged when `mark_range` is None (no marks set, the
+    R-key reanalysis's original whole-buffer scope). `rhythm_reanalysis.
+    recompute()` already handles an empty list (returns None, the same
+    "nothing to reanalyze" no-op its caller already treats as such), so a
+    mark_range with no hops inside it is safe, not a crash."""
+    if mark_range is None:
+        return hop_records
+    lo, hi = mark_range
+    return [r for r in hop_records if lo <= r.hop_index * hop_seconds <= hi]
+
+
+def _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, result_queue, beats_per_bar,
+                            hop_seconds, mark_range=None):
+    """'tab' view only: R triggers the non-causal rhythm re-analysis
+    (issue #77) -- a no-op unless the view is currently frozen, or a
+    recompute is already running (reanalysis_state.in_progress guards
+    against stacking up redundant recomputes on repeated presses).
+
+    Spawns a throwaway thread rather than routing the recompute through
+    the analysis thread: per docs/research/live-noncausal-rhythm-
+    reanalysis.md's Q5, the analysis thread's own per-hop cadence must
+    never stall on a recompute that can take up to ~1.3s at the largest
+    configured window, and the render loop has nothing else to do while
+    frozen anyway. `reanalysis_buffer.snapshot()` is read once, up front,
+    on the render thread itself -- a plain deque copy is safe (if not
+    perfectly point-in-time) against the analysis thread's concurrent
+    appends under CPython's GIL; see ReanalysisBuffer's own docstring.
+    The spawned thread then does the actual (slower) recompute work
+    entirely off both the render and analysis threads, and hands its
+    result back via `result_queue` (a single-slot queue.Queue, the same
+    always-overwritten idiom this codebase already uses for the analysis
+    -> render handoff) -- run_terminal_tab's main loop polls it
+    non-blockingly once per iteration.
+
+    `mark_range` (loop/section markers; see _mark_range()) optionally
+    narrows the snapshot to just that `(lo, hi)` window via
+    _filter_hop_records_to_range() before the recompute runs -- None (no
+    marks set) reproduces the original whole-buffer scope exactly."""
+    bound = store.keybind("rhythm_reanalysis")
+    if key is None or key.lower() != bound.lower() or not frozen or reanalysis_state.in_progress:
+        return
+    reanalysis_state.in_progress = True
+    hop_records = _filter_hop_records_to_range(reanalysis_buffer.snapshot(), mark_range, hop_seconds)
+
+    def _worker():
+        try:
+            result = rhythm_reanalysis.recompute(hop_records, hop_seconds, beats_per_bar)
+            _overwrite(result_queue, result)
+        finally:
+            reanalysis_state.in_progress = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _apply_reanalysis_result(display, result, hop_seconds):
+    """Applies one rhythm_reanalysis.RecomputeResult to the frozen
+    TabDisplay -- called from run_terminal_tab's main loop once a pending
+    recompute's result shows up on the reanalysis result queue. Corrected
+    note durations always apply (they fall back to the same
+    DEFAULT_DURATION_CLASS the live path already uses when no bpm was
+    available, so applying them is never worse than what's already
+    displayed). Barline reconciliation only happens when the recompute
+    actually produced a bpm estimate -- with none, recompute() can't place
+    any corrected barlines either (see its own docstring), and erasing the
+    window's existing (live-estimated, imperfect but non-empty) barlines
+    with nothing to replace them would be strictly worse than leaving them
+    alone. `end_t` is nudged one hop_seconds past the window's last hop so
+    a barline landing exactly at the final buffered hop is still erased."""
+    for note in result.corrected_notes:
+        display.correct_duration(note.pitch_class, note.octave, note.onset_time, note.duration_class)
+    if result.bpm_estimate is not None:
+        display.erase_barlines(result.window_start_time, result.window_end_time + hop_seconds)
+        for t in result.barline_times:
+            display.insert_barline(t)
+
+
+def is_playback_key(key):
+    """Pure: is this keypress the frozen-playback trigger? Enter, and only
+    Enter (both the `\r` a raw TTY sends and the `\n` a pipe would),
+    hardcoded rather than remappable -- same tier as this app's other
+    hardcoded Enter/arrow handling (`resolve_editor_action()`), and
+    #109's decision 4: the `tab` view already carries `P N L S Space R [
+    ] H |` plus arrows, Enter is the one unused key there, and
+    overloading `Space` (freeze, then play) was rejected because it is
+    the one key in this view whose meaning is currently crisp."""
+    return key in ("\r", "\n")
+
+
+def _handle_playback_key(key, frozen, playback_state, display, sound_engine_provider,
+                          chord_mode=False, notehead_style="symbol", legend_on=True,
+                          scroll_offset=0, mark_range=None, bpm=None):
+    """'tab' view only: Enter starts frozen-buffer playback, and a second
+    Enter stops it (map #99, ticket #121, decision #109). A no-op unless
+    the view is currently frozen -- live-view sonification is explicitly
+    out of scope (#109 dropped it on a measured ~163ms detection-to-sound
+    latency that cannot be reduced without damaging detection itself), so
+    this key must do nothing at all while the view is live.
+
+    Scope is `tab_playback.select_columns()`'s: the `[`/`]` marked range
+    if one is set, else exactly the columns `display.visible_entries()`
+    reports -- the renderer's own width-budget walk, not a second guess
+    at what is on screen.
+
+    The schedule is built here, on the render thread, from a plain
+    snapshot; the *waiting* happens on a throwaway daemon thread, the
+    same shape `_handle_reanalysis_key()` uses and for the same reason --
+    the render loop must keep polling keys (not least the Enter that
+    stops this) while playback runs.
+
+    A failure to obtain a sound engine (most plausibly
+    `synth_engine.SynthUnavailable`: SciPy is an optional extra) is
+    recorded on `playback_state.unavailable` for the status line rather
+    than raised -- a missing optional dependency must not take down a
+    view whose actual job is drawing notes."""
+    # Imported locally, same convention as playback/score_writer/pygame
+    # and SessionState.ensure_sound_engine() itself -- nothing on the
+    # capture/analysis path may pay for the sound engine's import.
+    from notecolor.tui import tab_playback
+
+    if not is_playback_key(key) or not frozen:
+        return
+    if playback_state.in_progress:
+        playback_state.stop.set()
+        return
+    columns = tab_playback.select_columns(
+        display.visible_entries(chord_mode=chord_mode, notehead_style=notehead_style,
+                                legend_on=legend_on, scroll_offset=scroll_offset),
+        list(display.entries),
+        mark_range,
+    )
+    schedule = tab_playback.build_schedule(columns, bpm=bpm)
+    if not schedule:
+        return
+    if sound_engine_provider is None:
+        playback_state.unavailable = "no engine"
+        return
+    try:
+        engine = sound_engine_provider()
+    except Exception as exc:                        # noqa: BLE001 -- surfaced in the status line
+        playback_state.unavailable = str(exc).splitlines()[0][:60] or exc.__class__.__name__
+        return
+    playback_state.unavailable = None
+    playback_state.note_count = len(schedule)
+    playback_state.stop.clear()
+    playback_state.in_progress = True
+    threading.Thread(target=_playback_worker, args=(engine, schedule, playback_state), daemon=True).start()
+
+
+def _playback_worker(engine, schedule, playback_state):
+    """Plays one `tab_playback.build_schedule()` result in real time, on a
+    throwaway thread. Each note is a note-on plus a `schedule_note_off()`
+    of its own measured length -- resolved against the audio callback's
+    own frame clock, so this thread never has to wake up again to end a
+    note (#105 decision 1's "a caller that knows a duration arranges its
+    own note-off").
+
+    Sleeps toward each onset in short bounded slices rather than one long
+    sleep per gap, so a second Enter (`playback_state.stop`) is acted on
+    within a slice instead of after the next note. `all_notes_off()` on
+    the way out covers both the stopped case and the natural end -- every
+    voice still fades through its own release either way, so stopping
+    never clicks.
+
+    Smoke-tested only against a real audio device, per this repo's "pure
+    logic unit-tested, real I/O smoke-tested" convention -- everything
+    deciding *what* is played is in `tab_playback.py`, which is pure."""
+    from notecolor.audio import sound_engine
+    from notecolor.tui import tab_playback
+
+    started = time.monotonic()
+    try:
+        for note in schedule:
+            if not _wait_until(started + note.start_seconds, playback_state.stop):
+                return
+            voice_id = engine.note_on(sound_engine.NoteOn(note.pitch, note.velocity))
+            engine.schedule_note_off(voice_id, note.duration_seconds)
+        _wait_until(started + tab_playback.schedule_duration(schedule), playback_state.stop)
+    finally:
+        engine.all_notes_off()
+        playback_state.in_progress = False
+
+
+def _wait_until(deadline, stop_event, slice_seconds=0.01):
+    """Sleeps until `time.monotonic()` reaches `deadline`, in `slice_
+    seconds` steps, returning False the moment `stop_event` is set (and
+    True if the deadline was reached un-interrupted). Deliberately not a
+    single `Event.wait(remaining)`: the schedule's own onsets are what
+    playback must stay aligned to, so each slice recomputes the remaining
+    time against the real clock rather than accumulating per-note drift."""
+    while True:
+        if stop_event.is_set():
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(remaining, slice_seconds))
+
+
+def _fade_toward(value, target, dt, tau_ms):
+    tau = max(tau_ms, 1) / 1000.0
+    alpha = 1.0 - math.exp(-dt / tau)
+    return value + (target - value) * alpha
+
+
+def _animate_note_stack(animators, note_stack, dt):
+    """note_stack is already sorted lowest-note-first by ChordSmoother --
+    that's also bottom-to-top order for fill's proportional bands.
+    Returns a list of animated RGB tuples in that same order, one per
+    active note (or a single idle color if the stack is empty)."""
+    if not note_stack:
+        animators.clear()
+        return [config.IDLE_RGB]
+
+    active_keys = set()
+    bands = []
+    for entry in note_stack:
+        key = (entry["pitch_class"], entry["octave"])
+        active_keys.add(key)
+        is_new = key not in animators
+        anim = animators.setdefault(
+            key, ColorAnimator(config.CROSSFADE_TAU_MS, config.PULSE_DECAY_MS, config.ONSET_PULSE_BOOST)
+        )
+        bands.append(anim.update(dt, entry["rgb"], is_new))
+
+    for stale_key in [k for k in animators if k not in active_keys]:
+        del animators[stale_key]
+    return bands
+
+
+def run_terminal_fill(result_queue, sensitivity, capture, source_state, session_recorder):
+    from notecolor.tui.terminal_display import TerminalDisplay
+
+    display = TerminalDisplay(fps=config.TERMINAL_FPS)
+    animator = ColorAnimator(config.CROSSFADE_TAU_MS, config.PULSE_DECAY_MS, config.ONSET_PULSE_BOOST)
+    band_animators = {}
+    keys = RawKeys()
+    chord_mode = False
+    help_legend_on = True
+
+    target_rgb, is_onset, label, freq, confidence, rms = config.IDLE_RGB, False, "-", 0.0, 0.0, 0.0
+    note_stack, chord_name = [], None
+    dt = 1.0 / display.fps
+
+    try:
+        while True:
+            key = keys.poll()
+            _handle_sensitivity_key(key, sensitivity)
+            _handle_source_key(key, capture, source_state)
+            chord_mode = _handle_chord_mode_key(key, chord_mode)
+            help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            _handle_session_record_key(key, session_recorder)
+            if _handle_back_to_menu_key(key):
+                return "menu"
+            try:
+                (target_rgb, is_onset, label, freq, confidence, rms,
+                 _fifths_idx, _pitch_class, _octave, note_stack, chord_name,
+                 _duration_hops, _bpm_estimate) = result_queue.get_nowait()
+            except queue.Empty:
+                is_onset = False
+
+            mode_hint = f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  legend(h)"
+            rec_hint = f"rec={'ON' if session_recorder.armed else 'off'}({_key_hint('session_record_toggle')})"
+            legend = _legend_line(["up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
+                                    f"{_key_hint('chord_mode_toggle')}=mode",
+                                    f"{_key_hint('session_record_toggle')}=record"]) if help_legend_on else ""
+            if chord_mode:
+                bands = _animate_note_stack(band_animators, note_stack, dt)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
+                                        chord_name=chord_name, chord_mode=True)
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
+                display.render_bands(bands, status, legend)
+            else:
+                rgb = animator.update(dt, target_rgb, is_onset)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
+                display.render(rgb, status, legend)
+            time.sleep(dt)
+    except KeyboardInterrupt:
+        return "quit"
+    finally:
+        keys.restore()
+        display.quit()
+
+
+def run_terminal_wheel(result_queue, sensitivity, capture, source_state, session_recorder):
+    from notecolor.tui.terminal_wheel_display import WheelDisplay
+
+    display = WheelDisplay(fps=config.WHEEL_FPS)
+    pulse_decay = config.PULSE_DECAY_MS / 1000.0
+    dt = 1.0 / display.fps
+    keys = RawKeys()
+    chord_mode = False
+    help_legend_on = True
+    wedge_fades = [0.0] * 12
+
+    active_index = None
+    label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
+    pulse = 0.0
+    note_stack, chord_name = [], None
+
+    try:
+        while True:
+            key = keys.poll()
+            _handle_sensitivity_key(key, sensitivity)
+            _handle_source_key(key, capture, source_state)
+            chord_mode = _handle_chord_mode_key(key, chord_mode)
+            help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            _handle_session_record_key(key, session_recorder)
+            if _handle_back_to_menu_key(key):
+                return "menu"
+            is_onset = False
+            try:
+                (_target_rgb, is_onset, label, freq, confidence, rms,
+                 active_index, _pitch_class, _octave, note_stack, chord_name,
+                 _duration_hops, _bpm_estimate) = result_queue.get_nowait()
+            except queue.Empty:
+                pass
+
+            mode_hint = f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  legend(h)"
+            rec_hint = f"rec={'ON' if session_recorder.armed else 'off'}({_key_hint('session_record_toggle')})"
+            legend = _legend_line(["up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
+                                    f"{_key_hint('chord_mode_toggle')}=mode",
+                                    f"{_key_hint('session_record_toggle')}=record"]) if help_legend_on else ""
+            if chord_mode:
+                active_pcs = {e["pitch_class"] for e in note_stack}
+                bass_pc = next((e["pitch_class"] for e in note_stack if e["is_bass"]), None)
+                for pc in range(12):
+                    target = 1.0 if pc in active_pcs else 0.0
+                    wedge_fades[pc] = _fade_toward(wedge_fades[pc], target, dt, config.CROSSFADE_TAU_MS)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
+                                        chord_name=chord_name, chord_mode=True)
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
+                display.render_chord(wedge_fades, bass_pc, status, legend)
+            else:
+                pulse = 1.0 if is_onset else pulse * math.exp(-dt / pulse_decay)
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state)
+                          + f"  {mode_hint}  {rec_hint}  (Ctrl+C to quit)")
+                display.render(active_index, pulse, status, legend)
+            time.sleep(dt)
+    except KeyboardInterrupt:
+        return "quit"
+    finally:
+        keys.restore()
+        display.quit()
+
+
+def _tab_note_rgb(pitch_class):
+    """A note's tab-view glyph color. Always uses the fifths hue mapping,
+    same as the wheel view (independent of --color-scheme, for the same
+    reason the wheel is: this is a fixed note-identity color, not a
+    representation of the currently-selected scheme), so a note reads as
+    the same color in `tab` as it does in `wheel` -- e.g. B is green in
+    both, not pink in one and green in the other. Uses a fixed lightness
+    (config.TAB_NOTE_LIGHTNESS) instead of scaling by octave, unlike
+    fill/GUI: octave already drives the note's row on the staff, and
+    0.5 is where a given hue/saturation looks most vivid/saturated in
+    HSL, rather than washing out toward white like a high lightness does."""
+    if pitch_class is None:
+        return config.IDLE_RGB
+    hue, sat, _light = note_to_hsl(pitch_class, config.MAX_OCTAVE, scheme="fifths",
+                                    hue_override=store.note_hue_override(pitch_class))
+    return hsl_to_rgb255(hue, sat, config.TAB_NOTE_LIGHTNESS)
+
+
+def _tab_note_label(pitch_class, octave):
+    """Same fifths spelling as the wheel view (e.g. Ab, not G#), for the
+    same reason as _tab_note_rgb: a note should read identically in `tab`
+    as it does in `wheel`, independent of --color-scheme."""
+    if pitch_class is None:
+        return "-"
+    return f"{NOTE_NAMES_FIFTHS[pitch_class]}{octave}"
+
+
+def _hop_beats(beats_values):
+    """The number of beats to credit toward `beats_accumulated` for one
+    hop, taking the max across every note-duration finalization this hop
+    rather than summing them (issue #76). The mono and chord/multipitch
+    DurationTrackers both always run every hop (this codebase's
+    always-on-pipeline convention) and routinely finalize the *same*
+    underlying acoustic note independently -- e.g. an ordinary single note
+    is tracked by both the mono smoother and multipitch's one-note
+    "chord". Summing both trackers' contributions into `beats_accumulated`
+    double-counted that shared note, roughly halving real barline spacing;
+    taking the max instead mirrors run_batch_transcribe()'s already-correct
+    per-onset `max()` over simultaneous notes at one column -- the beat
+    position should advance once per hop's worth of music, not once per
+    tracker that happened to notice it. `beats_values` is the list of
+    `beats` values computed for whatever notes finalized this hop (mono's,
+    if any, plus one per note_stack entry); an entry may itself be `None`
+    (bpm_estimate was unknown at finalization time), treated as 0.0."""
+    hop_beats = 0.0
+    for beats in beats_values:
+        hop_beats = max(hop_beats, beats or 0.0)
+    return hop_beats
+
+
+def run_terminal_tab(result_queue, scroll_mode, dump_file, sensitivity, capture, source_state,
+                      reanalysis_buffer, session_recorder, time_signature=config.DEFAULT_TIME_SIGNATURE,
+                      sound_engine_provider=None):
+    from notecolor.tui.terminal_tab_display import TabDisplay
+
+    display = TabDisplay(fps=config.TAB_FPS, scrollback_seconds=store.preference(
+        "tab_scrollback_seconds", config.TAB_SCROLLBACK_SECONDS
+    ))
+    dt = 1.0 / display.fps
+    fix_interval = 1.0 / config.TAB_FIX_HOPS_PER_SEC
+    time_since_tick = 0.0
+    keys = RawKeys()
+    # tab opens polyphonic by default (issue #13's standing decision) --
+    # flipped from fill/wheel, where chord_mode starts False and P opts
+    # *up*. Here P still just flips the boolean (_handle_chord_mode_key
+    # is direction-agnostic); only the starting value differs.
+    chord_mode = True
+    prev_chord_name = None
+    notehead_style = config.TAB_DEFAULT_NOTEHEAD_STYLE
+    legend_on = config.TAB_DEFAULT_LEGEND_ON
+    frozen = False
+    help_legend_on = True
+    # Issue #77: R-key non-causal rhythm re-analysis + Left/Right scrollback,
+    # both freeze-mode-only. reanalysis_state/reanalysis_result_queue are
+    # this function's own, local to one run_terminal_tab call (unlike
+    # reanalysis_buffer, which outlives it on SessionState) -- a fresh pair
+    # every time 'tab' is entered is correct, there's nothing to preserve
+    # across a '|' back-to-menu round trip the way the buffer itself is.
+    reanalysis_state = ReanalysisState()
+    reanalysis_result_queue = queue.Queue(maxsize=1)
+    scroll_offset = 0
+    # Corrected tempo from the most recent successful reanalysis, shown in
+    # place of the live bpm_estimate once available -- see the tempo_str
+    # computation below. Reset to None on unfreeze, same "no catch-up"
+    # convention scroll_offset follows.
+    reanalysis_bpm_estimate = None
+    # Loop/section markers (notation-and-feature-ideas.md's Feature 6):
+    # timestamps, not scroll-offset counts, so they stay meaningful even
+    # as scroll_offset itself changes across further Left/Right presses.
+    # None/None means no range is marked; reset on unfreeze, same "no
+    # catch-up" convention every other frozen-only piece of state here
+    # follows (scroll_offset, reanalysis_bpm_estimate above).
+    mark_start, mark_end = None, None
+    # Frozen-buffer playback (map #99, ticket #121, decision #109):
+    # Enter-while-frozen plays what's on screen (or the marked range).
+    # Local to one run_terminal_tab call, like reanalysis_state -- there
+    # is nothing to preserve across a '|' back-to-menu round trip;
+    # `sound_engine_provider` (SessionState.ensure_sound_engine, passed
+    # by run_session) is the one piece that outlives it, so the output
+    # device isn't reopened per tool switch.
+    playback_state = PlaybackState()
+
+    # time_signature arrives pre-validated as an (int, int) tuple from the
+    # CLI layer (main._parse_time_signature / virtualnote.py), not a
+    # string, so no parsing needed here. A "beat" throughout this codebase's
+    # duration math (duration_tracker._DURATION_CLASSES) is a quarter
+    # note -- beats_per_bar converts the time signature's own beat unit
+    # into quarter-note-beats per bar.
+    beats_numerator, beats_denominator = time_signature
+    beats_per_bar = beats_numerator * (4.0 / beats_denominator)
+    beats_accumulated = 0.0
+    hop_seconds = config.BLOCK_SIZE / config.SAMPLE_RATE
+
+    label, freq, confidence, rms = "-", 0.0, 0.0, 0.0
+    pitch_class, octave = None, None
+    note_stack, chord_name = [], None
+    bpm_estimate = None
+
+    resolved_dump = dump_file or os.path.join(
+        data_dir(),
+        f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+    )
+
+    try:
+        while True:
+            key = keys.poll()
+            _handle_sensitivity_key(key, sensitivity)
+            _handle_source_key(key, capture, source_state)
+            chord_mode = _handle_chord_mode_key(key, chord_mode)
+            notehead_style = _handle_notehead_style_key(key, notehead_style)
+            legend_on = _handle_legend_key(key, legend_on)
+            was_frozen = frozen
+            frozen = _handle_freeze_key(key, frozen)
+            if was_frozen and not frozen and playback_state.in_progress:
+                # Unfreezing stops playback: what was being played back is
+                # exactly "what is frozen on screen", and that stops being
+                # a stable thing the moment columns start scrolling again.
+                playback_state.stop.set()
+            if was_frozen and not frozen:
+                # Un-freezing resumes live immediately -- no catch-up of
+                # anything that happened while frozen, same convention
+                # Space itself already follows (see _handle_freeze_key).
+                # A stale scroll position or a stale corrected-tempo
+                # display would both be exactly that kind of catch-up.
+                scroll_offset = 0
+                reanalysis_bpm_estimate = None
+                mark_start, mark_end = None, None
+            scroll_offset = _handle_scroll_keys(key, frozen, scroll_offset, len(display.entries) - 1)
+            mark_start, mark_end = _handle_mark_keys(
+                key, frozen, mark_start, mark_end, display.timestamp_at_offset(scroll_offset)
+            )
+            _handle_playback_key(key, frozen, playback_state, display, sound_engine_provider,
+                                  chord_mode=chord_mode, notehead_style=notehead_style,
+                                  legend_on=legend_on, scroll_offset=scroll_offset,
+                                  mark_range=_mark_range(mark_start, mark_end),
+                                  bpm=reanalysis_bpm_estimate if reanalysis_bpm_estimate is not None
+                                  else bpm_estimate)
+            _handle_reanalysis_key(key, frozen, reanalysis_state, reanalysis_buffer, reanalysis_result_queue,
+                                    beats_per_bar, hop_seconds, mark_range=_mark_range(mark_start, mark_end))
+            help_legend_on = _handle_help_legend_key(key, help_legend_on)
+            _handle_session_record_key(key, session_recorder)
+            if _handle_back_to_menu_key(key):
+                return "menu"
+
+            try:
+                reanalysis_result = reanalysis_result_queue.get_nowait()
+            except queue.Empty:
+                reanalysis_result = None
+            if reanalysis_result is not None:
+                _apply_reanalysis_result(display, reanalysis_result, hop_seconds)
+                if reanalysis_result.bpm_estimate is not None:
+                    reanalysis_bpm_estimate = reanalysis_result.bpm_estimate
+
+            got_new = False
+            is_onset = False
+            # Frozen: don't drain result_queue at all, so the view keeps
+            # showing its last-known state and no new column can be
+            # pushed below -- the analysis thread keeps overwriting the
+            # single-slot queue in the background regardless (issue #23).
+            if not frozen:
+                # The note that was displayed *last* hop -- this is the key
+                # duration_hops (if set this hop) actually belongs to, since
+                # DurationTracker was fed exactly this smoothed pitch_class/
+                # octave sequence one hop behind what's about to be
+                # displayed now.
+                prev_pitch_class, prev_octave = pitch_class, octave
+                try:
+                    (_target_rgb, is_onset, label, freq, confidence, rms,
+                     _fifths_idx, pitch_class, octave, note_stack, chord_name,
+                     duration_hops, bpm_estimate) = result_queue.get_nowait()
+                    got_new = True
+                except queue.Empty:
+                    pass
+
+                if got_new:
+                    # The mono and chord/multipitch trackers both always run
+                    # (this codebase's always-on-pipeline convention) and
+                    # routinely finalize the *same* underlying note in the
+                    # same hop -- e.g. any ordinary single note is tracked by
+                    # both the mono smoother and multipitch's one-note
+                    # "chord". Summing both trackers' beats into
+                    # beats_accumulated double-counted that shared note,
+                    # roughly halving real barline spacing (issue #76).
+                    # `_hop_beats()` takes the max across every finalization
+                    # this hop instead, mirroring run_batch_transcribe()'s
+                    # per-onset `max()` over simultaneous notes -- the beat
+                    # position should advance once per hop's worth of
+                    # music, not once per tracker that happened to notice it.
+                    hop_beats_values = []
+
+                    # Monophonic duration finalization belongs to the note
+                    # displayed *before* this hop's update (see above).
+                    if duration_hops is not None and prev_pitch_class is not None:
+                        beats = (duration_hops * hop_seconds * bpm_estimate / 60.0) if bpm_estimate else None
+                        dclass = duration_class_for_beats(beats)
+                        display.finalize_duration(prev_pitch_class, prev_octave, dclass)
+                        hop_beats_values.append(beats)
+
+                    # Chord-mode duration tracking runs every hop regardless
+                    # of the current chord_mode display toggle -- same
+                    # always-on-pipeline convention as chroma/multipitch
+                    # elsewhere in this codebase.
+                    for entry in note_stack:
+                        if entry["duration_hops"] is None:
+                            continue
+                        beats = (
+                            entry["duration_hops"] * hop_seconds * bpm_estimate / 60.0
+                        ) if bpm_estimate else None
+                        dclass = duration_class_for_beats(beats)
+                        display.finalize_duration(entry["pitch_class"], entry["octave"], dclass)
+                        hop_beats_values.append(beats)
+
+                    beats_accumulated += _hop_beats(hop_beats_values)
+
+                    # A while, not an if, so a hop that somehow crosses more
+                    # than one bar boundary (e.g. after a long freeze)
+                    # doesn't lose barlines; keeping the remainder rather
+                    # than zeroing avoids compounding drift.
+                    while beats_accumulated >= beats_per_bar:
+                        display.push_barline()
+                        beats_accumulated -= beats_per_bar
+
+            # A completed reanalysis's corrected tempo takes over the
+            # display until the next unfreeze -- while frozen, the live
+            # bpm_estimate isn't advancing anyway (result_queue isn't
+            # being drained), so there's no "which is fresher" ambiguity.
+            display_bpm = reanalysis_bpm_estimate if reanalysis_bpm_estimate is not None else bpm_estimate
+            tempo_str = f"{display_bpm:.0f}" if display_bpm else "--"
+            time_str = f"{beats_numerator}/{beats_denominator}"
+
+            reanalysis_hint = ""
+            if reanalysis_state.in_progress:
+                reanalysis_hint = "  rhythm=recomputing..."
+            elif scroll_offset:
+                reanalysis_hint = f"  scrollback=-{scroll_offset}"
+
+            if playback_state.in_progress:
+                reanalysis_hint += f"  play={playback_state.note_count}notes(enter)"
+            elif playback_state.unavailable:
+                reanalysis_hint += f"  play=unavailable({playback_state.unavailable})"
+
+            marked_range = _mark_range(mark_start, mark_end)
+            if marked_range is not None:
+                reanalysis_hint += f"  mark=[{marked_range[0]:.2f}s,{marked_range[1]:.2f}s]"
+            elif mark_start is not None:
+                reanalysis_hint += f"  mark=[{mark_start:.2f}s,...]"
+            elif mark_end is not None:
+                reanalysis_hint += f"  mark=[...,{mark_end:.2f}s]"
+
+            mode_hint = (f"mode={'chord' if chord_mode else 'note'}({_key_hint('chord_mode_toggle')})  "
+                         f"notes={notehead_style}({_key_hint('notehead_style_toggle')})  "
+                         f"legend={'on' if legend_on else 'off'}({_key_hint('legend_toggle')})  "
+                         f"frozen={'on' if frozen else 'off'}({_key_hint('freeze_toggle')})  "
+                         f"rec={'ON' if session_recorder.armed else 'off'}({_key_hint('session_record_toggle')})  "
+                         f"helplegend(h)")
+            help_legend = _legend_line([
+                "up/down=sensitivity", f"{_key_hint('source_toggle')}=source",
+                f"{_key_hint('chord_mode_toggle')}=mode", f"{_key_hint('notehead_style_toggle')}=notes",
+                f"{_key_hint('legend_toggle')}=stafflegend", f"{_key_hint('freeze_toggle')}=freeze",
+                f"{_key_hint('rhythm_reanalysis')}=reanalyze(frozen)", "left/right=scrollback(frozen)",
+                "enter=play(frozen)",
+                f"{_key_hint('mark_range_start')}/{_key_hint('mark_range_end')}=mark range(frozen)",
+                f"{_key_hint('session_record_toggle')}=record",
+            ]) if help_legend_on else ""
+            if chord_mode:
+                notes = [
+                    (e["pitch_class"], e["octave"], _tab_note_rgb(e["pitch_class"]),
+                     _tab_note_label(e["pitch_class"], e["octave"]))
+                    for e in note_stack
+                ]
+                # Chord-level onset (the recognized chord identity changing),
+                # not per-note re-attack -- a strummed/arpeggiated chord
+                # shouldn't spam a new column per note.
+                is_chord_onset = got_new and chord_name != prev_chord_name
+                if got_new:
+                    prev_chord_name = chord_name
+
+                if not frozen:
+                    if scroll_mode == "onset":
+                        if is_chord_onset:
+                            display.push_notes(notes, chord_name)
+                    else:  # "fix"
+                        time_since_tick += dt
+                        if time_since_tick >= fix_interval:
+                            time_since_tick -= fix_interval
+                            display.push_notes(notes, chord_name)
+
+                status = (_status_text(label, freq, confidence, rms, sensitivity, source_state,
+                                        chord_name=chord_name, chord_mode=True)
+                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}{reanalysis_hint}"
+                            f"  [{scroll_mode}] (Ctrl+C to quit)")
+                display.render(status, chord_mode=True, notehead_style=notehead_style, legend_on=legend_on,
+                                frozen=frozen, help_legend=help_legend, scroll_offset=scroll_offset)
+            else:
+                glyph_rgb = _tab_note_rgb(pitch_class)
+                tab_label = _tab_note_label(pitch_class, octave)
+
+                if not frozen:
+                    if scroll_mode == "onset":
+                        if got_new and is_onset:
+                            display.push(pitch_class, octave, glyph_rgb, tab_label)
+                    else:  # "fix"
+                        time_since_tick += dt
+                        if time_since_tick >= fix_interval:
+                            time_since_tick -= fix_interval
+                            display.push(pitch_class, octave, glyph_rgb, tab_label)
+
+                status = (_status_text(tab_label, freq, confidence, rms, sensitivity, source_state)
+                          + f"  tempo={tempo_str}  time={time_str}  {mode_hint}{reanalysis_hint}"
+                            f"  [{scroll_mode}] (Ctrl+C to quit)")
+                display.render(status, chord_mode=False, notehead_style=notehead_style, legend_on=legend_on,
+                                frozen=frozen, help_legend=help_legend, scroll_offset=scroll_offset)
+            time.sleep(dt)
+    except KeyboardInterrupt:
+        return "quit"
+    finally:
+        playback_state.stop.set()
+        keys.restore()
+        try:
+            display.dump_ansi(resolved_dump)
+        finally:
+            display.quit()
+
+
+def run_gui(result_queue, fullscreen, start_debug, sensitivity):
+    import pygame
+    from notecolor.gui.display import Display
+
+    display = Display(config.WINDOW_SIZE_PX, fullscreen=fullscreen, fps=config.FPS)
+    animator = ColorAnimator(config.CROSSFADE_TAU_MS, config.PULSE_DECAY_MS, config.ONSET_PULSE_BOOST)
+    font = pygame.font.SysFont("monospace", 18)
+
+    show_debug = start_debug
+    help_legend_on = True
+    back_to_menu = False
+    target_rgb, is_onset, label, freq, confidence, rms = config.IDLE_RGB, False, "-", 0.0, 0.0, 0.0
+    dt = 1.0 / config.FPS
+
+    try:
+        while display.running:
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    display.running = False
+                elif event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        display.running = False
+                    elif event.key == pygame.K_f:
+                        display.toggle_fullscreen()
+                    elif event.key == pygame.K_d:
+                        show_debug = not show_debug
+                    elif event.key == pygame.K_h:
+                        help_legend_on = not help_legend_on
+                    elif event.key == pygame.K_BACKSLASH:
+                        # Unshifted key for '|' -- pygame reports the shifted
+                        # '|' character via this same physical keycode plus a
+                        # shift modifier, not a keycode of its own, so this is
+                        # the GUI's equivalent of the terminal views'
+                        # _handle_back_to_menu_key (issue #40). Same tier as
+                        # Esc: stop the event loop, but signal *why* via
+                        # back_to_menu so the caller (run_session/shell.py)
+                        # can return to the menu instead of tearing down.
+                        display.running = False
+                        back_to_menu = True
+                    elif event.key == pygame.K_DOWN:
+                        sensitivity.adjust(1.0 / SENSITIVITY_STEP)
+                    elif event.key == pygame.K_UP:
+                        sensitivity.adjust(SENSITIVITY_STEP)
+            if not display.running:
+                break
+
+            try:
+                (target_rgb, is_onset, label, freq, confidence, rms,
+                 _fifths_idx, _pitch_class, _octave, _note_stack, _chord_name,
+                 _duration_hops, _bpm_estimate) = result_queue.get_nowait()
+            except queue.Empty:
+                is_onset = False
+
+            rgb = animator.update(dt, target_rgb, is_onset)
+            display.screen.fill(rgb)
+            if show_debug:
+                text = font.render(_status_text(label, freq, confidence, rms, sensitivity) + "  legend(h)",
+                                    True, (255, 255, 255))
+                display.screen.blit(text, (10, 10))
+                if help_legend_on:
+                    legend = font.render(
+                        _legend_line(["esc=quit", "f=fullscreen", "d=debug", "up/down=sensitivity"]),
+                        True, (255, 255, 255))
+                    display.screen.blit(legend, (10, 32))
+            pygame.display.flip()
+            dt = display.clock.tick(display.fps) / 1000.0
+    finally:
+        display.quit()
+    return "menu" if back_to_menu else "quit"
+
+
+
+def run_session(view, scroll_mode, dump_file, fullscreen, debug, session,
+                 time_signature=config.DEFAULT_TIME_SIGNATURE):
+    """Dispatches to the right run_* function for `view` ('fill', 'wheel',
+    'tab', or 'gui'), starting `session`'s capture/analysis thread first if
+    this is the first tool entered this process. Returns whatever the
+    run_* function returns: "quit" (Ctrl+C / window-close-or-Esc) or
+    "menu" (the '|' / backslash back-to-menu keybind) -- the caller (either
+    main(), which has no menu to return to, or shell.py's menu loop, which
+    does) decides what to do with that sentinel. This is the extracted
+    body of what used to be main()'s single-shot try/finally, made
+    reusable so shell.py's menu loop can call it repeatedly against the
+    same session (issue #40). `time_signature` is 'tab'-view-only (issue
+    #55's barline placement) -- every other view ignores it."""
+    session.ensure_started()
+    if view == "gui":
+        return run_gui(session.result_queue, fullscreen, debug, session.sensitivity)
+    if view == "wheel":
+        return run_terminal_wheel(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                                   session.session_recorder)
+    if view == "tab":
+        return run_terminal_tab(session.result_queue, scroll_mode, dump_file, session.sensitivity,
+                                 session.capture, session.source_state, session.reanalysis_buffer,
+                                 session.session_recorder, time_signature=time_signature,
+                                 sound_engine_provider=session.ensure_sound_engine)
+    return run_terminal_fill(session.result_queue, session.sensitivity, session.capture, session.source_state,
+                              session.session_recorder)
+
+
+def run_batch_transcribe(file_path, time_signature, dump_file, write_score_path=None, export_abc_path=None,
+                          play=False):
+    """Offline transcription entry point (issue #55, `virtualnote
+    transcribe`): loads `file_path`, runs batch_transcribe.transcribe()
+    over the whole array, then builds TabDisplay columns from the result
+    and dumps them via dump_ansi() -- no live render loop, no terminal
+    interactivity, .render() is never called (a real TabDisplay is still
+    constructed, reusing its column-building/dump_ansi() logic, which is
+    what's actually needed here; its constructor's stray `\\033[?25l\\033[2J`
+    terminal-control escape codes on stdout are harmless and not worth
+    suppressing for a one-shot batch run).
+
+    `write_score_path` (issue #65's CLI wiring) is `None` by default --
+    no score is written, and `score_writer` (which imports `music21`) is
+    never even imported, mirroring how `pygame` only gets imported inside
+    `run_gui`. Passed as `""` (virtualnote.py's `--write-score` bare-flag
+    sentinel, its `nargs="?"`/`const=""`) it resolves to a default path
+    next to `main.py`, same `note_history_<timestamp>.txt`-style pattern
+    `resolved_dump_path` below already uses but with a `score_` prefix and
+    `.musicxml` extension; passed any other (truthy) string, that string
+    is used verbatim as the output path. `result` -- the same
+    `batch_transcribe.TranscriptionResult` already computed above for the
+    `TabDisplay` columns -- is reused as-is; `score_writer.write_score()`
+    consumes it directly, no recomputation. `export_abc_path` (the ABC
+    export feature) follows the exact same `None`/`""`/explicit-path
+    convention as `write_score_path`, defaulting to
+    `transcription_<timestamp>.abc` next to `main.py` -- `abc_export.py`
+    is imported locally the same way, and reuses this same `result`
+    object via `abc_export.from_transcription_result()`. `play` (map #24's
+    playback engine) triggers an offline pre-rendered playback of `result`
+    once every other export has already run -- `result` already holds the
+    whole transcription, so there's nothing left to schedule incrementally
+    against, unlike `run_replay_session()`'s live-scheduled `play` below.
+
+    Column-building choice: batch_transcribe.transcribe()'s polyphonic
+    `notes` list (each NoteEvent already carries a resolved chord_name at
+    its own onset) is grouped by onset_hop -- every NoteEvent sharing the
+    same onset_hop becomes one push_notes() column (a single note is just
+    a one-note "chord" here, so push_notes() covers both solo notes and
+    real chords uniformly -- TabDisplay.push()/.push_notes() both just
+    build a TabEntry internally, see terminal_tab_display.py, so
+    dump_ansi()'s output is identical either way). Barlines are pushed by
+    accumulating each column's beats -- the *longest* of its simultaneous
+    notes' durations, in whichever unit result.bpm resolves beats to --
+    against the same beats_per_bar formula run_terminal_tab() uses, walked
+    in onset order across the whole file."""
+    from notecolor.tui.terminal_tab_display import TabDisplay
+
+    audio = batch_transcribe.load_audio(file_path)
+    result = batch_transcribe.transcribe(audio, config.SAMPLE_RATE, time_signature=time_signature)
+
+    beats_numerator, beats_denominator = time_signature
+    beats_per_bar = beats_numerator * (4.0 / beats_denominator)
+
+    display = TabDisplay(fps=config.TAB_FPS)
+
+    by_hop = {}
+    for note in result.notes:
+        by_hop.setdefault(note.onset_hop, []).append(note)
+
+    beats_accumulated = 0.0
+    for onset_hop in sorted(by_hop):
+        notes_here = by_hop[onset_hop]
+        onset_time = onset_hop * result.hop_seconds
+        chord_name = next((n.chord_name for n in notes_here if n.chord_name), None)
+        push_tuples = [
+            (n.pitch_class, n.octave, _tab_note_rgb(n.pitch_class), _tab_note_label(n.pitch_class, n.octave))
+            for n in notes_here
+        ]
+        # `t=onset_time`: without this, TabDisplay stamps every column with
+        # wall-clock time-since-construction, which is meaningless here --
+        # a batch sweep pushes every column within milliseconds of real
+        # time regardless of where the notes actually fall in the
+        # recording (dump_ansi()'s "t" column would otherwise read ~0.00s
+        # for the whole file).
+        display.push_notes(push_tuples, chord_name, t=onset_time)
+
+        column_beats = 0.0
+        for n in notes_here:
+            note_beats = (n.duration_hops * result.hop_seconds * result.bpm / 60.0) if result.bpm else None
+            dclass = duration_class_for_beats(note_beats)
+            display.finalize_duration(n.pitch_class, n.octave, dclass)
+            column_beats = max(column_beats, note_beats or 0.0)
+
+        beats_accumulated += column_beats
+        while beats_accumulated >= beats_per_bar:
+            # A barline crossed here belongs at (approximately) this
+            # column's onset time -- the same approximation the live path
+            # already accepts for barline placement (issue #55/#53).
+            display.push_barline(t=onset_time)
+            beats_accumulated -= beats_per_bar
+
+    resolved_dump_path = dump_file or os.path.join(
+        data_dir(),
+        f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+    )
+    display.dump_ansi(resolved_dump_path)
+
+    if write_score_path is not None:
+        # Local import -- keeps music21's import cost (real, one-time, and
+        # of no use to the live/Pi-constrained path) off every `transcribe`
+        # run, paid only when --write-score is actually passed. Mirrors
+        # this file's existing `pygame`-only-inside-`run_gui` convention.
+        from notecolor.notation import score_writer
+
+        resolved_write_score_path = write_score_path or os.path.join(
+            data_dir(),
+            f"score_{time.strftime('%Y%m%d_%H%M%S')}.musicxml",
+        )
+        score_writer.write_score(result, resolved_write_score_path, time_signature=time_signature)
+
+    if export_abc_path is not None:
+        # Local import mirrors write_score_path's own pattern above, though
+        # abc_export has no heavy/deferred dependency of its own (no
+        # music21 -- see that module's docstring) -- kept local anyway for
+        # symmetry with the sibling export path and to avoid paying even
+        # abc_export's own import cost on a `transcribe` run that never
+        # asked for ABC output.
+        from notecolor.notation import abc_export
+
+        resolved_export_abc_path = export_abc_path or os.path.join(
+            data_dir(),
+            f"transcription_{time.strftime('%Y%m%d_%H%M%S')}.abc",
+        )
+        columns = abc_export.from_transcription_result(result, time_signature=time_signature)
+        abc_export.write_abc(columns, resolved_export_abc_path, time_signature=time_signature)
+
+    if play:
+        # Local import, same "pay the cost only when the feature is used"
+        # convention as score_writer/pygame above -- though playback.py's
+        # own import cost is negligible (sounddevice is already loaded via
+        # audio_capture.py in every other code path; this just avoids
+        # opening an OutputStream device for a one-shot batch run that
+        # never asked for one). Offline pre-render (playback.py's module
+        # docstring) is the right mode here -- `result` already holds the
+        # whole transcription, nothing left to schedule against.
+        from notecolor.audio import playback
+
+        notes = [
+            (n.onset_hop * result.hop_seconds, n.pitch_class, n.octave, n.duration_hops * result.hop_seconds)
+            for n in result.notes
+        ]
+        playback.play_offline(notes)
+
+
+def run_replay_session(file_path, dump_file, speed=1.0, play=False):
+    """`virtualnote replay <file>` (issue: session recording + playback,
+    feature idea 1 in docs/research/notation-and-feature-ideas.md): reads
+    a `.jsonl` session log written by `session_recorder.SessionRecorder`
+    and re-drives a real `TabDisplay` from its recorded events instead of
+    live audio -- the JSONL-log-shaped sibling of run_batch_transcribe()
+    above (same "build TabDisplay columns from already-detected note
+    events" shape, just from a session log's flat event stream instead of
+    a batch_transcribe.TranscriptionResult). No SessionState/audio is
+    touched at all, mirroring how 'transcribe' bypasses it too (see
+    virtualnote.py's main()).
+
+    Unlike batch transcription (a silent sweep with no interactive
+    render), replay renders live -- `time.sleep()` between columns paced
+    by their real recorded timestamp gaps (divided by `speed`, so 2.0
+    replays twice as fast) reproduces the original session's actual
+    pacing on screen, the same "watch what I actually played" value this
+    feature exists for. `session_player.load_events()`/`group_columns()`
+    do the pure reading/grouping (unit-tested there); this function owns
+    only the TabDisplay-driving/timing side effects, same "pure logic
+    unit-tested, real I/O smoke-tested" split as
+    rhythm_reanalysis.recompute() vs. main.py's own `R`-key wiring.
+
+    Ctrl+C stops the replay early (same as every other terminal view) --
+    still dumps via TabDisplay.dump_ansi() on the way out, covering
+    whatever was replayed up to that point, not just a full run.
+
+    `play=True` (map #24's playback engine) plays each column's note(s)
+    the instant that column is pushed on screen, reusing this loop's own
+    already-paced `time.sleep()` clock rather than running a second,
+    independent one. Each event's own recorded `duration_seconds` is
+    divided by `speed` so the audio speeds up/slows down in lockstep with
+    the visual pacing above, not just the gaps between notes.
+
+    Since map #99's ticket #112 that goes through `sound_engine.
+    SoundEngine`, not `playback.LiveScheduler` (superseded, decision
+    #105): one note-on per event, with its matching note-off scheduled
+    `duration_seconds / speed` later against the audio callback's own
+    frame clock. This caller knows each note's duration up front, which
+    is exactly the "arrange your own note-off" case #105 anticipated --
+    the engine itself still has no duration-carrying primitive. A
+    `SoundEngine` is built locally here rather than taken from
+    `main.SessionState`: `virtualnote replay` never constructs a
+    SessionState at all (see virtualnote.py's main()), being a standalone
+    offline entry point that touches no audio *input*."""
+    from notecolor.tui.terminal_tab_display import TabDisplay
+
+    events = load_events(file_path)
+    columns = group_columns(events)
+
+    engine = None
+    if play:
+        from notecolor.audio import sound_engine
+
+        engine = sound_engine.SoundEngine(detection_active=False)
+        engine.ensure_started()
+
+    display = TabDisplay(fps=config.TAB_FPS)
+    last_t = 0.0
+    try:
+        for kind, t, group in columns:
+            gap = (t - last_t) / max(speed, 1e-6)
+            if gap > 0:
+                time.sleep(gap)
+            last_t = t
+            if kind == "barline":
+                display.push_barline(t=t)
+            else:
+                push_tuples = [
+                    (event["pc"], event["octave"], _tab_note_rgb(event["pc"]),
+                     _tab_note_label(event["pc"], event["octave"]))
+                    for event in group
+                ]
+                chord_name = next((event.get("chord_name") for event in group if event.get("chord_name")), None)
+                display.push_notes(push_tuples, chord_name, t=t)
+                for event in group:
+                    display.finalize_duration(event["pc"], event["octave"], event["duration_class"])
+                    if engine is not None:
+                        note_on = sound_engine.NoteOn.from_pitch_class(event["pc"], event["octave"])
+                        voice_id = engine.note_on(note_on)
+                        engine.schedule_note_off(
+                            voice_id, event["duration_seconds"] / max(speed, 1e-6)
+                        )
+            status = f"virtualnote replay  file={os.path.basename(file_path)}  t={t:.2f}s  speed={speed}x"
+            display.render(status, chord_mode=True)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if engine is not None:
+            engine.stop()
+        resolved_dump_path = dump_file or os.path.join(
+            data_dir(),
+            f"note_history_{time.strftime('%Y%m%d_%H%M%S')}.txt",
+        )
+        display.dump_ansi(resolved_dump_path)
+
+
+def _run_chord_builder(keys, column):
+    """Score editor (issue #98): the Chord builder screen's interactive
+    loop -- opened by Enter on a column, closed by `chord_builder_exit`
+    ('b' by default, matched case-sensitively so typing an uppercase 'B'
+    on the ROOT reel -- a real root letter -- doesn't also exit the
+    screen; see docs/DECISIONS.md). Mutates `column.notes` in place only
+    on exit (chord_builder_display.notes_from_state()), never mid-edit --
+    the caller (run_score_editor) already recorded an undo snapshot of
+    the whole score before opening this screen, so the column's prior
+    contents are always recoverable via `undo` regardless of what
+    happens in here. Smoke-tested manually only, same convention as
+    every other run_terminal_*/run_*_screen interactive loop.
+
+    Up/Down switches the focused reel, Left/Right spins it -- the reverse
+    of this screen's original Left/Right-switches/Up/Down-spins binding
+    (inherited unchanged from the prototype it was built from), swapped
+    per direct user feedback after hands-on use: the five reels render as
+    five stacked *rows* (chord_builder_display.render()), so Up/Down
+    should navigate a vertical list and Left/Right should adjust the
+    focused row's value -- see docs/DECISIONS.md."""
+    from notecolor.tui import chord_builder_display as cbd
+
+    state = cbd.state_from_column(column)
+    quality_index = 0
+    dt = 1.0 / config.TERMINAL_FPS
+    degree_options = {"third": cbd.THIRD_OPTIONS, "fifth": cbd.FIFTH_OPTIONS, "seventh": cbd.SEVENTH_OPTIONS}
+
+    while True:
+        cbd.render(state, quality_index, "Up/Down=reel  Left/Right=spin  type=jump  Enter=force-commit  b=done")
+        key = keys.poll()
+        if key is None:
+            time.sleep(dt)
+            continue
+
+        if key == store.keybind("chord_builder_exit"):
+            column.notes = cbd.notes_from_state(state)
+            return
+
+        slot_name = cbd.BUILDER_SLOTS[state.slot]
+        if key == "UP":
+            state.slot = cbd.move_slot(state.slot, -1)
+            state.typed = ""
+        elif key == "DOWN":
+            state.slot = cbd.move_slot(state.slot, 1)
+            state.typed = ""
+        elif key in ("LEFT", "RIGHT"):
+            delta = 1 if key == "RIGHT" else -1
+            if slot_name == "root":
+                state.root_pc = cbd.spin_root(state.root_pc, delta)
+                state.root_just_jumped = False
+            elif slot_name == "quality":
+                quality_index, preset_key = cbd.spin_quality(quality_index, delta)
+                cbd.apply_quality_preset(state, preset_key)
+            elif slot_name in degree_options:
+                token_attr = f"{slot_name}_token"
+                setattr(state, token_attr, cbd.spin_degree(getattr(state, token_attr), degree_options[slot_name], delta))
+        elif key in ("\r", "\n"):
+            if slot_name == "quality":
+                resolved = cbd.force_commit_alias(state.typed, cbd.QUALITY_ALIASES)
+                if resolved is not None:
+                    quality_index = next(i for i, p in enumerate(cbd.QUALITY_PRESETS) if p[0] == resolved)
+                    cbd.apply_quality_preset(state, resolved)
+                    state.typed = ""
+            elif slot_name in degree_options:
+                resolved = cbd.force_commit_alias(state.typed, cbd.degree_alias_map(degree_options[slot_name]))
+                if resolved is not None:
+                    setattr(state, f"{slot_name}_token", resolved)
+                    state.typed = ""
+        elif len(key) == 1 and key.isprintable():
+            if slot_name == "root":
+                state.root_pc, state.root_just_jumped = cbd.step_root_typeahead(
+                    state.root_pc, state.root_just_jumped, key
+                )
+            elif slot_name == "quality":
+                state.typed, resolved = cbd.step_alias_typeahead(state.typed, key, cbd.QUALITY_ALIASES)
+                if resolved is not None:
+                    quality_index = next(i for i, p in enumerate(cbd.QUALITY_PRESETS) if p[0] == resolved)
+                    cbd.apply_quality_preset(state, resolved)
+            elif slot_name in degree_options:
+                state.typed, resolved = cbd.step_alias_typeahead(state.typed, key, cbd.degree_alias_map(
+                    degree_options[slot_name]))
+                if resolved is not None:
+                    setattr(state, f"{slot_name}_token", resolved)
+
+
+_PROPERTY_FIELD_PREFIX = {"time_signature": "time", "key_signature": "key", "tempo": "tempo"}
+# The two fields with a natural typed-digit form (issue #98 follow-up --
+# see _parse_property_input()). key_signature has no such form (there's
+# no sensible digit string for "2 sharps"), so it's spin-only.
+_PROPERTY_TYPABLE_SLOTS = ("time_signature", "tempo")
+
+
+def _property_field_texts(score):
+    """Plain (unhighlighted) status-line text for each of the score-level
+    properties fields (score_properties, 't') -- shown at all times in
+    run_score_editor()'s status line, not just while actively editing
+    (issue #98 follow-up, direct user feedback: a second, separate screen
+    for these was unwanted friction -- see docs/DECISIONS.md). Mirrors
+    `tab`'s own tempo=/time= status-field convention. A plain dict
+    keyed by score_properties_display.PROPERTY_SLOTS' own names, not a
+    positional tuple, so callers don't need to remember field order."""
+    from notecolor.tui import score_properties_display as spd
+
+    numerator, denominator = score.time_signature
+    return {
+        "time_signature": f"time={numerator}/{denominator}",
+        "key_signature": f"key={spd.key_fifths_label(score.key_fifths)}",
+        "tempo": f"tempo={score.tempo_bpm:.0f}",
+    }
+
+
+def _parse_property_input(slot_name, text):
+    """Parses the inline header editor's typed digit buffer for the
+    highlighted field into a new value -- mirrors
+    settings_display.parse_numeric_input()'s "empty means no typed value,
+    anything unparseable raises ValueError" contract, but for the two
+    score-properties fields with a natural typed form (see
+    _PROPERTY_TYPABLE_SLOTS; key_signature has none and never reaches
+    here). 'tempo' parses a plain BPM number, clamped into
+    score_properties_display's TEMPO_MIN_BPM/TEMPO_MAX_BPM range, same
+    clamp-not-wrap convention every bounded numeric field in this app
+    uses. 'time_signature' parses free-form 'N/D' -- deliberately *not*
+    snapped to spin_time_signature()'s fixed TIME_SIGNATURE_OPTIONS set,
+    since typing a value directly (e.g. 11/8) is exactly the point of a
+    free-form entry path alongside the fixed-set spin. Returns None for
+    an empty buffer (no typed value yet -- a no-op, not an error)."""
+    from notecolor.tui import score_properties_display as spd
+
+    text = text.strip()
+    if text == "":
+        return None
+    if slot_name == "tempo":
+        value = float(int(text))
+        return max(spd.TEMPO_MIN_BPM, min(spd.TEMPO_MAX_BPM, value))
+    if slot_name == "time_signature":
+        parts = text.split("/")
+        if len(parts) != 2:
+            raise ValueError("time signature must be N/D")
+        numerator, denominator = int(parts[0]), int(parts[1])
+        if numerator <= 0 or denominator <= 0:
+            raise ValueError("both N and D must be > 0")
+        return (numerator, denominator)
+    raise ValueError(f"{slot_name} has no typed form")
+
+
+def _handle_property_key(key, score, slot, buffer):
+    """Score editor (issue #98 follow-up): pure-ish dispatch for one
+    keypress while the inline header editor (score_properties, 't') is
+    active -- mutates `score` in place like every other score-editor
+    mutation function in this codebase (see score_editor_display.py's
+    module docstring for that convention), rather than returning a new
+    EditorScore. `slot` is the currently-highlighted field's index into
+    score_properties_display.PROPERTY_SLOTS; `buffer` is that field's
+    in-progress typed-digit buffer, reset whenever focus moves to a
+    different field or the field is spun directly. Returns
+    `(new_slot, new_buffer, still_editing)` -- `still_editing=False`
+    means Enter was pressed and run_score_editor() should return to
+    normal cursor editing.
+
+    Left/Right move the highlighted field -- a *horizontal* strip of
+    three fields, so per the same visual-orientation principle as the
+    Chord builder's now-vertical Up/Down navigation (opposite physical
+    mapping, since these are genuinely different widget shapes -- see
+    docs/DECISIONS.md), Left/Right navigates here. Up/Down spins the
+    highlighted field's value via score_properties_display's existing
+    spin_time_signature()/spin_key_fifths()/spin_tempo() -- unchanged
+    from the old standalone screen, only the screen/mode plumbing around
+    them differs. A digit (or '/' for time signature) accumulates into
+    `buffer` on a typable field (_PROPERTY_TYPABLE_SLOTS); Backspace
+    trims it. Enter parses+applies any pending buffer
+    (_parse_property_input(), swallowing an unparseable buffer rather
+    than crashing -- same "leave the field unchanged" posture
+    settings_display._capture_numeric() follows on a bad parse) and
+    always exits edit mode, buffer or not."""
+    from notecolor.tui import score_properties_display as spd
+
+    slot_name = spd.PROPERTY_SLOTS[slot]
+
+    if key == "LEFT":
+        return spd.move_slot(slot, -1), "", True
+    if key == "RIGHT":
+        return spd.move_slot(slot, 1), "", True
+    if key in ("UP", "DOWN"):
+        delta = 1 if key == "UP" else -1
+        if slot_name == "time_signature":
+            score.time_signature = spd.spin_time_signature(score.time_signature, delta)
+        elif slot_name == "key_signature":
+            score.key_fifths = spd.spin_key_fifths(score.key_fifths, delta)
+        elif slot_name == "tempo":
+            score.tempo_bpm = spd.spin_tempo(score.tempo_bpm, delta)
+        return slot, "", True
+    if key in ("\r", "\n"):
+        if buffer and slot_name in _PROPERTY_TYPABLE_SLOTS:
+            try:
+                value = _parse_property_input(slot_name, buffer)
+            except ValueError:
+                value = None
+            if value is not None:
+                if slot_name == "time_signature":
+                    score.time_signature = value
+                else:
+                    score.tempo_bpm = value
+        return slot, "", False
+    if key in ("\x7f", "\x08"):
+        return slot, buffer[:-1], True
+    if (slot_name in _PROPERTY_TYPABLE_SLOTS and isinstance(key, str) and len(key) == 1
+            and (key.isdigit() or key == "/")):
+        return slot, buffer + key, True
+    return slot, buffer, True
+
+
+def _editor_sound_engine(session):
+    """The `sound_engine.SoundEngine` the score editor auditions and plays
+    through, and whether this call owns it (and must therefore stop it on
+    the way out). Returns `(engine, owned)`, with `engine` None when no
+    sound is available at all.
+
+    A `session` (the live menu's long-lived `SessionState`) already holds
+    the one process-wide engine #105 settled on, so the editor borrows it
+    and never stops it -- switching menu -> editor -> synth must not drop
+    the audio device. `virtualnote edit <path>` constructs no
+    `SessionState` at all (the editor never touches the mic), so there it
+    builds its own, exactly as `run_replay_session()` does.
+
+    Every failure degrades to a silent-but-fully-usable editor rather
+    than refusing to open: `synth_engine.SynthUnavailable` when the
+    `[synth]` extra (SciPy, #111) isn't installed, and any
+    `sounddevice`/PortAudio error on a machine with no output device.
+    That posture is the opposite of the standalone synth tool's, which
+    *does* refuse to open without SciPy -- and deliberately so: a synth
+    that makes no sound is not a synth, while a score editor that makes
+    no sound is still a score editor."""
+    try:
+        if session is not None:
+            return session.ensure_sound_engine(), False
+        from notecolor.audio import sound_engine
+
+        engine = sound_engine.SoundEngine(detection_active=False)
+        engine.ensure_started()
+        return engine, True
+    except Exception:
+        # Deliberately broad: the point is that *nothing* about audio
+        # availability can stop the editor opening, and the failure modes
+        # span an ImportError (no SciPy), a custom SynthUnavailable, and
+        # PortAudio's own error type, which importing to catch precisely
+        # would itself be a dependency this branch cannot assume.
+        return None, False
+
+
+class _EditorPlayback:
+    """Render-thread-local state for the score editor's play-from-cursor
+    (map #99, ticket #120): which columns are scheduled, where the
+    playhead is, and which metronome clicks are still owed.
+
+    Purely local to `run_score_editor()`'s loop, like `tab`'s freeze/
+    scroll_offset state -- there is no playback thread. Every frame the
+    loop calls `advance()`, which converts wall-clock elapsed time into
+    the score's own beat position and fires whatever fell due since the
+    last frame. All the arithmetic lives in `score_audition.py` and is
+    unit-tested there; this class only holds the state between frames and
+    talks to the engine.
+
+    Playback is strictly non-dirtying: nothing here mutates the score."""
+
+    def __init__(self):
+        self.active = False
+        self.entries = []
+        self.clicks = []
+        self.tempo_bpm = 90.0
+        self.start_time = 0.0
+        self.prev_beats = None
+        self.playhead = None
+
+    def start(self, score, entries, now):
+        if not entries:
+            return False
+        origin = entries[0].start_beat
+        end = entries[-1].start_beat + entries[-1].beats
+        self.entries = entries
+        self.clicks = score_audition.metronome_clicks(origin, end, score.time_signature)
+        self.tempo_bpm = score.tempo_bpm
+        self.start_time = now
+        self.prev_beats = None
+        self.playhead = entries[0].index
+        self.active = True
+        return True
+
+    def stop(self, engine):
+        self.active = False
+        self.playhead = None
+        self.entries = []
+        self.clicks = []
+        if engine is not None:
+            engine.all_notes_off()
+
+    def advance(self, score, engine, metronome_on, now):
+        """One frame of playback. Returns the column index the playhead is
+        on, or None once playback has finished (and stops itself)."""
+        elapsed = self.start_time_to_beats(now)
+        previous = float("-inf") if self.prev_beats is None else self.prev_beats
+        for entry in score_audition.due_entries(self.entries, previous, elapsed):
+            column = score.columns[entry.index]
+            score_audition.sound_notes(
+                engine,
+                [(note.pitch_class, note.octave) for note in column.notes],
+                score_audition.beats_to_seconds(entry.beats, self.tempo_bpm),
+            )
+        if metronome_on:
+            for _beat, is_downbeat in score_audition.due_clicks(self.clicks, previous, elapsed):
+                score_audition.sound_metronome_click(engine, is_downbeat)
+        self.prev_beats = elapsed
+        self.playhead = score_audition.playhead_index(self.entries, elapsed)
+        if self.playhead is None:
+            self.stop(engine)
+        return self.playhead
+
+    def start_time_to_beats(self, now):
+        base = self.entries[0].start_beat if self.entries else 0.0
+        return base + score_audition.seconds_to_beats(now - self.start_time, self.tempo_bpm)
+
+
+class _PrecomputedSeparator:
+    """Wraps already-separated stems as a `Separator`, for the same reason
+    `_PrecomputedBeatTracker` exists: `run_convert()` runs the slow stage
+    itself so it can report progress and degrade clearly, while
+    `convert()` takes a backend rather than the stems so #132's harness
+    can swap separators."""
+
+    def __init__(self, stems):
+        self.stems = stems
+
+    def separate(self, audio, sample_rate):
+        return self.stems
+
+
+class _PrecomputedBeatTracker:
+    """Wraps an already-computed `BeatGrid` as a `BeatTracker`.
+
+    `run_convert()` runs beat tracking itself so it can report progress
+    and degrade gracefully when the model is absent, but `convert()`'s
+    signature takes a tracker rather than a grid -- deliberately, since
+    that is what lets #132's harness swap trackers. This is the two-line
+    adapter between the two, not a third code path."""
+
+    def __init__(self, beats):
+        self.beats = beats
+
+    def track(self, audio, sample_rate, drum_stem=None):
+        return self.beats
+
+
+def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=None):
+    """`virtualnote convert <file>` -- map #123's offline audio-to-score
+    converter (issue #129).
+
+    Deliberately a separate command from `transcribe`, not a flag on it:
+    `transcribe` returns a dump or a one-part MusicXML in seconds, while
+    this eats a band mix for up to an hour and emits a multi-track
+    project. One flag surface covering both would mean a command whose
+    runtime varies by three orders of magnitude and whose output shape
+    changes underneath the user.
+
+    Like `transcribe`/`replay`/`edit`, never touches `SessionState` or the
+    mic. Imports the pipeline locally so `music21`/`librosa`/torch cost
+    nothing on a run that never converts anything.
+
+    Refuses rather than degrading (#129): a missing model is reported with
+    its install line and a non-zero exit, never silently replaced by the
+    live DSP pipeline, whose accuracy on a band mix is far below the
+    ~37.87% onset F1 #124 measured as the neural ceiling."""
+    from notecolor.convert import convert as convert_module
+    from notecolor.convert.transcribe_backends import ConversionUnavailable
+
+    if not os.path.exists(path):
+        print(f"convert: no such file: {path}")
+        return 1
+
+    try:
+        from notecolor.analysis.batch_transcribe import load_audio
+    except ImportError:
+        print("convert: reading an audio file needs librosa.")
+        print("  pip install -e .[batch]")
+        return 1
+
+    print(f"convert: loading {path} ...")
+    audio = load_audio(path)
+    sample_rate = config.SAMPLE_RATE
+
+    # Backends are resolved here rather than inside convert() so this
+    # function owns every "what is installed" question and convert() stays
+    # a pure pipeline over whatever it is handed (issue #129's seam).
+    separator = None
+    note_transcriber = None
+    beat_tracker = None
+    if want_notes:
+        from notecolor.convert.transcribe_backends import BasicPitchTranscriber, ConversionUnavailable as _CU
+
+        # Probed by loading the model, not by importing a name: the graph
+        # is committed to the repo but onnxruntime is not, so "installed"
+        # is a runtime question. A failure here is reported by the
+        # ConversionUnavailable handler around convert() below, which is
+        # where every other missing-model message is laid out.
+        note_transcriber = BasicPitchTranscriber()
+
+    if mode == "band":
+        # #129: band mode separates first. Piano mode deliberately does
+        # NOT -- separation introduces artifacts on an already-clean
+        # signal (arXiv 2605.06685 bypasses it behind a --piano-solo flag
+        # for exactly this reason), and solo piano is the case this
+        # converter is genuinely good at (~0.95 vs ~0.38 onset F1).
+        from notecolor.convert.transcribe_backends import DemucsSeparator
+
+        candidate_separator = DemucsSeparator()
+        try:
+            print("convert: separating stems (the slow step -- "
+                  "~2 minutes per minute of audio) ...")
+            stems = candidate_separator.separate(audio, sample_rate)
+            separator = _PrecomputedSeparator(stems)
+            print(f"convert: {len(stems)} stems: {', '.join(sorted(stems))}")
+        except ConversionUnavailable as exc:
+            # Not fatal, and NOT the same as a missing note model. Without
+            # separation the mix is transcribed directly -- which is H1's
+            # control arm rather than a degraded mode (#129), so saying
+            # "no separation" is an accurate description of what ran, not
+            # an apology.
+            print(f"convert: no separation -- {exc.message}")
+            if exc.install_hint:
+                print(f"  {exc.install_hint}")
+            print("  transcribing the mix directly instead (one track).")
+
+    # Beat tracking is wanted whenever anything downstream needs a grid:
+    # chord spans segment on beats, and notes quantize against them
+    # (#130). It is skipped only when neither was asked for, so
+    # `--no-notes --no-chords` stays free.
+    if want_notes or want_chords:
+        from notecolor.convert.transcribe_backends import BeatThisTracker
+
+        candidate = BeatThisTracker()
+        try:
+            # Probing here rather than inside convert() keeps "what is
+            # installed" this function's question. An absent beat tracker
+            # is NOT fatal: chords fall back to fixed windows and notes
+            # to the snapping this repo already does, both of which are
+            # honest degradations of *timing*, unlike substituting a
+            # worse note model (#129's refuse-don't-degrade is about the
+            # latter).
+            beats = candidate.track(audio, sample_rate)
+            beat_tracker = _PrecomputedBeatTracker(beats)
+            print(f"convert: {len(beats.beat_seconds)} beats, "
+                  f"{len(beats.downbeat_seconds)} downbeats")
+        except ConversionUnavailable as exc:
+            print(f"convert: no beat tracking -- {exc.message}")
+            if exc.install_hint:
+                print(f"  {exc.install_hint}")
+
+    try:
+        result = convert_module.convert(
+            audio,
+            sample_rate,
+            separator=separator,
+            note_transcriber=note_transcriber,
+            beat_tracker=beat_tracker,
+            want_notes=want_notes,
+            want_chords=want_chords,
+        )
+    except ConversionUnavailable as exc:
+        print(f"convert: {exc.message}")
+        if exc.install_hint:
+            print(f"  {exc.install_hint}")
+        return 1
+
+    print(f"convert: {result.duration_seconds:.1f}s of audio")
+    if result.tracks:
+        for track in result.tracks:
+            marker = "  (low confidence)" if track.low_confidence else ""
+            print(f"  track {track.name!r}: {len(track.notes)} notes{marker}")
+    if result.chords:
+        print(f"  {len(result.chords)} chord spans:")
+        for span in result.chords[:20]:
+            print(f"    {span.start_seconds:7.2f}s  {span.name}")
+        if len(result.chords) > 20:
+            print(f"    ... and {len(result.chords) - 20} more")
+    if result.beats_per_bar is not None:
+        print(f"  meter: {result.beats_per_bar}/4 (inferred)")
+    elif result.beats.beat_seconds:
+        print("  meter: 4/4 (default -- not enough agreement to infer one)")
+
+    # Default output is the input's name with a .musicxml extension, the
+    # same convention `transcribe`'s own dump file follows.
+    if out_path is None:
+        out_path = os.path.splitext(path)[0] + ".musicxml"
+    try:
+        from notecolor.notation.score_writer import write_project
+    except ImportError:
+        print("convert: writing a score needs music21.")
+        print("  pip install -e .[batch]")
+        return 1
+    written = write_project(result, out_path, title=os.path.basename(path))
+    print(f"convert: wrote {written}")
+    return 0
+
+
+def run_score_editor(path, session=None, score=None):
+    """`virtualnote edit <path>` (issue #98): loads `path` via
+    score_editor_state.load_score() if it already exists, otherwise
+    starts a brand-new blank score (new_blank_score()) to be saved to
+    `path` later.
+
+    `score`, when given, is used instead of either -- the score already
+    exists in memory and `path` is only where a later `save` will write
+    it. That is how an imported session recording arrives (ticket #122):
+    `log_import.py` has already quantized the log into an EditorScore, so
+    the editor opens on it *unsaved*, and quitting without saving leaves
+    nothing behind but the untouched log. Deliberately one parameter
+    rather than an `import_log=`/`grid=` pair -- this function's job is to
+    edit a score, not to know what a session log is. Drives its own interactive loop (own RawKeys instance,
+    mirroring every other run_terminal_* function) over
+    score_editor_display.py's pure mutation/render layer, with
+    EditHistory backing undo/redo -- never touches SessionState's *audio
+    input*, so virtualnote.py's 'edit' subcommand handles and returns
+    before SessionState is even constructed, same shape as
+    transcribe/replay. Returns the "quit"/"menu" sentinel convention
+    every other run_terminal_* function does, so shell.py's menu loop can
+    dispatch it exactly like a real session tool despite that.
+
+    `session` is optional and used only to borrow the one process-wide
+    `sound_engine.SoundEngine` (#105) for audition/playback when the
+    editor was reached from the live menu; `virtualnote edit` passes
+    None and gets its own -- see `_editor_sound_engine()`.
+
+    Quitting (| or Ctrl+C) while there are unsaved changes (saved=no in
+    the status line) needs a second confirming press of the same key --
+    the one editor view in this app where quitting can lose real work,
+    unlike every other terminal view's purely ephemeral render state.
+    The first press just arms `quit_pending` and shows an inline warning;
+    any other keypress in between (including a real edit) disarms it
+    again, so a user has to deliberately press the same quit key twice in
+    a row to actually discard changes. Undo/redo don't attempt to track
+    whether the score has returned to exactly its last-saved content --
+    dirty stays True after either, a conservative "warn even if you
+    undid your way back to the saved state" simplification (see
+    docs/DECISIONS.md).
+
+    **Audition, piano mode, playback (map #99, ticket #120, decision
+    #108).** `piano_mode` (Shift+P) switches the letter keys from editor
+    commands to a two-octave keyboard; the status line always names the
+    active mode. Keys pressed together land in one column, keys pressed
+    in sequence fill successive columns -- a distinction only the kitty
+    protocol's key releases (#118) can report, so this loop's RawKeys is
+    the one in this app constructed with `want_kitty=True`, and degrades
+    to #108's explicit place-without-advancing path on any other
+    terminal. Placing a note always auditions it; moving the cursor
+    auditions too, toggleably (`audition_toggle`, default on).
+    `play_from_cursor` plays to the end of the score or of a marked
+    `[`/`]` loop region, with the view following the playhead and any key
+    stopping it; `metronome_toggle` adds a click on the score's own
+    tempo/time signature. Entering piano mode and playing back are both
+    strictly non-dirtying -- only actually writing a note is an edit."""
+    from notecolor.tui import score_editor_display as sed
+    from notecolor.tui import score_properties_display as spd
+    from notecolor.notation.score_editor_state import (
+        EditHistory,
+        MultiTrackScoreError,
+        load_score,
+        new_blank_score,
+        save_score,
+    )
+
+    if score is None:
+        try:
+            score = load_score(path) if os.path.exists(path) else new_blank_score()
+        except MultiTrackScoreError as exc:
+            # Issue #131: a multi-track file is refused rather than silently
+            # flattened. Report it the way every other unopenable-file case
+            # in this shell reports -- a plain message and back to the menu,
+            # not a traceback over the user's terminal.
+            print(f"\nCannot open this score: {exc}\n")
+            print("The score editor reads one grand-staff track. Multi-track")
+            print("scores are map #123's converter output and need its own editor.")
+            return "menu"
+    history = EditHistory()
+    dirty = False
+    cursor_col = 0
+    first_column = score.columns[0]
+    cursor_row = (
+        staff_row(first_column.notes[0].pitch_class, first_column.notes[0].octave)
+        if first_column.notes else 10  # no note to anchor to -- land on middle C, a sane default
+    )
+    zoom_level = 0
+    chords_only = False
+    help_legend_on = True
+    quit_pending = False
+    properties_editing = False
+    properties_slot = 0
+    properties_buffer = ""
+    mode = score_audition.EDIT_MODE
+    base_octave = config.EDITOR_PIANO_BASE_OCTAVE
+    audition_on = True
+    metronome_on = False
+    mark_start = mark_end = None
+    playback = _EditorPlayback()
+    dt = 1.0 / config.TERMINAL_FPS
+    # want_kitty=True is what makes press-together-means-chord possible at
+    # all (#118/#101). Per-view, not process-wide: `|` back to the menu
+    # pops the mode again, so no other screen pays the negotiation.
+    keys = RawKeys(want_kitty=True)
+    entry = score_audition.PianoEntry(advance_between_groups=keys.kitty)
+    engine, owns_engine = _editor_sound_engine(session)
+
+    def _record():
+        history.record(score)
+
+    def _audition(notes, duration_class=None):
+        if engine is None or not notes:
+            return
+        seconds = score_audition.duration_seconds(
+            duration_class or score.columns[cursor_col].duration_class, score.tempo_bpm)
+        score_audition.sound_notes(engine, notes, seconds)
+
+    try:
+        while True:
+            try:
+                event = keys.poll_event()
+                key = kitty_keys.legacy_token(event) if event is not None else None
+                quit_requested, quit_result = (key == "|"), "menu"
+            except KeyboardInterrupt:
+                event, key, quit_requested, quit_result = None, None, True, "quit"
+
+            # Only a genuine PRESS enters a note. A kitty REPEAT (the
+            # terminal's own auto-repeat, which this view asks for via
+            # FLAG_EVENT_TYPES) must not: the key is still down, so it is
+            # still part of the same chord group, and re-firing would
+            # machine-gun the audition and re-record an undo snapshot
+            # dozens of times a second for a key the user simply held.
+            # It still counts as "a key" for stopping playback below.
+            piano_note = (
+                event is not None
+                and event.event == kitty_keys.PRESS
+                and score_audition.is_piano_note_event(mode, event.key, event.mods)
+            )
+
+            if playback.active and (event is not None and event.event != kitty_keys.RELEASE):
+                # "Any key stops playback" (#108). The keystroke is
+                # consumed by stopping rather than also doing its normal
+                # job -- a panic key must not simultaneously edit.
+                playback.stop(engine)
+                entry.reset()
+                key, piano_note, quit_requested = None, False, False
+
+            if quit_requested:
+                if dirty and not quit_pending:
+                    quit_pending = True
+                else:
+                    return quit_result
+            elif piano_note:
+                quit_pending = False
+                pitch = score_audition.pitch_for_key(event.key, base_octave)
+                if pitch is not None:
+                    group = entry.press(event.key)
+                    if len(entry.held) == 1:
+                        # First press of a group: one undo snapshot per
+                        # chord, taken *before* any mutation (including
+                        # the append below) so undo restores the score as
+                        # it stood before this chord was played -- not a
+                        # state that already carries the empty column the
+                        # chord was about to be written into.
+                        _record()
+                    if group == score_audition.NEW_COLUMN:
+                        cursor_col += 1
+                        if cursor_col >= len(score.columns):
+                            sed.append_column(score, score_audition.new_column_duration(
+                                score.columns, cursor_col - 1))
+                    cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                    column = score.columns[cursor_col]
+                    cursor_row = sed.clamp_row(sed.place_note_at_pitch(column, *pitch))
+                    dirty = True
+                    _audition([pitch])          # placement audition is unconditional (#108)
+            elif event is not None and event.event == kitty_keys.RELEASE:
+                if event.key in score_audition.PIANO_KEY_SEMITONES:
+                    entry.release(event.key)
+            else:
+                if key is not None:
+                    quit_pending = False
+
+                if properties_editing:
+                    # Inline header editor (score_properties, 't', issue
+                    # #98 follow-up): intercepts every key here instead of
+                    # going through resolve_editor_action()'s normal
+                    # cursor-editing dispatch below -- Left/Right/Up/Down
+                    # mean "move/spin a properties field" while this mode
+                    # is active, not "move the cursor"/"transpose".
+                    properties_slot, properties_buffer, properties_editing = _handle_property_key(
+                        key, score, properties_slot, properties_buffer)
+                    if not properties_editing:
+                        dirty = True
+                else:
+                    action = resolve_editor_action(key)
+                    if key == "\x1b" and mode == score_audition.PIANO_MODE:
+                        # Esc always *leaves* piano mode, never enters it
+                        # -- the standard modal escape hatch, alongside
+                        # the piano_mode key's own toggle.
+                        mode = score_audition.EDIT_MODE
+                        entry.reset()
+                        action = None
+
+                    if action in ("LEFT", "RIGHT", "UP", "DOWN"):
+                        if action == "LEFT":
+                            cursor_col = sed.clamp_column(cursor_col - 1, len(score.columns))
+                        elif action == "RIGHT":
+                            cursor_col = sed.clamp_column(cursor_col + 1, len(score.columns))
+                        elif action == "UP":
+                            cursor_row = sed.clamp_row(cursor_row + 1)
+                        else:
+                            cursor_row = sed.clamp_row(cursor_row - 1)
+                        entry.reset()   # a moved cursor starts a fresh piano-entry group
+                        if audition_on:
+                            _audition(score_audition.audition_targets(
+                                action, score.columns[cursor_col], cursor_row))
+                    elif action == "note_toggle":
+                        _record()
+                        if sed.toggle_note_at_cursor(score.columns[cursor_col], cursor_row, score.key_fifths):
+                            dirty = True
+                        # Placement audition is unconditional (#108): you
+                        # should always hear what you just wrote, even
+                        # with cursor-move audition switched off. Nothing
+                        # sounds when the toggle *removed* a note, since
+                        # there is then no note at the row to sound.
+                        index = sed.note_index_at_row(score.columns[cursor_col], cursor_row)
+                        if index is not None:
+                            note = score.columns[cursor_col].notes[index]
+                            _audition([(note.pitch_class, note.octave)])
+                    elif action in ("transpose_up", "transpose_down"):
+                        direction = 1 if action == "transpose_up" else -1
+                        if mode == score_audition.PIANO_MODE:
+                            # In piano mode Shift+Up/Down moves the
+                            # keyboard's own octave instead of transposing
+                            # a note under the cursor -- a two-octave
+                            # keyboard otherwise cannot reach the whole
+                            # grand staff, and nothing else in this mode
+                            # wants the binding.
+                            base_octave = score_audition.clamp_base_octave(base_octave + direction)
+                        else:
+                            _record()
+                            new_row = sed.transpose_note_at_cursor(score.columns[cursor_col], cursor_row, direction)
+                            if new_row is not None:
+                                cursor_row = new_row
+                                dirty = True
+                                _audition(score_audition.audition_targets(
+                                    "UP", score.columns[cursor_col], cursor_row))
+                    elif action in ("duration_shorten", "duration_lengthen"):
+                        _record()
+                        sed.cycle_duration(score.columns[cursor_col], 1 if action == "duration_shorten" else -1)
+                        dirty = True
+                    elif action == "clear_to_rest":
+                        _record()
+                        sed.clear_to_rest(score.columns[cursor_col])
+                        dirty = True
+                    elif action == "insert_column":
+                        _record()
+                        sed.insert_column_at(score, cursor_col)
+                        dirty = True
+                    elif action == "delete_column":
+                        _record()
+                        if sed.delete_column_at(score, cursor_col):
+                            cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                            dirty = True
+                    elif action == "undo":
+                        previous = history.undo(score)
+                        if previous is not None:
+                            score = previous
+                            cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                            dirty = True
+                    elif action == "redo":
+                        next_score = history.redo(score)
+                        if next_score is not None:
+                            score = next_score
+                            cursor_col = sed.clamp_column(cursor_col, len(score.columns))
+                            dirty = True
+                    elif action == "zoom_cycle":
+                        zoom_level = sed.cycle_zoom(zoom_level)
+                    elif action == "chords_only_toggle":
+                        chords_only = not chords_only
+                    elif action == "piano_mode":
+                        # Non-dirtying by construction (#108): switching
+                        # modes touches no EditorScore state at all.
+                        mode = score_audition.toggle_mode(mode)
+                        entry.reset()
+                    elif action == "audition_toggle":
+                        audition_on = not audition_on
+                    elif action == "metronome_toggle":
+                        metronome_on = not metronome_on
+                    elif action == "mark_range_start":
+                        mark_start = cursor_col
+                    elif action == "mark_range_end":
+                        mark_end = cursor_col
+                    elif action == "play_from_cursor":
+                        loop = _mark_range(mark_start, mark_end)
+                        span = score_audition.playback_range(len(score.columns), cursor_col, loop)
+                        if span is not None:
+                            entries = score_audition.schedule_slice(
+                                score_audition.build_schedule(score.columns), span[0], span[1])
+                            entry.reset()
+                            playback.start(score, entries, time.monotonic())
+                    elif action == "ENTER":
+                        _record()
+                        _run_chord_builder(keys, score.columns[cursor_col])
+                        dirty = True
+                    elif action == "score_properties":
+                        _record()
+                        properties_editing = True
+                        properties_slot = 0
+                        properties_buffer = ""
+                    elif action == "save":
+                        save_score(score, path)
+                        dirty = False
+                    elif key is not None and key.lower() == "h":
+                        help_legend_on = not help_legend_on
+
+            if playback.active:
+                playback.advance(score, engine, metronome_on, time.monotonic())
+
+            zoom_name, _width = sed.ZOOM_LEVELS[zoom_level]
+            field_texts = _property_field_texts(score)
+            if properties_editing:
+                highlighted_slot_name = spd.PROPERTY_SLOTS[properties_slot]
+                field_parts = []
+                for slot_name in spd.PROPERTY_SLOTS:
+                    if slot_name == highlighted_slot_name:
+                        text = (f"{_PROPERTY_FIELD_PREFIX[slot_name]}={properties_buffer}"
+                                if properties_buffer else field_texts[slot_name])
+                        text = f"\033[7m{text}\033[0m"
+                    else:
+                        text = field_texts[slot_name]
+                    field_parts.append(text)
+                properties_line = "  ".join(field_parts)
+            else:
+                properties_line = "  ".join(field_texts[s] for s in spd.PROPERTY_SLOTS)
+            status = (f"saved={'no' if dirty else 'yes'}  col={cursor_col + 1}/{len(score.columns)}  "
+                      f"{properties_line}  "
+                      f"mode={mode}({_key_hint('piano_mode')})  "
+                      f"{_editor_audio_status(mode, base_octave, audition_on, metronome_on, engine, playback)}  "
+                      f"{_editor_loop_status(mark_start, mark_end)}"
+                      f"zoom={zoom_name}({_key_hint('zoom_cycle')})  "
+                      f"chords={'on' if chords_only else 'off'}({_key_hint('chords_only_toggle')})  "
+                      f"({_key_hint('save')})save  legend(h)")
+            if quit_pending:
+                status += "  [unsaved changes -- press quit again to discard, any other key to cancel]"
+            if properties_editing:
+                help_legend = _legend_line([
+                    "left/right=field", "up/down=value", "0-9=type (time/tempo)", "enter=done",
+                ]) if help_legend_on else ""
+            elif mode == score_audition.PIANO_MODE:
+                help_legend = _legend_line([
+                    "zsxdcvgbhnjm/q2w3er5t6y7u=play", "together=chord", "in sequence=columns",
+                    "shift+up/shift+down=octave", "left/right=column",
+                    f"{_key_hint('duration_shorten')}/{_key_hint('duration_lengthen')}=duration",
+                    f"{_key_hint('piano_mode')}/esc=leave piano",
+                ]) if help_legend_on else ""
+            else:
+                help_legend = _legend_line([
+                    "left/right=column", "up/down=pitch", f"{_key_hint('note_toggle')}=note",
+                    "shift+up/shift+down=transpose",
+                    f"{_key_hint('duration_shorten')}/{_key_hint('duration_lengthen')}=duration",
+                    f"{_key_hint('clear_to_rest')}=rest", f"{_key_hint('insert_column')}=insert",
+                    f"{_key_hint('delete_column')}=delete", f"{_key_hint('undo')}/{_key_hint('redo')}=undo/redo",
+                    f"{_key_hint('zoom_cycle')}=zoom", f"{_key_hint('chords_only_toggle')}=chords",
+                    "enter=chordbuilder", f"{_key_hint('score_properties')}=properties",
+                    f"{_key_hint('piano_mode')}=piano", f"{_key_hint('play_from_cursor')}=play",
+                    f"{_key_hint('metronome_toggle')}=metronome",
+                    f"{_key_hint('audition_toggle')}=audition",
+                    f"{_key_hint('mark_range_start')}/{_key_hint('mark_range_end')}=loop",
+                    f"{_key_hint('save')}=save",
+                ]) if help_legend_on else ""
+            sed.render(score, cursor_col, cursor_row, zoom_level, chords_only, status, help_legend,
+                       playhead_col=playback.playhead)
+            time.sleep(dt)
+    finally:
+        playback.stop(engine)
+        if owns_engine and engine is not None:
+            engine.stop()
+        keys.restore()
+
+
+def _editor_audio_status(mode, base_octave, audition_on, metronome_on, engine, playback):
+    """The score editor's audition/piano/playback status-line fields (map
+    #99, ticket #120). `oct=` only appears in piano mode, where it is the
+    one piece of state a player needs and cannot otherwise see; `sound=`
+    only appears when there is *no* engine, since "the editor is silent
+    and here is why" is worth a permanent field while "sound works" is
+    not."""
+    parts = []
+    if mode == score_audition.PIANO_MODE:
+        parts.append(f"oct={base_octave}-{base_octave + 1}")
+    parts.append(f"audition={'on' if audition_on else 'off'}({_key_hint('audition_toggle')})")
+    parts.append(f"metro={'on' if metronome_on else 'off'}({_key_hint('metronome_toggle')})")
+    if playback.active:
+        parts.append("playing")
+    if engine is None:
+        parts.append("sound=unavailable")
+    return "  ".join(parts)
+
+
+def _editor_loop_status(mark_start, mark_end):
+    """`loop=` field for the editor's `[`/`]` marked region, in 1-based
+    column numbers to match the status line's own `col=` field. Blank
+    (and contributing no separator) when nothing is marked, mirroring
+    `tab`'s own mark= field only appearing once a mark exists."""
+    if mark_start is None and mark_end is None:
+        return ""
+    span = _mark_range(mark_start, mark_end)
+    if span is None:
+        placed = mark_start if mark_start is not None else mark_end
+        return f"loop=[{placed + 1},...]  "
+    return f"loop=[{span[0] + 1},{span[1] + 1}]  "
+
+
+def _synth_status(state, held_mode, engine, message, recorder=None):
+    """The synth tool's status line. `keys=` is the one field decision
+    #107 point 7 makes mandatory: on a terminal that reports no key
+    releases every note is a fixed length, and *saying so plainly* is
+    what keeps "why won't notes sustain?" from becoming a bug report
+    rather than a known, documented degradation."""
+    layout = state.layout
+    patch = state.panel_patch()
+    voices = engine.voices.active_count() if engine is not None else 0
+    parts = [
+        f"layout={layout.name}(tab)",
+        f"oct={state.octave_shift:+d}",
+        f"patch={patch.name}{'*' if state.patch_dirty else ''}",
+        f"kit={state.kit.name if state.kit is not None else '--'}",
+        f"voices={voices}",
+        f"keys={held_mode}",
+        f"rec={'ON' if recorder is not None and recorder.armed else 'off'}(shift+s)",
+    ]
+    if message:
+        parts.append(message)
+    return "  ".join(parts)
+
+
+def _synth_legend(state):
+    parts = [
+        "letters/numbers=play", "tab=layout", "up/down=param", "left/right=value",
+        "shift+left/right=coarse", "shift+up/down=octave",
+        "shift+p=patches", "shift+w=save", "shift+i=import sample",
+        "shift+m=panic", "shift+s=record", "shift+h=legend",
+    ]
+    if not state.layout.builtin:
+        parts.extend(["shift+b=bind kind", "<|>=bind value", "shift+l=save layout"])
+    else:
+        parts.append("shift+n=custom layout")
+    return _legend_line(parts)
+
+
+def run_synth_tool(session=None):
+    """`virtualnote synth` / the menu's Synth entry (map #99, ticket #119,
+    decision #107): the standalone instrument.
+
+    Never opens the mic -- like `edit` (#98), which is why `shell.py`
+    gives it its own dispatch branch rather than routing it through
+    `run_session()`. It does use the process-wide `SoundEngine`
+    (`SessionState.ensure_sound_engine()`, decision #105) when a session
+    exists, so switching editor -> synth -> a live view never drops the
+    output device; called with no session (the CLI subcommand) it builds
+    its own, exactly as `transcribe --play` already does.
+
+    The keyboard is opened with `want_kitty=True` -- the one thing in
+    this app that genuinely needs key *releases*, since a held key must
+    sustain rather than machine-gun. On a terminal without the protocol
+    `kitty_keys.FixedDurationKeys` takes over and every note is
+    `config.SYNTH_FIXED_NOTE_SECONDS` long; the status line says which of
+    the two is in force (#107 point 7).
+
+    Returns the "quit"/"menu" sentinel every other interactive view
+    returns. Smoke-tested manually only, per this repo's convention --
+    `synth_tool.py`/`synth_params.py`/`synth_layout.py`/
+    `synth_display.py` hold every decision this loop makes, and those are
+    unit-tested directly."""
+    from notecolor.tui import synth_display
+    from notecolor.tui import synth_tool
+    from notecolor.audio.synth_engine import SynthUnavailable, require_scipy
+
+    try:
+        require_scipy()
+    except SynthUnavailable as exc:
+        # #111: the synth refuses to open rather than opening filterless,
+        # which is precisely the failure mode that makes the closest
+        # prior art read as a toy.
+        print(f"[virtualnote] {exc}", file=sys.stderr)
+        return "menu"
+
+    from notecolor.audio import sound_engine
+    from notecolor.audio.sampler import SamplerEngine
+    from notecolor.audio.sound_engine import NoteOn
+    from notecolor.audio.synth_engine import SynthEngine
+
+    state = synth_tool.SynthToolState()
+    router = synth_tool.ChannelRouter(SynthEngine(patch=state.patch))
+
+    if session is not None:
+        sound = session.ensure_sound_engine()
+    else:
+        from notecolor.audio import sound_engine as _sound_engine
+
+        sound = _sound_engine.SoundEngine()
+        sound.ensure_started()
+    previous_engine = sound.engine
+    sound.engine = router
+    sound.set_polyphony_override(lambda: synth_tool.polyphony_for_layout(state.layout))
+
+    def _sync_engines():
+        router.note_engine.patch = state.patch
+        if state.kit is not None:
+            if router.pad_engine is None:
+                router.pad_engine = SamplerEngine(patch=state.kit)
+            else:
+                router.pad_engine.set_patch(state.kit)
+
+    # The recording target (ticket #122, decision #110): the process-wide
+    # SessionRecorder when there is a session, so arming here and arming
+    # in a live view are literally the same switch on the same file and a
+    # `|` back to the menu never severs a recording mid-take. With no
+    # session (the `virtualnote synth` CLI subcommand) the tool owns one
+    # for its own lifetime and closes it on the way out -- nothing else
+    # in the process would.
+    recorder = session.session_recorder if session is not None else SessionRecorder()
+    owns_recorder = session is None
+
+    keys = RawKeys(want_kitty=True)
+    held_mode = "held" if keys.kitty else f"fixed {config.SYNTH_FIXED_NOTE_SECONDS:.2f}s (no key release)"
+    policy = (kitty_keys.HeldKeys() if keys.kitty
+              else kitty_keys.FixedDurationKeys(config.SYNTH_FIXED_NOTE_SECONDS))
+    lights = synth_display.KeyLights()
+    voices = {}
+    dt = 1.0 / config.TERMINAL_FPS
+
+    def _note_on(key):
+        slot = state.layout.slot_for(key)
+        if slot is None:
+            return
+        # Recorded before the unbound check, not after: "point at a key"
+        # in this tool means "play it", and an unbound key that never
+        # became the bind target could never be bound back to anything.
+        state.last_key = key
+        if slot.kind == synth_tool.UNBOUND:
+            return
+        pitch = slot.midi_key(state.octave_shift)
+        if pitch is None or not (0 <= pitch <= 127):
+            return
+        # Full velocity, always (#107 decision 3): QWERTY has no dynamics
+        # to report, and faking them would be a lie the sampler's own
+        # velocity layers then act on.
+        voices[key] = sound.note_on(NoteOn(pitch, 1.0, slot.channel()))
+        # Recorded from the same two functions that start and stop the
+        # sound, so what lands in the log is exactly what was heard --
+        # including a note ended by a layout switch or an octave shift
+        # (both release everything through `policy.release_all()`), and
+        # including a fixed-duration note on a terminal with no key
+        # releases, whose note_off arrives from `policy.expire()` at the
+        # moment it actually stopped sounding.
+        pad_index = state.pad_index_for_slot(slot)
+        pitch_class, octave = sound_engine.pitch_class_octave(pitch)
+        recorder.note_on(
+            key, pitch_class, octave, velocity=1.0,
+            patch=(state.kit.name if pad_index is not None and state.kit is not None
+                   else state.patch.name),
+            pad=None if pad_index is None else pad_index + 1,
+        )
+
+    def _note_off(key):
+        recorder.note_off(key)
+        voice_id = voices.pop(key, None)
+        if voice_id is not None:
+            sound.release_voice(voice_id)
+
+    def _apply(events):
+        for kind, key in events:
+            if kind == kitty_keys.NOTE_ON:
+                _note_on(key)
+            else:
+                _note_off(key)
+
+    try:
+        while True:
+            try:
+                while True:
+                    event = keys.poll_event()
+                    if event is None:
+                        break
+                    overlay_kind = state.overlay.kind if state.overlay is not None else None
+                    action = synth_tool.resolve_action(event, overlay_kind)
+                    if action == "menu":
+                        return "menu"
+                    if action is not None:
+                        state.message = _handle_synth_action(
+                            action, state, sound, policy, _apply, _sync_engines, recorder) or ""
+                        continue
+                    if event.event == kitty_keys.PRESS and state.overlay is not None \
+                            and state.overlay.kind == synth_tool.OVERLAY_SAVE:
+                        # PRESS only, never REPEAT: a held key sustains
+                        # one note, so it must likewise type one
+                        # character rather than a run of them.
+                        # The always-plays invariant, held even inside a
+                        # text field: the keystroke both types and sounds.
+                        text = synth_tool.typed_text(event)
+                        if len(text) == 1 and text.isprintable():
+                            state.overlay.append(text)
+                    if keys.kitty:
+                        _apply(policy.apply(event))
+                    else:
+                        _apply(policy.apply(event, time.monotonic()))
+            except KeyboardInterrupt:
+                return "quit"
+
+            if not keys.kitty:
+                _apply(policy.expire(time.monotonic()))
+
+            colors = lights.update(dt, state.layout, policy.held, state.kit, state.octave_shift)
+            status = _synth_status(state, held_mode, sound, state.message, recorder)
+            synth_display.render(state, colors, status,
+                                 _synth_legend(state) if state.help_on else "")
+            time.sleep(dt)
+    finally:
+        # `policy.release_all()` covers every note this loop started;
+        # `sound.all_notes_off()` is the belt-and-braces guarantee for
+        # anything the voice manager still holds. A stuck note is the
+        # single worst failure mode of an instrument, so both run.
+        _apply(policy.release_all())
+        keys.release_all()
+        sound.all_notes_off()
+        sound.set_polyphony_override(None)
+        sound.engine = previous_engine
+        if owns_recorder:
+            recorder.close()
+        keys.restore()
+
+
+def _handle_synth_action(action, state, sound, policy, apply_events, sync_engines, recorder=None):
+    """One resolved synth-tool action. Split out of `run_synth_tool()`'s
+    loop purely for legibility -- it still owns real side effects (file
+    I/O, the audio engine), so like the loop it is smoke-tested rather
+    than unit-tested; every *decision* it makes lives in `synth_tool.py`
+    and is tested there."""
+    from notecolor.tui import synth_tool
+    from notecolor.audio import wav_io
+
+    overlay = state.overlay
+
+    if action == "layout_cycle":
+        apply_events(policy.release_all())
+        layout = state.cycle_layout()
+        return f"layout: {layout.name}"
+    if action == "param_prev":
+        state.move_param(-1)
+        return None
+    if action == "param_next":
+        state.move_param(1)
+        return None
+    if action in ("param_dec", "param_inc", "param_dec_coarse", "param_inc_coarse"):
+        direction = 1 if action.startswith("param_inc") else -1
+        state.adjust_param(direction, action.endswith("coarse"))
+        sync_engines()
+        return None
+    if action in ("octave_up", "octave_down"):
+        # Sounding notes are released first: a key held across a
+        # transpose would otherwise be released against a pitch it was
+        # never started at, and stick.
+        apply_events(policy.release_all())
+        shift = state.shift_octave(1 if action == "octave_up" else -1)
+        return f"octave {shift:+d}"
+    if action == "help_toggle":
+        state.help_on = not state.help_on
+        return None
+    if action == "panic":
+        apply_events(policy.release_all())
+        sound.all_notes_off()
+        return "all notes off"
+    if action == "record_toggle":
+        if recorder is None:
+            return None
+        # Sounding notes are released first, for the same reason an octave
+        # shift releases them: a note whose note_on landed on one side of
+        # the switch and whose note_off lands on the other has no honest
+        # line to write. Releasing first makes disarming end every note
+        # cleanly in the log, and arming start the take from silence.
+        apply_events(policy.release_all())
+        armed = recorder.toggle()
+        return f"recording -> {os.path.basename(recorder.path)}" if armed else "recording stopped"
+
+    # -- overlays ---------------------------------------------------------
+    if action == "patch_browse":
+        state.toggle_overlay(synth_tool.OVERLAY_PATCH)
+        return None
+    if action == "patch_save":
+        state.toggle_overlay(synth_tool.OVERLAY_SAVE)
+        return None
+    if action == "sample_import":
+        state.toggle_overlay(synth_tool.OVERLAY_SAMPLE)
+        return None
+    if action == "overlay_cancel":
+        state.close_overlay()
+        return None
+    if action == "overlay_prev" and overlay is not None:
+        overlay.move(-1)
+        return None
+    if action == "overlay_next" and overlay is not None:
+        overlay.move(1)
+        return None
+    if action == "overlay_backspace" and overlay is not None:
+        overlay.backspace()
+        return None
+    if action == "overlay_back" and overlay is not None and overlay.directory:
+        state.overlay_enter_directory(os.path.dirname(os.path.abspath(overlay.directory)))
+        return None
+    if action == "overlay_forward" and overlay is not None and overlay.directory:
+        entry = overlay.current
+        if entry is not None and entry[2] == "dir":
+            state.overlay_enter_directory(entry[1])
+        return None
+    if action == "overlay_confirm" and overlay is not None:
+        return _confirm_synth_overlay(state, overlay, sync_engines, wav_io, synth_tool)
+
+    # -- custom layouts ---------------------------------------------------
+    if action == "layout_new":
+        layout = state.new_custom_layout()
+        return f"new custom layout: {layout.name} (shift+l saves it)"
+    if action == "bind_kind":
+        slot = state.cycle_bind_kind()
+        if slot is None:
+            return "play a key first (and shift+n for a custom layout)"
+        return f"{slot.key}: {slot.kind}"
+    if action in ("bind_up", "bind_down"):
+        slot = state.nudge_bind_value(1 if action == "bind_up" else -1)
+        if slot is None:
+            return "play a key first (and shift+n for a custom layout)"
+        return f"{slot.key}: {slot.kind} {slot.value}"
+    if action == "layout_save":
+        path = state.save_layout()
+        return f"saved layout to {path}" if path else "built-in layouts aren't saved (shift+n first)"
+    return None
+
+
+def _confirm_synth_overlay(state, overlay, sync_engines, wav_io, synth_tool):
+    """Enter inside an overlay: load the highlighted patch, save under the
+    typed name, or descend into / import the highlighted sample."""
+    from notecolor.settings import patch_format
+
+    if overlay.kind == synth_tool.OVERLAY_SAVE:
+        path = state.save_patch_as(overlay.buffer)
+        state.close_overlay()
+        return f"saved {os.path.basename(path)}"
+    entry = overlay.current
+    if entry is None:
+        return None
+    if overlay.kind == synth_tool.OVERLAY_PATCH:
+        try:
+            patch = patch_format.load_patch(entry[1])
+        except (OSError, ValueError) as exc:
+            return f"could not load: {exc}"
+        state.set_patch(patch, entry[1])
+        sync_engines()
+        state.close_overlay()
+        return f"loaded {patch.name} [{patch.engine}]"
+    # OVERLAY_SAMPLE
+    label, path, kind = entry
+    if kind == "dir":
+        state.overlay_enter_directory(path)
+        return None
+    try:
+        name = wav_io.import_sample(path)
+    except wav_io.SampleImportError as exc:
+        return f"import failed: {exc}"
+    if state.kit is None:
+        state.kit = patch_format.new_patch(name="Kit", engine="sampler")
+    slot = state.layout.slot_for(state.last_key) if state.last_key else None
+    pad_index = state.pad_index_for_slot(slot)
+    if pad_index is None:
+        pads = [s for s in state.layout.slots if s.kind == synth_tool.PAD]
+        if not pads:
+            state.close_overlay()
+            return f"imported {name} (this layout has no pads to put it on)"
+        pad_index = pads[0].value
+    synth_tool.assign_sample_to_pad(state.kit, pad_index, name)
+    sync_engines()
+    state.close_overlay()
+    return f"imported {name} -> pad {pad_index + 1}"
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Real-time audio-to-color display")
+    parser.add_argument("--fullscreen", action="store_true", help="GUI mode: start fullscreen")
+    parser.add_argument("--debug", action="store_true", help="GUI mode: show debug overlay on start")
+    parser.add_argument("--terminal", action="store_true", help="run in the terminal instead of a GUI window")
+    parser.add_argument("--view", choices=["fill", "wheel", "tab"], default="fill",
+                         help="terminal mode only: 'fill' (solid color), 'wheel' (circle-of-fifths diagram), "
+                              "or 'tab' (scrolling grand-staff note history)")
+    parser.add_argument("--color-scheme", choices=["chromatic", "fifths"], default=config.DEFAULT_COLOR_SCHEME,
+                         help="hue mapping for the fill/GUI views (wheel and tab views always use "
+                              "the fifths layout)")
+    parser.add_argument("--scroll", choices=["fix", "onset"], default=config.DEFAULT_SCROLL_MODE,
+                         help="'tab' view only: 'fix' pushes a new column every tick; "
+                              "'onset' pushes one only on a new note-attack")
+    parser.add_argument("--dump-file", default=None,
+                         help="'tab' view only: path for the ANSI session note-history dump written on quit "
+                              "(default: note_history_<timestamp>.txt next to main.py)")
+    parser.add_argument("--sensitivity", type=_positive_float, default=config.DEFAULT_SENSITIVITY,
+                         help="pitch-detection sensitivity multiplier (default 1.0); higher registers "
+                              "quieter/softer playing more readily. Adjustable live with Up/Down in any mode.")
+    parser.add_argument("--source", choices=["mic", "loopback"], default="mic",
+                         help="'mic' (default) listens to the microphone; 'loopback' listens to the "
+                              "computer's own audio output instead (PipeWire/PulseAudio on Linux only), "
+                              "for testing without playing anything out loud")
+    parser.add_argument("--time-signature", type=_parse_time_signature, default=config.DEFAULT_TIME_SIGNATURE,
+                         help="'tab' view only: N/D time signature for barline placement (default 4/4)")
+    args = parser.parse_args()
+
+    session = SessionState(args.color_scheme, args.sensitivity, args.source)
+    try:
+        session.ensure_started()
+    except RuntimeError as exc:
+        parser.error(str(exc))
+
+    view = args.view if args.terminal else "gui"
+    try:
+        # The return value ("quit" or "menu") is intentionally ignored:
+        # standalone `main.py` has no menu to fall back to, so a "menu"
+        # sentinel (the user pressed '|'/backslash) is treated the same as
+        # "quit" -- just exit cleanly either way. `virtualnote.py` is what
+        # actually gives '|' somewhere to return to (see shell.py); H still
+        # works here too, harmlessly, since it's pure render-thread-local
+        # state with nothing shell-specific about it.
+        run_session(view, args.scroll, args.dump_file, args.fullscreen, args.debug, session,
+                     time_signature=args.time_signature)
+    finally:
+        session.stop()
+
+
+if __name__ == "__main__":
+    main()

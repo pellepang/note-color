@@ -1,11 +1,11 @@
 import numpy as np
 
-import config
-from detection_backends import (
+from notecolor.settings import config
+from notecolor.analysis.detection_backends import (
     SpectralPeakBackend, YinBackend, default_pitch_backend, default_poly_backend,
 )
-from pitch_detect import compute_spectrum, detect_pitch
-from multipitch import detect as multipitch_detect
+from notecolor.analysis.pitch_detect import compute_spectrum, detect_pitch
+from notecolor.analysis.multipitch import detect as multipitch_detect
 
 SAMPLE_RATE = 22050
 

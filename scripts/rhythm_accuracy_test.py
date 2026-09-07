@@ -103,11 +103,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import acoustic_pipeline_test as apt  # reuses synth_notes/voice_chord/_silence/_overlay/_peak_cap/muted_default_sink
-import config
-import main
-import rhythm_reanalysis
-from config_store import store
-from duration_tracker import duration_class_for_beats
+from notecolor.settings import config
+from notecolor.tui import app as main
+from notecolor.analysis import rhythm_reanalysis
+from notecolor.settings.config_store import store
+from notecolor.analysis.duration_tracker import duration_class_for_beats
 
 PLAYBACK_SR = apt.PLAYBACK_SR
 NOTE_INDEX = apt.NOTE_INDEX

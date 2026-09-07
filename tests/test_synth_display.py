@@ -10,12 +10,12 @@ view's own render method in this codebase follows.
 
 import pytest
 
-import config
-import patch_format
-import synth_display as sd
-import synth_layout as sl
-import synth_tool as st
-from color_map import fifths_index, hsl_to_rgb255, hue_for_step
+from notecolor.settings import config
+from notecolor.settings import patch_format
+from notecolor.tui import synth_display as sd
+from notecolor.tui import synth_layout as sl
+from notecolor.tui import synth_tool as st
+from notecolor.analysis.color_map import fifths_index, hsl_to_rgb255, hue_for_step
 
 
 def _kit(**pads):
@@ -176,7 +176,7 @@ def test_the_panel_shows_section_headings_with_their_own_parameters():
 
 def test_the_panel_scrolls_to_keep_the_selected_parameter_visible():
     patch = patch_format.new_patch()
-    import synth_params as sp
+    from notecolor.tui import synth_params as sp
 
     last = len(sp.specs_for(patch)) - 1
     lines = sd.panel_lines(patch, last, 8)

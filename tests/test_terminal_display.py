@@ -2,7 +2,7 @@ import io
 import shutil
 import sys
 
-import terminal_display
+from notecolor.tui import terminal_display
 
 
 def _render(monkeypatch, rows, cols=80, legend="", bands=False):

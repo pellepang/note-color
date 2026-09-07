@@ -30,10 +30,10 @@ import time
 import numpy as np
 import pytest
 
-import config
-import sf2_playback as sp
-from patch_format import new_patch
-from sound_engine import NoteOn, SoundEngine, VoiceManager
+from notecolor.settings import config
+from notecolor.audio import sf2_playback as sp
+from notecolor.settings.patch_format import new_patch
+from notecolor.audio.sound_engine import NoteOn, SoundEngine, VoiceManager
 
 
 SR = 1000  # small sample rate so release-tail arithmetic stays readable

@@ -17,10 +17,10 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 sys.path.insert(0, _REPO_ROOT)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import chord_templates
-import chroma
-import config
-from pitch_detect import compute_spectrum
+from notecolor.analysis import chord_templates
+from notecolor.analysis import chroma
+from notecolor.settings import config
+from notecolor.analysis.pitch_detect import compute_spectrum
 
 from nnls_chroma import nnls_chroma
 

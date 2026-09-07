@@ -5,7 +5,7 @@ loop are smoke-tested manually, not here."""
 
 import os
 
-import score_editor_picker as pk
+from notecolor.tui import score_editor_picker as pk
 
 
 def test_score_file_paths_finds_musicxml_and_xml(tmp_path):

@@ -7,8 +7,8 @@ tests/test_config_store.py and tests/test_settings_display.py.
 
 import os
 
-import patch_format
-from patch_format import (
+from notecolor.settings import patch_format
+from notecolor.settings.patch_format import (
     EffectSpec,
     Patch,
     Zone,

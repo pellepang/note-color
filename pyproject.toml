@@ -112,84 +112,22 @@ all = [
 ]
 
 [tool.setuptools.package-data]
-"vendor.basic_pitch" = ["*.onnx", "LICENSE", "NOTICE", "README.md"]
+# The vendored basic-pitch graph (map #123, #129) is data, not code, so it
+# needs an explicit rule to survive a non-editable `pip install .`.
+# `transcribe_backends.BasicPitchModel._resolve_path()` resolves it relative
+# to its own module file, which is why `vendor/` lives beside that module
+# inside the package rather than at the repo root. See its README.md for
+# provenance and why it is committed at all.
+"notecolor.convert.vendor.basic_pitch" = ["*.onnx", "LICENSE", "NOTICE", "README.md"]
 
 [project.scripts]
-virtualnote = "virtualnote:main"
+virtualnote = "notecolor.tui.cli:main"
 
-[tool.setuptools]
-# The vendored basic-pitch graph (map #123, #129) is data, not code, and
-# `py-modules` alone would leave it out of a non-editable `pip install .`
-# -- `transcribe_backends.BasicPitchModel` resolves it relative to its own
-# module file, so it has to ship alongside. See vendor/basic_pitch/README.md
-# for provenance and why it is committed at all.
-packages = ["vendor", "vendor.basic_pitch"]
-py-modules = [
-    "animation",
-    "audio_capture",
-    "batch_transcribe",
-    "chord_smoother",
-    "chord_templates",
-    "chroma",
-    "color_map",
-    "config",
-    "config_store",
-    "credits_display",
-    "detection_backends",
-    "display",
-    "duration_tracker",
-    "main",
-    "menu_animation",
-    "menu_display",
-    "multipitch",
-    "note_smoother",
-    "onset_detect",
-    "pitch_detect",
-    "prototypes_display",
-    "rhythm_reanalysis",
-    "score_writer",
-    "synth_engine",
-    "session_player",
-    "session_recorder",
-    "sf2_playback",
-    "settings_display",
-    "shell",
-    "staff_map",
-    "tempo_tracker",
-    "terminal_display",
-    "terminal_tab_display",
-    "terminal_wheel_display",
-    "virtualnote",
-    "abc_export",
-    "chord_builder_display",
-    "effects",
-    "kitty_keys",
-    "patch_format",
-    "playback",
-    "sampler",
-    "score_editor_display",
-    "score_editor_picker",
-    "score_editor_state",
-    "score_properties_display",
-    "sound_engine",
-    "stats_display",
-    "tone_engine",
-    "wav_io",
-    # Tickets #120/#121 -- missing from this list when they merged, which
-    # would have left `pip install .` short of two modules `main` imports.
-    "score_audition",
-    "tab_playback",
-    # Ticket #122, quantized session-log import into the score editor.
-    "log_import",
-    # Ticket #119, the synth tool.
-    "synth_display",
-    "synth_layout",
-    "synth_params",
-    "synth_tool",
-    # Map #123, the offline converter (#129).
-    "convert",
-    "transcribe_backends",
-    # Map #123, ticket #144 -- synthetic corpus and its scoring harness.
-    "synth_corpus",
-    "evaluate",
-]
+[tool.setuptools.packages.find]
+# src layout with automatic discovery (wayfinder map #145, ticket #146).
+# This replaces a hand-maintained 60-entry `py-modules` list, which had
+# already silently omitted two modules once (`score_audition`, `tab_playback`
+# from tickets #120/#121) and left `pip install .` broken until it was
+# noticed. A module can no longer be forgotten by being added in the wrong
+# commit -- if it is in the package tree, it ships.
+where = ["src"]

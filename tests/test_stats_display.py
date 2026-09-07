@@ -8,7 +8,7 @@ interactive render/wait-for-keypress loop (run_stats_screen) is
 smoke-tested manually, same convention as credits_display's own
 run_credits_screen()."""
 
-from stats_display import _format_duration, _session_date, compute_stats, stats_lines
+from notecolor.tui.stats_display import _format_duration, _session_date, compute_stats, stats_lines
 
 
 def _event(label, duration_seconds=1.0):

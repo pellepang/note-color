@@ -1,4 +1,4 @@
-from staff_map import (
+from notecolor.analysis.staff_map import (
     staff_row, ledger_rows, row_note_name, STAFF_LINE_ROWS, TOP_ROW, BOTTOM_ROW,
     BASS_CLEF_ROW, TREBLE_CLEF_ROW, LETTER_NAMES, key_signature_accidental,
 )

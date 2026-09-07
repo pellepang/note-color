@@ -14,9 +14,9 @@ import wave
 import numpy as np
 import pytest
 
-import patch_format
-import wav_io
-from wav_io import (
+from notecolor.settings import patch_format
+from notecolor.audio import wav_io
+from notecolor.audio.wav_io import (
     Sample, SampleImportError, import_sample, imported_samples, parse_fmt, parse_smpl_loop,
     read_wav, read_wav_bytes, riff_chunks, write_wav,
 )

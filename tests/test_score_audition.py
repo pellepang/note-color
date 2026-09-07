@@ -17,10 +17,10 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config  # noqa: E402
-import kitty_keys  # noqa: E402
-import score_audition as sa  # noqa: E402
-from score_editor_state import EditorColumn, EditorNote, EditorScore  # noqa: E402
+from notecolor.settings import config  # noqa: E402
+from notecolor.tui import kitty_keys  # noqa: E402
+from notecolor.notation import score_audition as sa  # noqa: E402
+from notecolor.notation.score_editor_state import EditorColumn, EditorNote, EditorScore  # noqa: E402
 
 
 def column(pitches, duration_class="quarter"):
@@ -150,7 +150,7 @@ def test_horizontal_movement_auditions_the_whole_column():
 
 
 def test_vertical_movement_only_auditions_a_note_actually_on_that_row():
-    from staff_map import staff_row
+    from notecolor.analysis.staff_map import staff_row
 
     col = column([(0, 4)])
     assert sa.audition_targets("UP", col, staff_row(0, 4)) == [(0, 4)]
@@ -321,3 +321,25 @@ def test_an_appended_column_inherits_the_current_duration():
     assert sa.new_column_duration(columns, 1) == "sixteenth"
     assert sa.new_column_duration(columns, 9) == "sixteenth"   # past the end
     assert sa.new_column_duration([], 0) == "quarter"
+
+
+# --- the modifier-constant seam (ticket #146) -------------------------------
+
+
+def test_lock_modifier_bits_match_the_kitty_protocol_parser():
+    """`score_audition` states the lock-modifier bits in the core's own terms
+    rather than importing them from the terminal's kitty parser -- the core
+    must not know which front-end is reporting modifiers, since the DAW front
+    -end will report Qt's.
+
+    That independence is only safe if the two agree, so pin them against each
+    other here. This is the same cross-check convention this repo already uses
+    for `kitty_keys.parse_key_event()` against `app._parse_csi_params()`, and
+    for the synth layout against this module's own keyboard: duplicate where a
+    dependency would be wrong, then assert the duplicate cannot drift.
+    """
+    from notecolor.tui import kitty_keys
+
+    assert sa.MOD_CAPS_LOCK == kitty_keys.MOD_CAPS_LOCK
+    assert sa.MOD_NUM_LOCK == kitty_keys.MOD_NUM_LOCK
+    assert sa.LOCK_MODIFIERS == (kitty_keys.MOD_CAPS_LOCK | kitty_keys.MOD_NUM_LOCK)

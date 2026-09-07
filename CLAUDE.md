@@ -184,6 +184,46 @@ call into; each terminal run_* function and `run_gui()` return an explicit
 sentinel, `"quit"` or `"menu"`, instead of swallowing `KeyboardInterrupt`
 into an implicit `None` as before — see Key design decisions.
 
+## Package layout
+
+The code lives in a `src/notecolor/` package (wayfinder map
+[#145](https://github.com/pellepang/note-color/issues/145), ticket
+[#146](https://github.com/pellepang/note-color/issues/146)), not as flat
+modules at the repo root as it did until then. **The Files table below names
+modules by their bare name; each one lives in the package shown here.**
+
+| Package | Holds |
+|---|---|
+| `notecolor/analysis/` | Detection and music/colour theory: `pitch_detect`, `chroma`, `multipitch`, `note_smoother`, `chord_smoother`, `chord_templates`, `onset_detect`, `tempo_tracker`, `duration_tracker`, `detection_backends`, `staff_map`, `color_map`, `animation`, `batch_transcribe`, `rhythm_reanalysis` |
+| `notecolor/audio/` | `audio_capture`, `sound_engine`, `synth_engine`, `tone_engine`, `sampler`, `sf2_playback`, `effects`, `wav_io`, `playback`, and `session` (the live-capture bundle) |
+| `notecolor/notation/` | `score_writer`, `score_editor_state`, `score_audition`, `abc_export`, `log_import`, `session_player`, `session_recorder` |
+| `notecolor/convert/` | `convert`, `transcribe_backends`, `evaluate`, `synth_corpus`, and the vendored `vendor/basic_pitch/` graph (which sits beside `transcribe_backends.py` because that module resolves it relative to its own file) |
+| `notecolor/project/` | The DAW document -- Project, Track, Clip, tempo map. Empty until ticket [#149](https://github.com/pellepang/note-color/issues/149) settles the `.ncproj` schema. |
+| `notecolor/settings/` | `config`, `config_store`, `patch_format` |
+| `notecolor/tui/` | The terminal front-end: every `*_display` module, `kitty_keys`, `shell`, `menu_animation`, the synth tool's own modules, `tab_playback`, plus `app` (what `main.py` was) and `cli` (what `virtualnote.py` was) |
+| `notecolor/gui/` | The windowed front-ends: `display` (the legacy pygame visualiser) today, VisualNote Studio next |
+
+**The one rule, enforced by `tests/test_package_boundary.py`: no module
+outside `tui/` and `gui/` may import a UI toolkit (`blessed`, `pygame`,
+`PySide6`) or import a front-end package.** The test walks the real import
+graph with `ast`, so it catches lazy in-function imports too -- which matters
+here, since heavy dependencies are deliberately imported inside the functions
+that need them. It caught two genuine violations on its first run.
+
+This is what makes the two front-ends possible: **parity is promised on the
+core, not on the pixels.** A feature is built in a core package, surfaced in
+one front-end first, and reaches the other when it has an honest
+representation there.
+
+`main.py` is gone as a runnable script. `SessionState`, `analysis_loop`,
+`RenderItem`, `Sensitivity`, `SourceState` and the reanalysis buffer moved to
+`notecolor/audio/session.py` -- they are core, and leaving them inside the
+terminal app would have forced `gui/` to import `tui/` to reach them. The
+`run_*` view drivers stayed behind in `notecolor/tui/app.py`, which still
+re-exports the moved names so existing callers and tests are unaffected. Run
+the terminal app via the `virtualnote` console script, or
+`python -m notecolor.tui.cli`.
+
 ## Files
 
 | File | Responsibility |
@@ -280,6 +320,7 @@ virtualnote convert song.mp3                                            # offlin
 virtualnote convert song.mp3 --mode piano                                # solo piano: no separation, straight to transkun
 virtualnote convert song.mp3 --no-notes                                   # chords only -- needs no model installed
 .venv/bin/python -m pytest tests/                              # run the test suite
+pip install -e .                                                 # src layout; needed after a fresh clone
 ```
 
 `virtualnote` (on PATH via `~/.local/bin/virtualnote`, added to `~/.zshrc`'s

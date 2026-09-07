@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from chroma import fold, fold_bass
-from pitch_detect import compute_spectrum
+from notecolor.analysis.chroma import fold, fold_bass
+from notecolor.analysis.pitch_detect import compute_spectrum
 
 SAMPLE_RATE = 22050
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]

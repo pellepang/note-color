@@ -4,8 +4,8 @@ the interactive render/wait-for-keypress loop (run_credits_screen) is
 smoke-tested manually, same as menu_display's own render()/MenuDisplay.
 """
 
-import config
-from credits_display import credits_lines, THIRD_PARTY_LIBRARIES
+from notecolor.settings import config
+from notecolor.tui.credits_display import credits_lines, THIRD_PARTY_LIBRARIES
 
 
 def test_credits_names_the_author():

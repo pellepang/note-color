@@ -1,6 +1,6 @@
 import json
 
-from session_player import group_columns, load_events
+from notecolor.notation.session_player import group_columns, load_events
 
 
 def _write(path, events):

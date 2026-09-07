@@ -1,6 +1,6 @@
 import numpy as np
 
-from chord_templates import match
+from notecolor.analysis.chord_templates import match
 
 # Pitch classes, C=0 .. B=11 (chromatic order), independent of the
 # implementation's own quality dictionary -- these are literal, hand-known

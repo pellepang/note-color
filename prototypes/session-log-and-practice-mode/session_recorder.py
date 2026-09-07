@@ -47,9 +47,9 @@ directly off `note_stack`, no lookback needed.
 import json
 
 import _repo_paths  # noqa: F401  (sys.path bootstrap side effect)
-import config
-import color_map
-import duration_tracker
+from notecolor.settings import config
+from notecolor.analysis import color_map
+from notecolor.analysis import duration_tracker
 
 
 def _get(item, field):

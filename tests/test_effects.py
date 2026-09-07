@@ -27,13 +27,13 @@ import tomllib
 import numpy as np
 import pytest
 
-import config
-import effects
-from effects import (
+from notecolor.settings import config
+from notecolor.audio import effects
+from notecolor.audio.effects import (
     Chorus, Delay, EffectsChain, build_effect, chain_from_patch, chain_from_specs,
     tail_seconds,
 )
-from patch_format import EffectSpec, patch_from_toml
+from notecolor.settings.patch_format import EffectSpec, patch_from_toml
 
 SR = 44100
 BLOCK = 512

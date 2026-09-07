@@ -1,8 +1,8 @@
 import numpy as np
 
-from note_smoother import NoteSmoother
-from pitch_detect import compute_spectrum
-import config
+from notecolor.analysis.note_smoother import NoteSmoother
+from notecolor.analysis.pitch_detect import compute_spectrum
+from notecolor.settings import config
 
 DUMMY_SPECTRUM = np.zeros(5)
 
@@ -184,7 +184,7 @@ def test_spectral_flux_triggers_onset_without_note_change_or_rms_jump():
     loud_spectrum = np.full(64, 10.0)
     s.update(freq_for(9, 4), 0.9, 0.1, quiet_spectrum)
 
-    from onset_detect import spectral_flux
+    from notecolor.analysis.onset_detect import spectral_flux
     assert spectral_flux(loud_spectrum, quiet_spectrum) >= config.ONSET_FLUX_THRESHOLD
 
     pitch_class, octave, is_onset = s.update(freq_for(9, 4), 0.9, 0.1, loud_spectrum)

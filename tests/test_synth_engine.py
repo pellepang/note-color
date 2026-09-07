@@ -32,11 +32,11 @@ import math
 import numpy as np
 import pytest
 
-import config
-import patch_format
-import synth_engine
-from sound_engine import NoteOn, frequency_for
-from synth_engine import (
+from notecolor.settings import config
+from notecolor.settings import patch_format
+from notecolor.audio import synth_engine
+from notecolor.audio.sound_engine import NoteOn, frequency_for
+from notecolor.audio.synth_engine import (
     ATTACK, DECAY, DELAY, DONE, HOLD, RELEASE, SUSTAIN,
     DahdsrEnvelope, Lfo, PINK_A, PINK_B, SynthEngine, SynthUnavailable, SynthVoice,
     band_partials, band_top_hz, build_tables, default_patch, lfo_shape, mip_level_for,
@@ -1184,5 +1184,5 @@ def test_default_patch_is_rebuilt_fresh_each_call():
 def test_sound_engine_defaults_to_the_synth(monkeypatch):
     """#113's one-line swap: `sound_engine._default_engine()` is what the
     `Engine` Protocol existed to make replaceable."""
-    import sound_engine
+    from notecolor.audio import sound_engine
     assert isinstance(sound_engine._default_engine(), SynthEngine)

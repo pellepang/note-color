@@ -9,9 +9,9 @@ import re
 
 import pytest
 
-import config
-import menu_display
-from menu_display import MENU_ITEMS, _donation_line, _layout, _resolve_perf_mode, _text_lines
+from notecolor.settings import config
+from notecolor.tui import menu_display
+from notecolor.tui.menu_display import MENU_ITEMS, _donation_line, _layout, _resolve_perf_mode, _text_lines
 
 _OSC8_RE = re.compile(r"\x1b\]8;;.*?\x1b\\")
 

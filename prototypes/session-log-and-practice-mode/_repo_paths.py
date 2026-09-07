@@ -19,6 +19,13 @@ files authoritative for anything it defines itself, falling back to the
 real repo only for names it doesn't (`config`, `color_map`,
 `duration_tracker`).
 
+Ticket #146 note: the shadowing hazard described above is now gone at the
+root, because the real modules live under the `notecolor.*` package rather
+than as bare top-level names -- `import session_player` can no longer
+accidentally resolve to the real one. The append-rather-than-insert order is
+kept anyway: it costs nothing and it is still the correct posture for a
+directory whose whole purpose is holding its own variants of real modules.
+
 Read-only: nothing here ever writes to the real repo.
 """
 
@@ -26,5 +33,6 @@ import os
 import sys
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if REPO_ROOT not in sys.path:
-    sys.path.append(REPO_ROOT)
+SRC = os.path.join(REPO_ROOT, "src")
+if SRC not in sys.path:
+    sys.path.append(SRC)

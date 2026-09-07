@@ -1,8 +1,8 @@
 import numpy as np
 
-from onset_detect import chroma_flux, complex_domain_novelty, hfc_novelty, spectral_flux
-from pitch_detect import compute_spectrum
-import config
+from notecolor.analysis.onset_detect import chroma_flux, complex_domain_novelty, hfc_novelty, spectral_flux
+from notecolor.analysis.pitch_detect import compute_spectrum
+from notecolor.settings import config
 
 
 # --- spectral_flux ----------------------------------------------------

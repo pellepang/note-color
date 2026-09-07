@@ -32,8 +32,8 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import config                     # noqa: E402
-import sound_engine               # noqa: E402
+from notecolor.settings import config                     # noqa: E402
+from notecolor.audio import sound_engine               # noqa: E402
 
 
 def percentile(values, q):

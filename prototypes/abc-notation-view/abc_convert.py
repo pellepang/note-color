@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root, for
 # color_map/duration_tracker -- this prototype deliberately reads (never
 # writes) real project modules rather than duplicating their tables.
 
-from color_map import NOTE_NAMES_FIFTHS
+from notecolor.analysis.color_map import NOTE_NAMES_FIFTHS
 # duration_tracker._DURATION_CLASSES is the one authoritative (beats, name)
 # table this whole app already snaps durations against (duration_class_for_
 # beats() is its public forward lookup: beats -> nearest name). We need the
@@ -51,7 +51,7 @@ from color_map import NOTE_NAMES_FIFTHS
 # so we read the same private table directly rather than inventing a
 # second copy of it that could drift -- read-only use, fine for a
 # research prototype that doesn't ship.
-from duration_tracker import DEFAULT_DURATION_CLASS, _DURATION_CLASSES, duration_class_for_beats
+from notecolor.analysis.duration_tracker import DEFAULT_DURATION_CLASS, _DURATION_CLASSES, duration_class_for_beats
 
 ProtoNote = namedtuple("ProtoNote", "pitch_class octave duration_class")
 # A rest is represented as a bare `None` in an event list (not its own

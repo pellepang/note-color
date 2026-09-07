@@ -3,7 +3,7 @@ import types
 import numpy as np
 import pytest
 
-from tempo_tracker import TempoTracker
+from notecolor.analysis.tempo_tracker import TempoTracker
 
 
 def _cfg(min_bpm=40, max_bpm=240, update_interval_hops=5, history_seconds=2.0, min_confidence=0.3,

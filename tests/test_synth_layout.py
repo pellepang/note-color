@@ -13,10 +13,10 @@ import os
 
 import pytest
 
-import config
-import score_audition
-import sound_engine
-import synth_layout as sl
+from notecolor.settings import config
+from notecolor.notation import score_audition
+from notecolor.audio import sound_engine
+from notecolor.tui import synth_layout as sl
 
 
 # --- the shared tracker keyboard (the seam with ticket #120) --------------

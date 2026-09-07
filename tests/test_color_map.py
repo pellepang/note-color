@@ -1,5 +1,5 @@
-from color_map import note_to_hsl, hsl_to_rgb255, fifths_index
-import config
+from notecolor.analysis.color_map import note_to_hsl, hsl_to_rgb255, fifths_index
+from notecolor.settings import config
 
 # pitch_class -> expected fifths-scheme hue, per the confirmed circle-of-fifths table
 FIFTHS_HUE_TABLE = {

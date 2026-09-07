@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-import evaluate as ev
+from notecolor.convert import evaluate as ev
 
 pytest.importorskip("mir_eval", reason="mir_eval arrives with the [convert] extra")
 
@@ -110,7 +110,7 @@ def test_a_worse_than_useless_transcription_scores_above_one():
 
 
 def test_truth_notes_converts_beats_to_seconds_and_midi():
-    import synth_corpus as sc
+    from notecolor.convert import synth_corpus as sc
 
     track = sc.make_track(parts=("bass",), with_drums=False, repeats=1, seed=0)
     notes = ev.truth_notes(track)

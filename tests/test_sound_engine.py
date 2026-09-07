@@ -14,10 +14,10 @@ reports PortAudio's own xrun counters rather than asserting on sound.
 import numpy as np
 import pytest
 
-import config
-import sound_engine
-from config_store import ConfigStore
-from sound_engine import (
+from notecolor.settings import config
+from notecolor.audio import sound_engine
+from notecolor.settings.config_store import ConfigStore
+from notecolor.audio.sound_engine import (
     ActiveVoice, NoteOn, SoundEngine, VoiceManager, frequency_for, midi_pitch, pitch_class_octave,
     polyphony_for, select_steal_index,
 )
@@ -94,7 +94,7 @@ def test_midi_pitch_and_pitch_class_octave_round_trip():
 
 
 def test_midi_pitch_uses_the_same_tuning_as_playback_note_frequency():
-    from playback import note_frequency
+    from notecolor.audio.playback import note_frequency
 
     for pitch_class, octave in [(0, 4), (9, 4), (4, 2), (11, 6)]:
         assert frequency_for(midi_pitch(pitch_class, octave)) == pytest.approx(
@@ -279,7 +279,7 @@ def test_polyphony_for_reads_the_preferences_override(isolated_store):
 
 
 def test_settings_screen_exposes_both_polyphony_fields():
-    import settings_display
+    from notecolor.tui import settings_display
 
     keys = [spec.key for spec in settings_display.NUMERIC_FIELDS]
     assert "polyphony_standalone" in keys
@@ -383,7 +383,7 @@ def test_stop_is_idempotent_without_ever_starting_and_drops_voices():
 # --- the effects bus (ticket #114) ------------------------------------------
 
 def test_engine_starts_with_an_empty_chain_prepared_to_its_own_rate_and_block():
-    from effects import EffectsChain
+    from notecolor.audio.effects import EffectsChain
 
     engine = make_engine()
     assert isinstance(engine.effects, EffectsChain) and len(engine.effects) == 0
@@ -394,13 +394,13 @@ def test_engine_starts_with_an_empty_chain_prepared_to_its_own_rate_and_block():
 
 
 def _wet_delay():
-    from effects import Delay
+    from notecolor.audio.effects import Delay
 
     return Delay(time=0.1, feedback=0.0, mix=1.0)   # 100 samples at the 1000Hz test rate = one block
 
 
 def test_callback_runs_the_effects_bus_on_the_summed_mix_before_the_clip():
-    from effects import EffectsChain
+    from notecolor.audio.effects import EffectsChain
 
     engine = make_engine(effects=EffectsChain([_wet_delay()]))
     engine.note_on(60)
@@ -413,7 +413,7 @@ def test_callback_runs_the_effects_bus_on_the_summed_mix_before_the_clip():
 
 
 def test_effects_state_survives_all_notes_off_but_not_stop():
-    from effects import EffectsChain
+    from notecolor.audio.effects import EffectsChain
 
     engine = make_engine(effects=EffectsChain([_wet_delay()]))
     engine.note_on(60)

@@ -8,8 +8,8 @@ need it."""
 
 import numpy as np
 
-import config
-from batch_transcribe import transcribe
+from notecolor.settings import config
+from notecolor.analysis.batch_transcribe import transcribe
 
 
 SAMPLE_RATE = config.SAMPLE_RATE

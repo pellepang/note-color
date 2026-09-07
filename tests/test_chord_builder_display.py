@@ -2,8 +2,8 @@
 pure logic. Per this repo's test convention, `render()`'s actual screen
 layout is smoke-tested manually, not here."""
 
-import chord_builder_display as cbd
-from score_editor_state import EditorColumn, EditorNote
+from notecolor.tui import chord_builder_display as cbd
+from notecolor.notation.score_editor_state import EditorColumn, EditorNote
 
 
 def _col(*pcs_octs):

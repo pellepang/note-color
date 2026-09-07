@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from pitch_detect import compute_spectrum, detect_pitch
+from notecolor.analysis.pitch_detect import compute_spectrum, detect_pitch
 
 SAMPLE_RATE = 22050
 

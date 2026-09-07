@@ -5,8 +5,8 @@ Synthesizes short in-memory NoteEvent lists / session-log-shaped event
 dicts directly (this repo's existing convention -- see
 tests/test_batch_transcribe.py's make_tone()), no binary/file fixtures."""
 
-from batch_transcribe import NoteEvent, TranscriptionResult
-from abc_export import from_session_log, from_transcription_result, note_events_to_abc, write_abc
+from notecolor.analysis.batch_transcribe import NoteEvent, TranscriptionResult
+from notecolor.notation.abc_export import from_session_log, from_transcription_result, note_events_to_abc, write_abc
 
 
 def _note_event(onset_hop, pitch_class, octave, duration_hops):

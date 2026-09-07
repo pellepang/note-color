@@ -22,9 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # repo root
 
-import config
-from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
-from staff_map import ledger_rows, row_note_name, staff_row, STAFF_LINE_ROWS
+from notecolor.settings import config
+from notecolor.analysis.color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
+from notecolor.analysis.staff_map import ledger_rows, row_note_name, staff_row, STAFF_LINE_ROWS
 
 from abc_convert import Bar, abc_to_note_events
 

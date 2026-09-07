@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-import config
-from playback import _adsr_envelope, note_frequency, render_offline, synthesize_note
+from notecolor.settings import config
+from notecolor.audio.playback import _adsr_envelope, note_frequency, render_offline, synthesize_note
 
 
 def test_note_frequency_matches_standard_midi_tuning():
@@ -122,7 +122,7 @@ def test_render_offline_buffer_length_matches_latest_ending_note():
 # --- the offline effects bus (ticket #114) ----------------------------------
 
 def test_render_offline_applies_effects_once_on_the_mix_and_appends_the_tail():
-    from effects import Delay, EffectsChain, tail_seconds
+    from notecolor.audio.effects import Delay, EffectsChain, tail_seconds
 
     sample_rate = 1000
     notes = [(0.0, 0, 4, 0.1)]
@@ -138,7 +138,7 @@ def test_render_offline_applies_effects_once_on_the_mix_and_appends_the_tail():
 
 
 def test_render_offline_with_an_empty_chain_matches_the_plain_render():
-    from effects import EffectsChain
+    from notecolor.audio.effects import EffectsChain
 
     notes = [(0.0, 0, 4, 0.1), (0.3, 4, 4, 0.1)]
     plain = render_offline(notes, sample_rate=1000)

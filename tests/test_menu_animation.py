@@ -7,8 +7,8 @@ smoke-tested manually, not driven by pytest."""
 
 import math
 
-import config
-from menu_animation import (
+from notecolor.settings import config
+from notecolor.tui.menu_animation import (
     band_color,
     band_for_phi,
     render_row,

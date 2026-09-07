@@ -11,8 +11,8 @@ driven over an `os.pipe()` so it runs with no TTY present.
 
 import pytest
 
-import kitty_keys as kk
-import main
+from notecolor.tui import kitty_keys as kk
+from notecolor.tui import app as main
 
 
 # ---------------------------------------------------------------- sequences

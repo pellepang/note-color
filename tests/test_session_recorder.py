@@ -1,6 +1,6 @@
 import json
 
-from session_recorder import SessionRecorder
+from notecolor.notation.session_recorder import SessionRecorder
 
 
 def _lines(path):
@@ -205,7 +205,7 @@ def test_duration_class_is_derived_against_the_reference_tempo(tmp_path):
     # the field `virtualnote replay` draws its glyphs from -- is snapped
     # against config.PLAYED_NOTE_REFERENCE_BPM, with the raw
     # duration_seconds written unrounded right beside it.
-    import config
+    from notecolor.settings import config
 
     rec = _armed(tmp_path)
     quarter = 60.0 / config.PLAYED_NOTE_REFERENCE_BPM
@@ -221,7 +221,7 @@ def test_duration_class_is_derived_against_the_reference_tempo(tmp_path):
 def test_a_played_log_replays_through_session_player_unchanged(tmp_path):
     # The whole point of extending the one schema additively (#110 point
     # 1): the existing reader needs no changes at all.
-    from session_player import group_columns, load_events
+    from notecolor.notation.session_player import group_columns, load_events
 
     rec = _armed(tmp_path)
     rec.note_on("z", 0, 4, now=0.0)

@@ -1,11 +1,11 @@
 import numpy as np
 
-import chroma
-import config
-import multipitch
-import pitch_detect
-from chord_smoother import ChordSmoother
-from multipitch import NoteCandidate
+from notecolor.analysis import chroma
+from notecolor.settings import config
+from notecolor.analysis import multipitch
+from notecolor.analysis import pitch_detect
+from notecolor.analysis.chord_smoother import ChordSmoother
+from notecolor.analysis.multipitch import NoteCandidate
 
 SAMPLE_RATE = 22050
 

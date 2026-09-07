@@ -7,7 +7,7 @@ than driving the real live pipeline end to end."""
 
 import pytest
 
-from rhythm_reanalysis import CorrectedNote, HopRecord, recompute
+from notecolor.analysis.rhythm_reanalysis import CorrectedNote, HopRecord, recompute
 
 
 HOP_SECONDS = 0.02  # 50 hops/sec, matches tempo_tracker tests' convention

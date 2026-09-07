@@ -6,10 +6,10 @@ run_settings_screen loop itself is smoke-tested manually, not here.
 
 import pytest
 
-import config
-import settings_display as sd
-from color_map import NOTE_NAMES
-from config_store import ConfigStore
+from notecolor.settings import config
+from notecolor.tui import settings_display as sd
+from notecolor.analysis.color_map import NOTE_NAMES
+from notecolor.settings.config_store import ConfigStore
 
 
 @pytest.fixture(autouse=True)

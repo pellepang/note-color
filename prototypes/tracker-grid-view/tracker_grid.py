@@ -33,9 +33,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import config
-from color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
-from duration_tracker import DEFAULT_DURATION_CLASS, duration_class_for_beats
+from notecolor.settings import config
+from notecolor.analysis.color_map import NOTE_NAMES_FIFTHS, hsl_to_rgb255, note_to_hsl
+from notecolor.analysis.duration_tracker import DEFAULT_DURATION_CLASS, duration_class_for_beats
 
 NoteEvent = namedtuple(
     "NoteEvent", ["onset_hop", "onset_time", "pitch_class", "octave", "duration_hops", "chord_name"]

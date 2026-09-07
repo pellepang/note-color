@@ -9,15 +9,15 @@ behaviour elsewhere, and nothing here installs or downloads anything.
 import numpy as np
 import pytest
 
-import convert
-from convert import (
+from notecolor.convert import convert
+from notecolor.convert.convert import (
     DEFAULT_BEATS_PER_BAR,
     STEM_DRUMS,
     ConversionResult,
     Track,
     infer_beats_per_bar,
 )
-from transcribe_backends import BeatGrid, ChordSpan, ConversionUnavailable, TranscribedNote
+from notecolor.convert.transcribe_backends import BeatGrid, ChordSpan, ConversionUnavailable, TranscribedNote
 
 SAMPLE_RATE = 22050
 
@@ -287,8 +287,8 @@ def _silent_wav(tmp_path, seconds=0.5, sample_rate=22050):
 
 def test_band_mode_attempts_separation(tmp_path, monkeypatch, capsys):
     pytest.importorskip("librosa")
-    import main
-    import transcribe_backends as tb
+    from notecolor.tui import app as main
+    from notecolor.convert import transcribe_backends as tb
 
     attempted = []
 
@@ -307,8 +307,8 @@ def test_piano_mode_does_not_separate(tmp_path, monkeypatch):
     """#129: separation introduces artifacts on an already-clean signal,
     and solo piano is the case this converter is genuinely good at."""
     pytest.importorskip("librosa")
-    import main
-    import transcribe_backends as tb
+    from notecolor.tui import app as main
+    from notecolor.convert import transcribe_backends as tb
 
     def must_not_be_constructed(*args, **kwargs):
         raise AssertionError("piano mode constructed a separator")
@@ -325,9 +325,9 @@ def test_missing_separation_is_reported_but_not_fatal(tmp_path, monkeypatch, cap
     mix is transcribed directly, which is H1's control arm rather than a
     degraded mode."""
     pytest.importorskip("librosa")
-    import main
-    import transcribe_backends as tb
-    from transcribe_backends import ConversionUnavailable
+    from notecolor.tui import app as main
+    from notecolor.convert import transcribe_backends as tb
+    from notecolor.convert.transcribe_backends import ConversionUnavailable
 
     class Absent:
         def separate(self, audio, sample_rate):
@@ -347,9 +347,9 @@ def test_missing_separation_is_reported_but_not_fatal(tmp_path, monkeypatch, cap
 def test_missing_note_model_refuses_rather_than_degrading(tmp_path, monkeypatch):
     """The asymmetry #129 settled, asserted against its sibling above."""
     pytest.importorskip("librosa")
-    import main
-    import transcribe_backends as tb
-    from transcribe_backends import ConversionUnavailable
+    from notecolor.tui import app as main
+    from notecolor.convert import transcribe_backends as tb
+    from notecolor.convert.transcribe_backends import ConversionUnavailable
 
     class Absent:
         def transcribe(self, audio, sample_rate):

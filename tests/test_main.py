@@ -5,12 +5,12 @@ rather than the loops themselves (smoke-tested manually)."""
 
 import pytest
 
-import config
-from config_store import ConfigStore
-from rhythm_reanalysis import HopRecord
+from notecolor.settings import config
+from notecolor.settings.config_store import ConfigStore
+from notecolor.analysis.rhythm_reanalysis import HopRecord
 
-import main
-from main import (
+from notecolor.tui import app as main
+from notecolor.tui.app import (
     _filter_hop_records_to_range, _handle_mark_keys, _handle_property_key, _hop_beats, _mark_range,
     _parse_csi_params, _parse_property_input, _property_field_texts, resolve_editor_action,
 )
@@ -292,7 +292,7 @@ def test_property_field_texts_reflects_current_score_values():
 
 
 def test_parse_property_input_tempo_clamps_into_range():
-    import score_properties_display as spd
+    from notecolor.tui import score_properties_display as spd
     assert _parse_property_input("tempo", "150") == 150.0
     assert _parse_property_input("tempo", "9999") == spd.TEMPO_MAX_BPM
     assert _parse_property_input("tempo", "0") == spd.TEMPO_MIN_BPM
@@ -316,7 +316,7 @@ def test_parse_property_input_empty_buffer_is_none():
 
 
 def test_handle_property_key_left_right_move_the_highlighted_field():
-    import score_properties_display as spd
+    from notecolor.tui import score_properties_display as spd
     score = _FakeScore()
     slot, buffer, still_editing = _handle_property_key("RIGHT", score, 0, "")
     assert slot == spd.move_slot(0, 1)
@@ -327,7 +327,7 @@ def test_handle_property_key_left_right_move_the_highlighted_field():
 
 
 def test_handle_property_key_up_down_spin_the_highlighted_fields_value():
-    import score_properties_display as spd
+    from notecolor.tui import score_properties_display as spd
     score = _FakeScore(tempo_bpm=100.0)
     slot = spd.PROPERTY_SLOTS.index("tempo")
     _handle_property_key("UP", score, slot, "")
@@ -349,7 +349,7 @@ def test_handle_property_key_digits_accumulate_into_buffer_on_typable_fields():
 
 
 def test_handle_property_key_key_signature_slot_ignores_typed_digits():
-    import score_properties_display as spd
+    from notecolor.tui import score_properties_display as spd
     score = _FakeScore()
     slot = spd.PROPERTY_SLOTS.index("key_signature")
     _, buffer, _ = _handle_property_key("5", score, slot, "")
@@ -404,8 +404,8 @@ def test_handle_property_key_navigation_resets_the_buffer():
 import threading
 import time
 
-from sound_engine import midi_pitch
-from terminal_tab_display import TabEntry
+from notecolor.audio.sound_engine import midi_pitch
+from notecolor.tui.terminal_tab_display import TabEntry
 
 
 class _FakeEngine:
@@ -595,7 +595,7 @@ def test_editor_loop_status_is_one_based_and_order_independent():
 
 
 def test_editor_audio_status_names_the_octave_only_in_piano_mode():
-    import score_audition
+    from notecolor.notation import score_audition
 
     playback = main._EditorPlayback()
     piano = main._editor_audio_status(score_audition.PIANO_MODE, 3, True, False, object(), playback)
@@ -605,7 +605,7 @@ def test_editor_audio_status_names_the_octave_only_in_piano_mode():
 
 
 def test_editor_audio_status_reports_only_the_absence_of_sound():
-    import score_audition
+    from notecolor.notation import score_audition
 
     playback = main._EditorPlayback()
     assert "sound=unavailable" in main._editor_audio_status(
@@ -615,7 +615,7 @@ def test_editor_audio_status_reports_only_the_absence_of_sound():
 
 
 def test_editor_audio_status_reflects_the_two_toggles():
-    import score_audition
+    from notecolor.notation import score_audition
 
     playback = main._EditorPlayback()
     text = main._editor_audio_status(score_audition.EDIT_MODE, 3, False, True, object(), playback)
@@ -646,7 +646,7 @@ class _FakePlaybackEngine:
 
 
 def _three_note_score():
-    from score_editor_state import EditorColumn, EditorNote, EditorScore
+    from notecolor.notation.score_editor_state import EditorColumn, EditorNote, EditorScore
 
     return EditorScore(
         time_signature=(4, 4), key_fifths=0, tempo_bpm=60.0,
@@ -672,7 +672,7 @@ def _run_playback(score, entries, engine, metronome_on=False, step=0.25, limit=2
 
 
 def test_playback_walks_every_column_once_and_then_stops_itself():
-    import score_audition
+    from notecolor.notation import score_audition
 
     score = _three_note_score()
     engine = _FakePlaybackEngine()
@@ -688,7 +688,7 @@ def test_playback_walks_every_column_once_and_then_stops_itself():
 
 
 def test_playback_starting_mid_score_keeps_the_absolute_beat_grid():
-    import score_audition
+    from notecolor.notation import score_audition
 
     score = _three_note_score()
     engine = _FakePlaybackEngine()
@@ -702,7 +702,7 @@ def test_playback_starting_mid_score_keeps_the_absolute_beat_grid():
 def test_playback_never_mutates_the_score():
     import copy
 
-    import score_audition
+    from notecolor.notation import score_audition
 
     score = _three_note_score()
     before = copy.deepcopy(score)
@@ -711,7 +711,7 @@ def test_playback_never_mutates_the_score():
 
 
 def test_the_metronome_only_clicks_when_it_is_switched_on():
-    import score_audition
+    from notecolor.notation import score_audition
 
     score = _three_note_score()
     entries = score_audition.build_schedule(score.columns)
@@ -724,7 +724,7 @@ def test_the_metronome_only_clicks_when_it_is_switched_on():
 
 
 def test_stopping_playback_clears_the_playhead_and_panics_the_engine():
-    import score_audition
+    from notecolor.notation import score_audition
 
     score = _three_note_score()
     engine = _FakePlaybackEngine()
@@ -791,7 +791,7 @@ def _press(key):
     """A press of `key`. A named key ("TAB", "UP") carries no associated
     text and no codepoint, which is exactly how a real terminal reports
     one; only an ordinary character key has either."""
-    import kitty_keys
+    from notecolor.tui import kitty_keys
 
     single = len(key) == 1
     return kitty_keys.KeyEvent(key=key, event=kitty_keys.PRESS, mods=0,
@@ -800,21 +800,21 @@ def _press(key):
 
 
 def _repeat(key):
-    import kitty_keys
+    from notecolor.tui import kitty_keys
 
     return kitty_keys.KeyEvent(key=key, event=kitty_keys.REPEAT, mods=0,
                                text=key, codepoint=ord(key))
 
 
 def _release(key):
-    import kitty_keys
+    from notecolor.tui import kitty_keys
 
     return kitty_keys.KeyEvent(key=key, event=kitty_keys.RELEASE, mods=0,
                                text=key, codepoint=ord(key))
 
 
 def _shift(key):
-    import kitty_keys
+    from notecolor.tui import kitty_keys
 
     return kitty_keys.KeyEvent(key=key.lower(), event=kitty_keys.PRESS,
                                mods=kitty_keys.MOD_SHIFT, text=key.upper(),
@@ -825,7 +825,7 @@ def _shift_arrow(name):
     """Shift held with a *named* key (an arrow), which carries no text of
     its own -- unlike `_shift()`, whose lower/upper pair only makes sense
     for a letter."""
-    import kitty_keys
+    from notecolor.tui import kitty_keys
 
     return kitty_keys.KeyEvent(key=name, event=kitty_keys.PRESS,
                                mods=kitty_keys.MOD_SHIFT, text="", codepoint=0)
@@ -836,8 +836,8 @@ def _drive_editor(tmp_path, monkeypatch, events, kitty=True):
     key stream, returning the score it was left holding. No TTY, no audio
     device (score_audition.sound_notes() no-ops on a None engine), no
     real sleeping."""
-    import score_editor_display as sed
-    import score_editor_state as ses
+    from notecolor.tui import score_editor_display as sed
+    from notecolor.notation import score_editor_state as ses
 
     path = str(tmp_path / "piano.musicxml")
     ses.save_score(ses.new_blank_score(), path)
@@ -1039,8 +1039,8 @@ class _FakeSession:
 def _drive_synth(monkeypatch, events, kitty=True, recorder=None):
     """Runs run_synth_tool() with a scripted key stream against a fake
     sound engine. No TTY, no audio device, no real sleeping."""
-    import synth_display
-    from session_recorder import SessionRecorder
+    from notecolor.tui import synth_display
+    from notecolor.notation.session_recorder import SessionRecorder
 
     # An un-armed recorder never opens a file, so the default here writes
     # nothing anywhere -- the tests that actually arm one pass their own,
@@ -1067,8 +1067,8 @@ def _synth_pitches(sound):
 
 
 def test_synth_letters_play_notes_from_the_shared_tracker_keyboard(monkeypatch):
-    import score_audition
-    import sound_engine
+    from notecolor.notation import score_audition
+    from notecolor.audio import sound_engine
 
     sound, _rendered, _r = _drive_synth(monkeypatch, [
         _press("z"), _press("x"), _press("c"),
@@ -1081,7 +1081,7 @@ def test_synth_letters_play_notes_from_the_shared_tracker_keyboard(monkeypatch):
 def test_synth_plays_at_full_velocity_on_the_note_channel(monkeypatch):
     # #107 decision 3: QWERTY has no dynamics to report, and faking them
     # would be a lie the sampler's own velocity layers then act on.
-    import synth_layout
+    from notecolor.tui import synth_layout
 
     sound, _r, _res = _drive_synth(monkeypatch, [_press("z")])
     assert sound.note_ons == [(sound.note_ons[0][0], 1.0, synth_layout.NOTE_CHANNEL)]
@@ -1102,7 +1102,7 @@ def test_synth_swallows_auto_repeat_so_a_held_key_sustains(monkeypatch):
 
 
 def test_synth_pads_play_on_the_drum_channel(monkeypatch):
-    import synth_layout
+    from notecolor.tui import synth_layout
 
     # Tab twice from the two-octave layout reaches the 4x4 pad square.
     sound, _r, _res = _drive_synth(monkeypatch, [
@@ -1176,7 +1176,7 @@ def test_synth_without_key_releases_notes_are_fixed_length(monkeypatch):
 
 
 def test_synth_a_dual_layout_switches_the_voice_budget(monkeypatch):
-    import synth_tool
+    from notecolor.tui import synth_tool
 
     # The override is a callable so the budget follows Tab presses live.
     _s, rendered, _res = _drive_synth(monkeypatch, [_press("TAB")])
@@ -1229,7 +1229,7 @@ def test_synth_transposing_never_leaves_a_note_stuck(monkeypatch):
 def test_synth_overlays_open_over_the_panel_and_keep_the_keys_playing(monkeypatch):
     # #107 point 6: an inline overlay, never a separate screen -- the
     # instrument stays on screen and playable underneath.
-    import synth_tool
+    from notecolor.tui import synth_tool
 
     sound, rendered, _res = _drive_synth(monkeypatch, [_shift("p"), _press("z")])
     assert rendered["state"].overlay.kind == synth_tool.OVERLAY_PATCH
@@ -1261,8 +1261,8 @@ def test_synth_help_legend_toggles(monkeypatch):
 def test_synth_legend_advertises_only_reachable_actions(monkeypatch):
     # A legend promising a keybind the dispatcher does not implement is
     # how the octave-shift bug above stayed invisible.
-    import kitty_keys
-    import synth_tool
+    from notecolor.tui import kitty_keys
+    from notecolor.tui import synth_tool
 
     _s, rendered, _res = _drive_synth(monkeypatch, [_press("z")])
     legend = rendered["legend"]
@@ -1315,7 +1315,7 @@ def test_synth_an_unbound_key_can_still_be_bound_back(monkeypatch):
 # the recorder.
 
 def _armed_recorder(tmp_path):
-    from session_recorder import SessionRecorder
+    from notecolor.notation.session_recorder import SessionRecorder
 
     return SessionRecorder(path=str(tmp_path / "session_log_test.jsonl"))
 
@@ -1364,8 +1364,8 @@ def test_synth_records_a_played_note_as_a_played_event(tmp_path, monkeypatch):
 
 
 def test_synth_records_the_pitch_the_key_actually_played(tmp_path, monkeypatch):
-    import score_audition
-    import sound_engine
+    from notecolor.notation import score_audition
+    from notecolor.audio import sound_engine
 
     recorder = _armed_recorder(tmp_path)
     _drive_synth(monkeypatch, [_shift("s"), _press("z"), _release("z")], recorder=recorder)
@@ -1429,7 +1429,7 @@ def test_synth_recording_round_trips_into_a_quantized_score(tmp_path, monkeypatc
     # lands at essentially the same instant (the scripted key stream has
     # no real elapsed time between events), so a single column is the
     # correct answer, not an artefact.
-    import log_import
+    from notecolor.notation import log_import
 
     recorder = _armed_recorder(tmp_path)
     _drive_synth(monkeypatch, [_shift("s"), _press("z"), _press("c"),

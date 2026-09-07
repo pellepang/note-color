@@ -9,8 +9,8 @@ import json
 import numpy as np
 import pytest
 
-from convert import ConversionResult, Track
-from score_writer import (
+from notecolor.convert.convert import ConversionResult, Track
+from notecolor.notation.score_writer import (
     BEAT_SUBDIVISIONS,
     PROJECT_MANIFEST_KEY,
     _beat_positions,
@@ -19,7 +19,7 @@ from score_writer import (
     snap_to_grid,
     write_project,
 )
-from transcribe_backends import BeatGrid, ChordSpan, TranscribedNote
+from notecolor.convert.transcribe_backends import BeatGrid, ChordSpan, TranscribedNote
 
 music21 = pytest.importorskip("music21", reason="music21 lives behind the [batch] extra")
 

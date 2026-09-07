@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-import config
-from config_store import ConfigStore
+from notecolor.settings import config
+from notecolor.settings.config_store import ConfigStore
 
 
 def _write(path, text):

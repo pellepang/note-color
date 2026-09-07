@@ -20,9 +20,9 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-import config  # noqa: E402
-from pitch_detect import compute_spectrum  # noqa: E402
-from onset_detect import spectral_flux  # noqa: E402
+from notecolor.settings import config  # noqa: E402
+from notecolor.analysis.pitch_detect import compute_spectrum  # noqa: E402
+from notecolor.analysis.onset_detect import spectral_flux  # noqa: E402
 
 from novelty import complex_domain_novelty, hfc_novelty  # noqa: E402
 

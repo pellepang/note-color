@@ -6,9 +6,9 @@ import sys
 import pytest
 import wcwidth
 
-import config
-from duration_tracker import DEFAULT_DURATION_CLASS
-from terminal_tab_display import (
+from notecolor.settings import config
+from notecolor.analysis.duration_tracker import DEFAULT_DURATION_CLASS
+from notecolor.tui.terminal_tab_display import (
     BARLINE_GLYPH,
     DOT_GLYPH,
     FLAG_GLYPHS,
@@ -70,7 +70,7 @@ def test_legend_width_is_reserved_from_note_columns(monkeypatch):
     # A terminal exactly one note-column wide beyond the legend should still
     # fit that column onscreen, not have it silently swallowed by ignoring
     # the legend's width in the visible_cols calculation.
-    import config
+    from notecolor.settings import config
     cols = config.TAB_LEGEND_WIDTH + config.TAB_COLUMN_WIDTH
     out = _render(monkeypatch, rows=30, cols=cols, pushes=[(9, 4, "A4")])
     assert NOTEHEAD_GLYPH in out
@@ -81,7 +81,7 @@ def test_legend_off_reclaims_column_width(monkeypatch):
     # the note-column budget -- mirrors test_legend_width_is_reserved_from_
     # note_columns above, but for legend_on=False (#19's stated intent for
     # the L toggle).
-    import config
+    from notecolor.settings import config
     cols = config.TAB_COLUMN_WIDTH  # no room to spare for a legend at all
     out = _render(monkeypatch, rows=30, cols=cols, pushes=[(9, 4, "A4")], legend_on=False)
     assert NOTEHEAD_GLYPH in out
@@ -108,7 +108,7 @@ def test_legend_clef_and_letter_render_in_separate_columns(monkeypatch):
     # the way the earlier merged single-region legend did -- so the
     # treble clef's own anchor row (G4, row 14) still carries a separate
     # "G" letter cell to its right, not the clef glyph standing in for it.
-    import config
+    from notecolor.settings import config
 
     out = _render(monkeypatch, rows=30, cols=100)
     # Each rendered line starts right after a "\033[K" erase-to-end-of-line
@@ -610,7 +610,7 @@ def test_insert_barline_keeps_history_in_timestamp_order(monkeypatch):
 
 
 def test_erase_and_reinsert_barlines_round_trip_through_render(monkeypatch):
-    from terminal_tab_display import BARLINE_GLYPH
+    from notecolor.tui.terminal_tab_display import BARLINE_GLYPH
 
     def setup(display):
         display.push_barline(t=1.0)
@@ -775,7 +775,7 @@ def test_frozen_with_no_scroll_offset_still_pins_to_full_brightness(monkeypatch)
 # -- visible-column selection (ticket #121: frozen playback's default scope)
 
 def test_select_visible_entries_walks_newest_first_within_the_width_budget():
-    from terminal_tab_display import BarlineEntry, TabEntry, select_visible_entries
+    from notecolor.tui.terminal_tab_display import BarlineEntry, TabEntry, select_visible_entries
 
     entries = [TabEntry([], None, float(i)) for i in range(10)]
     visible, used = select_visible_entries(entries, available_width=9, width=3)
@@ -784,7 +784,7 @@ def test_select_visible_entries_walks_newest_first_within_the_width_budget():
 
 
 def test_select_visible_entries_counts_a_barline_at_its_own_narrower_width():
-    from terminal_tab_display import BarlineEntry, TabEntry, select_visible_entries
+    from notecolor.tui.terminal_tab_display import BarlineEntry, TabEntry, select_visible_entries
 
     entries = [TabEntry([], None, 0.0), BarlineEntry(1.0), TabEntry([], None, 2.0)]
     visible, used = select_visible_entries(entries, available_width=100, width=3)
@@ -793,7 +793,7 @@ def test_select_visible_entries_counts_a_barline_at_its_own_narrower_width():
 
 
 def test_select_visible_entries_always_keeps_the_newest_column_even_if_it_alone_overflows():
-    from terminal_tab_display import TabEntry, select_visible_entries
+    from notecolor.tui.terminal_tab_display import TabEntry, select_visible_entries
 
     entries = [TabEntry([], None, 0.0), TabEntry([], None, 1.0)]
     visible, _used = select_visible_entries(entries, available_width=1, width=9)
@@ -801,7 +801,7 @@ def test_select_visible_entries_always_keeps_the_newest_column_even_if_it_alone_
 
 
 def test_select_visible_entries_hides_scroll_offset_entries_off_the_tail_first():
-    from terminal_tab_display import TabEntry, select_visible_entries
+    from notecolor.tui.terminal_tab_display import TabEntry, select_visible_entries
 
     entries = [TabEntry([], None, float(i)) for i in range(10)]
     visible, _used = select_visible_entries(entries, available_width=9, width=3, scroll_offset=2)
@@ -809,7 +809,7 @@ def test_select_visible_entries_hides_scroll_offset_entries_off_the_tail_first()
 
 
 def test_column_width_for_matches_the_three_render_cases():
-    from terminal_tab_display import column_width_for
+    from notecolor.tui.terminal_tab_display import column_width_for
 
     assert column_width_for(True, "symbol") == config.TAB_COLUMN_WIDTH_CHORD
     assert column_width_for(False, "name") == config.TAB_COLUMN_WIDTH_NAME

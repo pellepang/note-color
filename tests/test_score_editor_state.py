@@ -13,11 +13,11 @@ data-layer round-trip test should be exercising.
 
 import pytest
 
-import config
-import score_editor_state
-from batch_transcribe import NoteEvent, TranscriptionResult
-from duration_tracker import DEFAULT_DURATION_CLASS
-from score_editor_state import (
+from notecolor.settings import config
+from notecolor.notation import score_editor_state
+from notecolor.analysis.batch_transcribe import NoteEvent, TranscriptionResult
+from notecolor.analysis.duration_tracker import DEFAULT_DURATION_CLASS
+from notecolor.notation.score_editor_state import (
     DEFAULT_TEMPO_BPM,
     EditHistory,
     EditorColumn,
@@ -27,7 +27,7 @@ from score_editor_state import (
     new_blank_score,
     save_score,
 )
-from score_writer import write_score
+from notecolor.notation.score_writer import write_score
 
 import numpy as np
 

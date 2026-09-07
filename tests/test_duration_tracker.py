@@ -1,16 +1,16 @@
 import numpy as np
 import pytest
 
-import config
-import duration_tracker
-from chord_smoother import ChordSmoother
-from duration_tracker import (
+from notecolor.settings import config
+from notecolor.analysis import duration_tracker
+from notecolor.analysis.chord_smoother import ChordSmoother
+from notecolor.analysis.duration_tracker import (
     DEFAULT_DURATION_CLASS,
     DURATION_CLASS_ORDER,
     DurationTracker,
     duration_class_for_beats,
 )
-from multipitch import NoteCandidate
+from notecolor.analysis.multipitch import NoteCandidate
 
 
 class _Cfg:

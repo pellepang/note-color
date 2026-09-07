@@ -11,9 +11,9 @@ than a fixture -- same "synthesize the signal, no binary fixtures" rule
 import numpy as np
 import pytest
 
-import config
-from sound_engine import midi_pitch
-from transcribe_backends import (
+from notecolor.settings import config
+from notecolor.audio.sound_engine import midi_pitch
+from notecolor.convert.transcribe_backends import (
     BeatGrid,
     ChordSpan,
     ConversionUnavailable,
@@ -184,7 +184,7 @@ F_MAJOR = (53, 57, 60)      # F3 A3 C4
 
 
 def test_template_estimator_names_a_sustained_major_triad():
-    from transcribe_backends import TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     audio = _chord_audio(C_MAJOR, 1.0, sample_rate)
@@ -197,7 +197,7 @@ def test_template_estimator_names_a_sustained_major_triad():
 def test_template_estimator_merges_a_held_chord_into_one_span():
     """Four beats of C must read as one two-second C, not four spans --
     what <harmony> (#131) and a human reader both want."""
-    from transcribe_backends import BeatGrid, TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import BeatGrid, TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
@@ -211,7 +211,7 @@ def test_template_estimator_merges_a_held_chord_into_one_span():
 
 def test_template_estimator_segments_on_the_beat_grid_when_given_one():
     """A chord change is found at the beat it happens on."""
-    from transcribe_backends import BeatGrid, TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import BeatGrid, TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     audio = np.concatenate(
@@ -230,7 +230,7 @@ def test_template_estimator_segments_on_the_beat_grid_when_given_one():
 
 
 def test_template_estimator_falls_back_to_fixed_windows_without_a_grid():
-    from transcribe_backends import TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     audio = _chord_audio(C_MAJOR, 1.0, sample_rate)
@@ -242,7 +242,7 @@ def test_template_estimator_falls_back_to_fixed_windows_without_a_grid():
 def test_template_estimator_covers_audio_past_the_last_detected_beat():
     """A beat grid ends at the last detected beat, not at the end of the
     file, and the tail can hold the final chord."""
-    from transcribe_backends import BeatGrid, TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import BeatGrid, TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
@@ -255,14 +255,14 @@ def test_template_estimator_covers_audio_past_the_last_detected_beat():
 def test_template_estimator_returns_nothing_for_silence():
     """Blank rather than a guess -- the posture chord_templates.match()
     already takes, carried through rather than papered over."""
-    from transcribe_backends import TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     assert TemplateChordEstimator().estimate(np.zeros(sample_rate), sample_rate) == []
 
 
 def test_template_estimator_handles_empty_audio():
-    from transcribe_backends import TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import TemplateChordEstimator
 
     assert TemplateChordEstimator().estimate(np.array([]), config.SAMPLE_RATE) == []
 
@@ -271,7 +271,7 @@ def test_template_estimator_min_span_filter_runs_after_merging():
     """Documented ordering that matters: four beats of C merge into one
     2s span which then survives a 1s minimum, where each individual beat
     would have failed it."""
-    from transcribe_backends import BeatGrid, TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import BeatGrid, TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
@@ -282,7 +282,7 @@ def test_template_estimator_min_span_filter_runs_after_merging():
 
 
 def test_template_estimator_spans_are_ordered_and_non_overlapping():
-    from transcribe_backends import TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import TemplateChordEstimator
 
     sample_rate = config.SAMPLE_RATE
     audio = np.concatenate(
@@ -336,7 +336,7 @@ def fake_beat_this(monkeypatch):
 
 
 def test_beat_this_returns_a_beat_grid(fake_beat_this):
-    from transcribe_backends import BeatThisTracker
+    from notecolor.convert.transcribe_backends import BeatThisTracker
 
     grid = BeatThisTracker().track(np.zeros(1000), 22050)
     assert grid.beat_seconds == (0.0, 0.5, 1.0, 1.5)
@@ -349,7 +349,7 @@ def test_beat_this_returns_a_beat_grid(fake_beat_this):
 def test_beat_this_passes_the_sample_rate_through_rather_than_resampling(fake_beat_this):
     """Beat This! resamples internally in Audio2Frames.signal2spect();
     doing it here too would be strictly worse."""
-    from transcribe_backends import BeatThisTracker
+    from notecolor.convert.transcribe_backends import BeatThisTracker
 
     BeatThisTracker().track(np.zeros(4321), 44100)
     assert fake_beat_this.instances[0].calls == [(4321, 44100)]
@@ -359,7 +359,7 @@ def test_beat_this_does_not_use_the_madmom_dbn(fake_beat_this):
     """#130 declined madmom (git pin on 3.14), and Beat This!'s own
     argument against the DBN is that its 55-215 BPM and constant-meter
     priors break on real material -- exactly the tempo-drift case here."""
-    from transcribe_backends import BeatThisTracker
+    from notecolor.convert.transcribe_backends import BeatThisTracker
 
     BeatThisTracker().track(np.zeros(1000), 22050)
     assert fake_beat_this.instances[0].kwargs["dbn"] is False
@@ -367,7 +367,7 @@ def test_beat_this_does_not_use_the_madmom_dbn(fake_beat_this):
 
 def test_beat_this_defaults_to_cpu(fake_beat_this):
     """No GPU on the target machine (#123)."""
-    from transcribe_backends import BeatThisTracker
+    from notecolor.convert.transcribe_backends import BeatThisTracker
 
     BeatThisTracker().track(np.zeros(1000), 22050)
     assert fake_beat_this.instances[0].kwargs["device"] == "cpu"
@@ -380,7 +380,7 @@ def test_beat_this_accepts_and_ignores_a_drum_stem(fake_beat_this):
     architecture, and does not transfer. Ignoring it is the Protocol's
     documented path, not an oversight -- and mixing a boosted drum stem in
     would be an unmeasured heuristic."""
-    from transcribe_backends import BeatThisTracker
+    from notecolor.convert.transcribe_backends import BeatThisTracker
 
     drums = np.ones(1000)
     grid = BeatThisTracker().track(np.zeros(1000), 22050, drum_stem=drums)
@@ -391,7 +391,7 @@ def test_beat_this_accepts_and_ignores_a_drum_stem(fake_beat_this):
 
 def test_beat_this_loads_the_model_once_across_calls(fake_beat_this):
     """Loading weights per call would dominate the runtime budget."""
-    from transcribe_backends import BeatThisTracker
+    from notecolor.convert.transcribe_backends import BeatThisTracker
 
     tracker = BeatThisTracker()
     tracker.track(np.zeros(1000), 22050)
@@ -403,7 +403,7 @@ def test_beat_this_refuses_with_an_install_line_when_absent(monkeypatch):
     """#129's refuse-don't-degrade, at the backend boundary."""
     import builtins
 
-    from transcribe_backends import BeatThisTracker
+    from notecolor.convert.transcribe_backends import BeatThisTracker
 
     real_import = builtins.__import__
 
@@ -446,7 +446,7 @@ def _midi_tone(midi, seconds, sample_rate=22050, harmonics=(1.0, 0.4)):
 def test_basic_pitch_model_loads_the_vendored_graph():
     """No download: #125 found the pip package will not install on 3.14,
     so the graph is committed and driven directly."""
-    from transcribe_backends import BasicPitchModel
+    from notecolor.convert.transcribe_backends import BasicPitchModel
 
     import os
 
@@ -459,7 +459,7 @@ def test_basic_pitch_posteriorgram_shapes_and_frame_count():
     """Frame count must follow the *original* audio duration, not the
     zero-padded final window -- padding read as real frames would be
     trailing phantom silence for a decoder to chew on."""
-    from transcribe_backends import BASIC_PITCH_FPS, BasicPitchModel
+    from notecolor.convert.transcribe_backends import BASIC_PITCH_FPS, BasicPitchModel
 
     sample_rate = 22050
     seconds = 3.0
@@ -475,7 +475,7 @@ def test_basic_pitch_posteriorgram_shapes_and_frame_count():
 def test_basic_pitch_identifies_a_sustained_a4():
     """The end-to-end check that the windowing, output-name mapping and
     unwrapping are all right: get any of them wrong and the peak bin moves."""
-    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+    from notecolor.convert.transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
 
     grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 3.0), 22050)
     peak_bin = int(np.argmax(grams.note.mean(axis=0)))
@@ -484,7 +484,7 @@ def test_basic_pitch_identifies_a_sustained_a4():
 
 def test_basic_pitch_is_polyphonic():
     """The reason this model is here rather than a monophonic detector."""
-    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+    from notecolor.convert.transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
 
     sample_rate = 22050
     audio = sum(_midi_tone(m, 2.5) for m in (60, 64, 67))
@@ -497,7 +497,7 @@ def test_basic_pitch_is_polyphonic():
 
 
 def test_basic_pitch_reports_onsets_where_a_note_starts():
-    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+    from notecolor.convert.transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
 
     grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 2.0), 22050)
     onset_column = grams.onset[:, 69 - BASIC_PITCH_MIDI_OFFSET]
@@ -507,7 +507,7 @@ def test_basic_pitch_reports_onsets_where_a_note_starts():
 
 
 def test_basic_pitch_frame_times_line_up_with_the_grid():
-    from transcribe_backends import BASIC_PITCH_FPS, BasicPitchModel
+    from notecolor.convert.transcribe_backends import BASIC_PITCH_FPS, BasicPitchModel
 
     grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 2.0), 22050)
     times = grams.frame_times()
@@ -517,7 +517,7 @@ def test_basic_pitch_frame_times_line_up_with_the_grid():
 
 
 def test_basic_pitch_handles_empty_audio():
-    from transcribe_backends import BasicPitchModel
+    from notecolor.convert.transcribe_backends import BasicPitchModel
 
     grams = BasicPitchModel().posteriorgrams(np.array([]), 22050)
     assert grams.note.shape == (0, 88) and grams.contour.shape == (0, 264)
@@ -526,7 +526,7 @@ def test_basic_pitch_handles_empty_audio():
 def test_basic_pitch_handles_audio_shorter_than_one_window():
     """A clip under 2 seconds still has to produce frames -- the final
     window is zero-padded, and the unwrap has to trim that padding back off."""
-    from transcribe_backends import BasicPitchModel
+    from notecolor.convert.transcribe_backends import BasicPitchModel
 
     grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 0.5), 22050)
     assert 0 < grams.note.shape[0] <= int(0.5 * 86) + 1
@@ -536,7 +536,7 @@ def test_basic_pitch_spans_several_windows_continuously():
     """Longer than one 2s window, so unwrapping and overlap-trimming are
     actually exercised: a sustained note must stay detected across the
     seam rather than dropping out at it."""
-    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+    from notecolor.convert.transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
 
     grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 6.0), 22050)
     column = grams.note[:, 69 - BASIC_PITCH_MIDI_OFFSET]
@@ -547,7 +547,7 @@ def test_basic_pitch_spans_several_windows_continuously():
 
 def test_basic_pitch_resamples_a_non_native_rate():
     """44.1 kHz is the common real case; the model is trained at 22050."""
-    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+    from notecolor.convert.transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
 
     audio = 0.5 * _midi_tone(69, 3.0, sample_rate=44100)
     grams = BasicPitchModel().posteriorgrams(audio, 44100)
@@ -558,7 +558,7 @@ def test_basic_pitch_resamples_a_non_native_rate():
 def test_basic_pitch_reuses_one_session_across_calls():
     """InferenceSession construction is not free and a converter runs this
     per stem."""
-    from transcribe_backends import BasicPitchModel
+    from notecolor.convert.transcribe_backends import BasicPitchModel
 
     model = BasicPitchModel()
     model.posteriorgrams(0.5 * _midi_tone(69, 0.5), 22050)
@@ -568,7 +568,7 @@ def test_basic_pitch_reuses_one_session_across_calls():
 
 
 def test_basic_pitch_refuses_clearly_when_the_model_file_is_missing(tmp_path):
-    from transcribe_backends import BasicPitchModel
+    from notecolor.convert.transcribe_backends import BasicPitchModel
 
     missing = tmp_path / "not_here.onnx"
     with pytest.raises(ConversionUnavailable) as excinfo:
@@ -584,7 +584,7 @@ def _melody_audio(midis, seconds_each=1.0, sample_rate=22050):
 
 
 def test_transcriber_finds_a_three_note_melody_at_the_right_pitches():
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050)
     # The synthesized tones carry a 2nd harmonic, so an octave ghost is
@@ -595,7 +595,7 @@ def test_transcriber_finds_a_three_note_melody_at_the_right_pitches():
 
 
 def test_transcriber_gets_the_timing_right():
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050)
     by_pitch = {n.pitch_midi: n for n in notes if n.confidence and n.confidence > 0.5}
@@ -610,7 +610,7 @@ def test_confidence_separates_real_notes_from_harmonic_ghosts():
     basic-pitch discards into MIDI velocity is a usable confidence signal.
     Here the octave ghost of the synthesized tone's own 2nd harmonic
     scores well below the notes actually played."""
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050)
     real = [n.confidence for n in notes if n.pitch_midi in (60, 64, 67)]
@@ -627,7 +627,7 @@ def test_confidence_separates_real_notes_from_harmonic_ghosts():
 
 
 def test_transcriber_is_polyphonic_on_a_sustained_triad():
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     audio = sum(_midi_tone(m, 2.5) for m in (60, 64, 67))
     audio = audio / np.max(np.abs(audio)) * 0.6
@@ -637,7 +637,7 @@ def test_transcriber_is_polyphonic_on_a_sustained_triad():
 
 
 def test_notes_come_back_in_time_order():
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67, 72]), 22050)
     onsets = [n.onset_seconds for n in notes]
@@ -645,7 +645,7 @@ def test_notes_come_back_in_time_order():
 
 
 def test_every_note_has_positive_duration_and_a_valid_pitch():
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     for note in BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050):
         assert note.offset_seconds > note.onset_seconds
@@ -658,7 +658,7 @@ def test_raising_the_onset_threshold_trades_recall_for_precision():
     """#142's metric argument in one assertion: a higher threshold is free
     precision, which is what an editing-effort metric rewards and what F1
     penalises. The knob exists and does what it says."""
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     audio = _melody_audio([60, 64, 67])
     loose = BasicPitchTranscriber(onset_threshold=0.3).transcribe(audio, 22050)
@@ -667,7 +667,7 @@ def test_raising_the_onset_threshold_trades_recall_for_precision():
 
 
 def test_frequency_bounds_exclude_out_of_range_notes():
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     audio = _melody_audio([60, 64, 67])
     notes = BasicPitchTranscriber(min_midi=62, max_midi=66).transcribe(audio, 22050)
@@ -675,7 +675,7 @@ def test_frequency_bounds_exclude_out_of_range_notes():
 
 
 def test_min_note_length_drops_very_short_notes():
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     audio = _melody_audio([60, 64, 67])
     # Each note is ~1s, so a 2s minimum must remove all of them -- asserted
@@ -688,7 +688,7 @@ def test_min_note_length_drops_very_short_notes():
 
 
 def test_decode_notes_on_empty_posteriorgrams():
-    from transcribe_backends import Posteriorgrams, decode_notes
+    from notecolor.convert.transcribe_backends import Posteriorgrams, decode_notes
 
     empty = Posteriorgrams(
         np.zeros((0, 88)), np.zeros((0, 88)), np.zeros((0, 264))
@@ -697,7 +697,7 @@ def test_decode_notes_on_empty_posteriorgrams():
 
 
 def test_decode_notes_on_silence_finds_nothing():
-    from transcribe_backends import Posteriorgrams, decode_notes
+    from notecolor.convert.transcribe_backends import Posteriorgrams, decode_notes
 
     silent = Posteriorgrams(
         np.zeros((200, 88)), np.zeros((200, 88)), np.zeros((200, 264))
@@ -709,7 +709,7 @@ def test_melodia_trick_can_be_switched_off():
     """It is the pass that recovers notes whose onset the model missed, so
     turning it off should never *add* notes -- a cheap invariant that
     catches the two passes being wired the wrong way round."""
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     audio = _melody_audio([60, 64, 67])
     with_trick = BasicPitchTranscriber().transcribe(audio, 22050)
@@ -721,7 +721,7 @@ def test_local_maxima_matches_scipy_argrelmax_semantics():
     """The four lines written to avoid pulling SciPy into [convert]. Checked
     against scipy itself when it is available, since this repo has it behind
     the [synth] extra."""
-    from transcribe_backends import _local_maxima_mask
+    from notecolor.convert.transcribe_backends import _local_maxima_mask
 
     signal = pytest.importorskip("scipy.signal", reason="scipy is behind the [synth] extra")
     rng = np.random.default_rng(7)
@@ -735,7 +735,7 @@ def test_local_maxima_matches_scipy_argrelmax_semantics():
 def test_transcriber_exposes_posteriorgrams_alongside_notes():
     """So a caller wanting the raw matrices (#143's frame-level ensembling)
     does not have to reach around this class for them."""
-    from transcribe_backends import BasicPitchTranscriber
+    from notecolor.convert.transcribe_backends import BasicPitchTranscriber
 
     transcriber = BasicPitchTranscriber()
     grams = transcriber.posteriorgrams(_melody_audio([60]), 22050)
@@ -753,7 +753,7 @@ def test_resampling_is_band_limited_not_interpolated():
     sine, which linear interpolation handles fine. This one uses content
     above the target Nyquist, which is the case that actually
     distinguishes the two methods."""
-    from transcribe_backends import _resample
+    from notecolor.convert.transcribe_backends import _resample
 
     sample_rate = 44100
     x = np.arange(sample_rate) / sample_rate
@@ -772,7 +772,7 @@ def test_resampling_is_band_limited_not_interpolated():
 
 def test_resampling_preserves_an_in_band_tone():
     """The other half: rejecting everything would also pass the test above."""
-    from transcribe_backends import _resample
+    from notecolor.convert.transcribe_backends import _resample
 
     sample_rate = 44100
     x = np.arange(sample_rate) / sample_rate
@@ -788,7 +788,7 @@ def test_resampling_preserves_an_in_band_tone():
 def test_resampling_is_a_no_op_at_the_native_rate():
     """The path that actually runs in this pipeline, since
     batch_transcribe.load_audio() already delivers config.SAMPLE_RATE."""
-    from transcribe_backends import _resample
+    from notecolor.convert.transcribe_backends import _resample
 
     audio = np.linspace(-1.0, 1.0, 1000, dtype=np.float32)
     assert np.array_equal(_resample(audio, 22050, 22050), audio)
@@ -854,7 +854,7 @@ def test_terms_are_shown_and_refusal_blocks_the_download(fake_demucs):
     download that cannot happen anyway. The consent logic itself is
     covered without torch by the `model_terms_accepted` tests above."""
     pytest.importorskip("torch", reason="torch lives behind the [convert] extra")
-    from transcribe_backends import DemucsSeparator
+    from notecolor.convert.transcribe_backends import DemucsSeparator
 
     with pytest.raises(ConversionUnavailable) as excinfo:
         DemucsSeparator(terms_check=lambda: False).separate(np.zeros(1000), 22050)
@@ -866,7 +866,7 @@ def test_accepting_the_terms_lets_separation_proceed(fake_demucs):
     licence gate itself is tested above without it, because that is the
     decision-bearing half."""
     pytest.importorskip("torch", reason="torch lives behind the [convert] extra")
-    from transcribe_backends import DemucsSeparator
+    from notecolor.convert.transcribe_backends import DemucsSeparator
 
     stems = DemucsSeparator(terms_check=lambda: True).separate(np.zeros(4410), 22050)
     assert set(stems) == {"drums", "bass", "other", "vocals"}
@@ -877,7 +877,7 @@ def test_terms_prompt_says_the_weights_are_not_open_source():
     the code is MIT and the weights are not, and that the repos they come
     from declare no licence at all. A user agreeing to this has to be told
     that, not just asked to press y."""
-    from transcribe_backends import DEMUCS_WEIGHTS_TERMS
+    from notecolor.convert.transcribe_backends import DEMUCS_WEIGHTS_TERMS
 
     lowered = " ".join(DEMUCS_WEIGHTS_TERMS.lower().split())
     assert "not open source" in lowered
@@ -888,7 +888,7 @@ def test_terms_prompt_says_the_weights_are_not_open_source():
 def test_a_preference_pre_accepts_without_prompting():
     """A prompt that cannot be pre-answered is a wall in front of batch
     use, not a consent mechanism (#139)."""
-    from transcribe_backends import ACCEPT_TERMS_PREFERENCE, model_terms_accepted
+    from notecolor.convert.transcribe_backends import ACCEPT_TERMS_PREFERENCE, model_terms_accepted
 
     class Store:
         def preference(self, name, default):
@@ -904,7 +904,7 @@ def test_non_interactive_declines_rather_than_hanging(capsys):
     """A background run must not block forever on a prompt nobody can see."""
     import sys
 
-    from transcribe_backends import model_terms_accepted
+    from notecolor.convert.transcribe_backends import model_terms_accepted
 
     class Store:
         def preference(self, name, default):
@@ -926,7 +926,7 @@ def test_non_interactive_declines_rather_than_hanging(capsys):
 
 
 def test_mono_input_is_duplicated_to_the_stereo_the_model_expects():
-    from transcribe_backends import prepare_separator_input
+    from notecolor.convert.transcribe_backends import prepare_separator_input
 
     prepared = prepare_separator_input(np.zeros(22050), 22050, 44100, 2)
     assert prepared.shape == (2, 44100)
@@ -935,7 +935,7 @@ def test_mono_input_is_duplicated_to_the_stereo_the_model_expects():
 
 def test_separator_input_is_resampled_to_the_model_rate():
     """Demucs runs at 44.1 kHz; this project's audio arrives at 22.05."""
-    from transcribe_backends import prepare_separator_input
+    from notecolor.convert.transcribe_backends import prepare_separator_input
 
     prepared = prepare_separator_input(np.zeros(11025), 22050, 44100, 2)
     assert prepared.shape[1] == pytest.approx(22050, rel=0.01)
@@ -944,7 +944,7 @@ def test_separator_input_is_resampled_to_the_model_rate():
 def test_stems_come_back_mono_at_the_callers_sample_rate():
     """Every downstream stage expects this project's own convention, not
     Demucs' 44.1 kHz stereo."""
-    from transcribe_backends import stems_from_estimates
+    from notecolor.convert.transcribe_backends import stems_from_estimates
 
     estimates = np.zeros((4, 2, 44100))
     stems = stems_from_estimates(estimates, ["drums", "bass", "other", "vocals"], 44100, 22050)
@@ -955,7 +955,7 @@ def test_stems_come_back_mono_at_the_callers_sample_rate():
 
 
 def test_stems_are_downmixed_by_averaging_channels():
-    from transcribe_backends import stems_from_estimates
+    from notecolor.convert.transcribe_backends import stems_from_estimates
 
     estimates = np.zeros((1, 2, 100))
     estimates[0, 0, :] = 1.0
@@ -969,7 +969,7 @@ def test_overlap_is_the_speed_dial_not_a_lighter_model(fake_demucs):
     model despite the smallest weight file, and recommended --overlap as
     the fast end instead."""
     pytest.importorskip("torch", reason="torch lives behind the [convert] extra")
-    from transcribe_backends import DemucsSeparator
+    from notecolor.convert.transcribe_backends import DemucsSeparator
 
     DemucsSeparator(terms_check=lambda: True, overlap=0.1).separate(np.zeros(4410), 22050)
     assert fake_demucs["kwargs"]["overlap"] == 0.1
@@ -978,7 +978,7 @@ def test_overlap_is_the_speed_dial_not_a_lighter_model(fake_demucs):
 def test_separator_refuses_with_an_install_line_when_demucs_is_absent(monkeypatch):
     import builtins
 
-    from transcribe_backends import DemucsSeparator
+    from notecolor.convert.transcribe_backends import DemucsSeparator
 
     real_import = builtins.__import__
 
@@ -998,7 +998,7 @@ def test_a_tail_sliver_after_the_last_beat_is_not_named_as_a_chord():
     last detected beat was appended whenever it was longer than zero, so a
     beat landing 0.02s before the end produced a spurious 20-millisecond
     chord ("C13/F") at the end of an otherwise correct progression."""
-    from transcribe_backends import BeatGrid, TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import BeatGrid, TemplateChordEstimator
 
     sample_rate = 22050
     audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
@@ -1014,7 +1014,7 @@ def test_a_tail_sliver_after_the_last_beat_is_not_named_as_a_chord():
 def test_a_real_tail_is_still_covered():
     """The other half: a genuine final chord held past the last detected
     beat must not be dropped just because slivers are."""
-    from transcribe_backends import BeatGrid, TemplateChordEstimator
+    from notecolor.convert.transcribe_backends import BeatGrid, TemplateChordEstimator
 
     sample_rate = 22050
     audio = _chord_audio(C_MAJOR, 3.0, sample_rate)

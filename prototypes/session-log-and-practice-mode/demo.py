@@ -16,8 +16,8 @@ import math
 import os
 
 import _repo_paths  # noqa: F401  (sys.path bootstrap side effect)
-import color_map
-import config
+from notecolor.analysis import color_map
+from notecolor.settings import config
 
 from practice_scorer import print_report, score_session
 from session_player import SessionPlayer

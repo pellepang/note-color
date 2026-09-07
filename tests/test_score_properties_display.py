@@ -2,7 +2,7 @@
 logic. Per this repo's test convention, `render()`'s actual screen
 layout is smoke-tested manually, not here."""
 
-import score_properties_display as spd
+from notecolor.tui import score_properties_display as spd
 
 
 def test_move_slot_wraps_both_directions():

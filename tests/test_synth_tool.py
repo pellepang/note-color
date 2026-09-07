@@ -13,11 +13,11 @@ import os
 
 import pytest
 
-import config
-import kitty_keys as kk
-import patch_format
-import synth_layout as sl
-import synth_tool as st
+from notecolor.settings import config
+from notecolor.tui import kitty_keys as kk
+from notecolor.settings import patch_format
+from notecolor.tui import synth_layout as sl
+from notecolor.tui import synth_tool as st
 
 
 def press(key, mods=0, text=None, event=kk.PRESS):
@@ -128,7 +128,7 @@ class _RecordingEngine:
 
 
 def test_channel_router_sends_pads_to_the_kit_and_keys_to_the_synth():
-    from sound_engine import NoteOn
+    from notecolor.audio.sound_engine import NoteOn
 
     notes, pads = _RecordingEngine("synth"), _RecordingEngine("kit")
     router = st.ChannelRouter(notes, pads)
@@ -140,8 +140,8 @@ def test_channel_router_sends_pads_to_the_kit_and_keys_to_the_synth():
 def test_channel_router_yields_a_silent_voice_rather_than_none():
     # The Engine Protocol promises a Voice; a None return would push a
     # None check down into the voice manager.
-    from sampler import SilentVoice
-    from sound_engine import NoteOn
+    from notecolor.audio.sampler import SilentVoice
+    from notecolor.audio.sound_engine import NoteOn
 
     router = st.ChannelRouter(_RecordingEngine("synth"), None)
     voice = router.note_on(NoteOn(36, 1.0, sl.PAD_CHANNEL), 48000)

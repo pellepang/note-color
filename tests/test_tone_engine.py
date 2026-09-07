@@ -13,9 +13,9 @@ note's own frequency.
 import numpy as np
 import pytest
 
-import config
-from sound_engine import NoteOn, frequency_for
-from tone_engine import DONE, RELEASE, SUSTAIN, ToneEngine, ToneVoice
+from notecolor.settings import config
+from notecolor.audio.sound_engine import NoteOn, frequency_for
+from notecolor.audio.tone_engine import DONE, RELEASE, SUSTAIN, ToneEngine, ToneVoice
 
 
 SR = 4000
@@ -205,7 +205,7 @@ def test_engine_produces_one_voice_per_note_on_at_the_requested_pitch():
 def test_engine_satisfies_the_sound_engine_voice_protocol_end_to_end():
     # The whole seam, with no audio device: SoundEngine -> ToneEngine ->
     # ToneVoice -> the callback's mix buffer.
-    import sound_engine
+    from notecolor.audio import sound_engine
 
     engine = sound_engine.SoundEngine(engine=ToneEngine(), sample_rate=SR, block_size=64)
     voice_id = engine.note_on(NoteOn.from_pitch_class(9, 4))

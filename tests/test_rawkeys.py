@@ -24,8 +24,8 @@ import time
 
 import pytest
 
-import kitty_keys as kk
-import main
+from notecolor.tui import kitty_keys as kk
+from notecolor.tui import app as main
 
 
 class _Pipe:

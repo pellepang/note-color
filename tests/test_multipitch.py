@@ -1,9 +1,9 @@
 import numpy as np
 
-import chroma
-import config
-from multipitch import detect, select_window
-from pitch_detect import compute_spectrum
+from notecolor.analysis import chroma
+from notecolor.settings import config
+from notecolor.analysis.multipitch import detect, select_window
+from notecolor.analysis.pitch_detect import compute_spectrum
 
 SAMPLE_RATE = 22050
 

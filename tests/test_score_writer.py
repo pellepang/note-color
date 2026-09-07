@@ -15,10 +15,10 @@ import numpy as np
 import pytest
 from music21 import chord as m21chord, converter
 
-import config
-from batch_transcribe import NoteEvent, TranscriptionResult
-from duration_tracker import duration_class_for_beats
-from score_writer import QUARTER_LENGTHS, guess_key_signature, write_score
+from notecolor.settings import config
+from notecolor.analysis.batch_transcribe import NoteEvent, TranscriptionResult
+from notecolor.analysis.duration_tracker import duration_class_for_beats
+from notecolor.notation.score_writer import QUARTER_LENGTHS, guess_key_signature, write_score
 
 HOP_SECONDS = config.BLOCK_SIZE / config.SAMPLE_RATE
 
@@ -79,8 +79,8 @@ def test_silent_histogram_returns_none():
 # ---- write_score --------------------------------------------------------
 
 def _rgb_hex(pitch_class):
-    from color_map import hsl_to_rgb255, note_to_hsl
-    from config_store import store
+    from notecolor.analysis.color_map import hsl_to_rgb255, note_to_hsl
+    from notecolor.settings.config_store import store
 
     hue, sat, _light = note_to_hsl(
         pitch_class, config.MAX_OCTAVE, scheme="fifths", hue_override=store.note_hue_override(pitch_class)

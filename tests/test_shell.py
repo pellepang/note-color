@@ -10,11 +10,11 @@ import inspect
 
 import pytest
 
-import config
-from main import _handle_back_to_menu_key, _handle_help_legend_key, _legend_line, _parse_time_signature
-from menu_display import MenuDisplay, MENU_ITEMS, TOOLS, osc8_link, _donation_line
-from shell import _handle_menu_key
-from virtualnote import build_parser
+from notecolor.settings import config
+from notecolor.tui.app import _handle_back_to_menu_key, _handle_help_legend_key, _legend_line, _parse_time_signature
+from notecolor.tui.menu_display import MenuDisplay, MENU_ITEMS, TOOLS, osc8_link, _donation_line
+from notecolor.tui.shell import _handle_menu_key
+from notecolor.tui.cli import build_parser
 
 
 # --- main.py: global key handlers -----------------------------------------
@@ -291,7 +291,7 @@ def test_synth_has_its_own_dispatch_branch_rather_than_run_session():
     # tool does, so its result must be interpreted -- but it must never go
     # through run_session()'s ensure_started(), which would open the mic
     # for an instrument that has no use for it.
-    import shell
+    from notecolor.tui import shell
 
     assert "synth" not in shell._NON_SESSION_SCREENS
     source = inspect.getsource(shell.run_menu_loop)
@@ -304,9 +304,9 @@ def test_synth_branch_hands_over_the_session_and_honours_the_quit_sentinel():
     # reopens the output stream. The menu loop itself is smoke-tested
     # manually per this repo's convention, so its source is what's
     # checked here rather than a driven loop.
-    import shell
+    from notecolor.tui import shell
 
-    import main
+    from notecolor.tui import app as main
 
     assert shell.run_synth_tool is main.run_synth_tool
     body = inspect.getsource(shell.run_menu_loop)

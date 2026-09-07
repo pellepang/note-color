@@ -17,16 +17,16 @@ import time
 import numpy as np
 import pytest
 
-import config
-import patch_format
-import sampler
-import wav_io
-from patch_format import Patch, Zone
-from sampler import (
+from notecolor.settings import config
+from notecolor.settings import patch_format
+from notecolor.audio import sampler
+from notecolor.audio import wav_io
+from notecolor.settings.patch_format import Patch, Zone
+from notecolor.audio.sampler import (
     SampleCache, SamplerEngine, SamplerVoice, SilentVoice, gain_to_linear, midi_velocity,
     playback_ratio, velocity_amplitude,
 )
-from sound_engine import NoteOn, SoundEngine
+from notecolor.audio.sound_engine import NoteOn, SoundEngine
 
 SR = 44100
 

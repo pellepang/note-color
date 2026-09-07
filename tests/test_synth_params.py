@@ -12,9 +12,9 @@ editor's Chord builder already follow.
 
 import pytest
 
-import config
-import patch_format
-import synth_params as sp
+from notecolor.settings import config
+from notecolor.settings import patch_format
+from notecolor.tui import synth_params as sp
 
 
 def _spec(patch, path):
