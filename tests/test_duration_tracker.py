@@ -2,8 +2,14 @@ import numpy as np
 import pytest
 
 import config
+import duration_tracker
 from chord_smoother import ChordSmoother
-from duration_tracker import DEFAULT_DURATION_CLASS, DurationTracker, duration_class_for_beats
+from duration_tracker import (
+    DEFAULT_DURATION_CLASS,
+    DURATION_CLASS_ORDER,
+    DurationTracker,
+    duration_class_for_beats,
+)
 from multipitch import NoteCandidate
 
 
@@ -252,3 +258,75 @@ def test_chord_duration_tracker_survives_single_hop_raw_dropout_when_fed_debounc
     # important assertion is "one event, roughly the whole sustain", not
     # an exact hop count tied to hysteresis constants.
     assert duration_hops >= 25
+
+
+# --- Tuplets (map #123, issue #130) ---------------------------------------
+
+
+def test_tuplet_classes_are_two_thirds_of_their_plain_counterpart():
+    """A triplet fits three of a value where two would go."""
+    for triplet, plain in (
+        ("triplet-half", "half"),
+        ("triplet-quarter", "quarter"),
+        ("triplet-eighth", "eighth"),
+        ("triplet-sixteenth", "sixteenth"),
+    ):
+        assert duration_tracker.beats_for_duration_class(triplet) == pytest.approx(
+            duration_tracker.beats_for_duration_class(plain) * 2.0 / 3.0
+        )
+
+
+def test_live_snapping_is_unchanged_by_the_tuplet_table():
+    """The load-bearing guarantee: map #123 excludes changes to the live
+    detection path, so every existing caller -- which passes no
+    allow_tuplets -- must snap exactly where it always did. Swept densely
+    enough to catch a triplet value stealing any plain value's range."""
+    beats = 0.01
+    while beats <= 5.0:
+        assert duration_tracker.duration_class_for_beats(beats) in DURATION_CLASS_ORDER
+        beats += 0.01
+
+
+def test_duration_class_order_excludes_tuplets_and_the_widened_one_includes_them():
+    """DURATION_CLASS_ORDER is what the editor's ,/. cycling and the live
+    path walk; widening it would change both."""
+    assert not any("triplet" in name for name in DURATION_CLASS_ORDER)
+    for name in duration_tracker.TUPLET_DURATION_CLASSES:
+        assert name in duration_tracker.DURATION_CLASS_ORDER_WITH_TUPLETS
+    for name in DURATION_CLASS_ORDER:
+        assert name in duration_tracker.DURATION_CLASS_ORDER_WITH_TUPLETS
+
+
+def test_widened_order_is_sorted_longest_to_shortest():
+    """Derived by sorting the two tables, not hand-ordered, so a value
+    added to either lands in the right place."""
+    beats = [
+        duration_tracker.beats_for_duration_class(name)
+        for name in duration_tracker.DURATION_CLASS_ORDER_WITH_TUPLETS
+    ]
+    assert beats == sorted(beats, reverse=True)
+
+
+def test_allow_tuplets_snaps_a_real_triplet_that_would_otherwise_be_wrong():
+    """An eighth-note triplet is 1/3 of a beat. Without tuplets the nearest
+    plain value is a DOTTED SIXTEENTH (0.375 is closer than 0.25) -- i.e. a
+    triplet currently notates as a dotted note, which is exactly the
+    misnotation issue #130 names."""
+    third = 1.0 / 3.0
+    assert duration_tracker.duration_class_for_beats(third) == "dotted-sixteenth"
+    assert duration_tracker.duration_class_for_beats(third, allow_tuplets=True) == "triplet-eighth"
+
+
+def test_allow_tuplets_still_prefers_a_plain_value_when_that_is_nearer():
+    """Opting in must not make every duration a triplet."""
+    for beats, expected in ((1.0, "quarter"), (0.5, "eighth"), (2.0, "half"), (4.0, "whole")):
+        assert duration_tracker.duration_class_for_beats(beats, allow_tuplets=True) == expected
+
+
+def test_tuplet_names_round_trip_through_beats_lookup():
+    """Once a duration_class exists, every consumer has to turn it back
+    into beats -- a lookup has no reason to care which table it came from."""
+    for name in duration_tracker.TUPLET_DURATION_CLASSES:
+        beats = duration_tracker.beats_for_duration_class(name)
+        assert beats > 0
+        assert duration_tracker.duration_class_for_beats(beats, allow_tuplets=True) == name
