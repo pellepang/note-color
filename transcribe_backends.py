@@ -242,3 +242,137 @@ class DspNoteTranscriber:
             )
         notes.sort(key=lambda note: (note.onset_seconds, note.pitch_midi))
         return notes
+
+
+class TemplateChordEstimator:
+    """Chord spans from this repo's own chroma folding and ~360-template
+    matcher -- no new dependency, no download, no extra.
+
+    #142 identified this as the **no-extra tier** for #141's Real Book
+    output, sitting below the neural estimator (`BTC-ISMIR19`, MIT code
+    with weights committed in an MIT repo, independently re-run at 81.59%
+    MajMin on 485 real pop/rock songs). The two obvious alternatives are
+    both licence traps under #139: Chordino/NNLS-Chroma is GPL-2.0, and
+    `autochord` is Apache-2.0 running *on* that GPL plugin, so it inherits
+    the refusal.
+
+    Expect meaningfully less than BTC's number: `oss-landscape-chord-
+    multipitch.md` puts the field's MajMin ceiling at 75-80% and notes
+    that plain chroma+templates specifically is "a weaker baseline than
+    NNLS-chroma/Chordino". This is the tier that works with nothing
+    installed, and #132's harness is what decides how far behind it
+    actually is.
+
+    **Segmentation is beat-synchronous when a `BeatGrid` is given**, one
+    span per beat, which is the right unit for a lead sheet and is why
+    `ChordEstimator.estimate()` takes `beats` at all -- chords change on
+    beats, and averaging chroma across a beat is both more stable and
+    cheaper than a fixed window that straddles two of them. With no grid
+    it falls back to fixed `window_seconds` blocks.
+
+    Adjacent spans naming the same chord are merged, so a chord held for
+    four beats is one span rather than four -- what `<harmony>` (#131) and
+    a human reader both want.
+    """
+
+    def __init__(
+        self,
+        window_seconds=0.5,
+        threshold=None,
+        bass_cutoff_hz=None,
+        min_span_seconds=0.0,
+    ):
+        self.window_seconds = window_seconds
+        self.threshold = threshold
+        self.bass_cutoff_hz = bass_cutoff_hz
+        self.min_span_seconds = min_span_seconds
+
+    def _segments(self, duration_seconds, beats):
+        """(start, end) pairs to analyse -- beat-synchronous if a grid is
+        available and usable, fixed windows otherwise."""
+        if beats is not None and len(beats.beat_seconds) >= 2:
+            edges = [t for t in beats.beat_seconds if 0.0 <= t <= duration_seconds]
+            if len(edges) >= 2:
+                spans = list(zip(edges, edges[1:]))
+                # The tail after the last beat is real audio and may hold
+                # the final chord; a beat grid ends at the last detected
+                # beat, not at the end of the file.
+                if duration_seconds - edges[-1] > 1e-3:
+                    spans.append((edges[-1], duration_seconds))
+                return spans
+        step = max(self.window_seconds, 1e-3)
+        starts = np.arange(0.0, duration_seconds, step)
+        return [(float(s), float(min(s + step, duration_seconds))) for s in starts]
+
+    def estimate(
+        self, audio: np.ndarray, sample_rate: int, beats: Optional[BeatGrid] = None
+    ) -> list:
+        # Local imports for consistency with every other backend here, and
+        # because chord_templates/chroma pull in this repo's own config.
+        import chord_templates
+        import chroma as chroma_module
+        from pitch_detect import compute_spectrum
+
+        audio = np.asarray(audio, dtype=np.float64)
+        if audio.size == 0:
+            return []
+        duration_seconds = audio.size / float(sample_rate)
+
+        match_kwargs = {}
+        if self.threshold is not None:
+            match_kwargs["threshold"] = self.threshold
+        bass_kwargs = {}
+        if self.bass_cutoff_hz is not None:
+            bass_kwargs["cutoff_hz"] = self.bass_cutoff_hz
+
+        raw = []
+        for start, end in self._segments(duration_seconds, beats):
+            lo = int(start * sample_rate)
+            hi = min(int(end * sample_rate), audio.size)
+            segment = audio[lo:hi]
+            if segment.size < 32:
+                continue
+            spectrum = compute_spectrum(segment)
+            chroma_vector = chroma_module.fold(spectrum, sample_rate)
+            bass_chroma = chroma_module.fold_bass(spectrum, sample_rate, **bass_kwargs)
+            result = chord_templates.match(chroma_vector, bass_chroma=bass_chroma, **match_kwargs)
+            # A segment nothing matches stays blank rather than being given
+            # the previous chord or a guess -- the same "render blank rather
+            # than a guess" posture chord_templates.match() itself takes.
+            if result is None:
+                continue
+            raw.append(ChordSpan(start, end, result.name, confidence=float(result.similarity)))
+
+        return self._merge(raw)
+
+    def _merge(self, spans):
+        """Fuse adjacent spans naming the same chord, then drop anything
+        shorter than `min_span_seconds`.
+
+        Merging happens first: four consecutive beats of C become one
+        two-second C, which then survives a minimum-length filter that
+        each individual beat would have failed."""
+        if not spans:
+            return []
+        merged = [spans[0]]
+        for span in spans[1:]:
+            last = merged[-1]
+            if span.name == last.name and abs(span.start_seconds - last.end_seconds) < 1e-6:
+                confidence = None
+                if last.confidence is not None and span.confidence is not None:
+                    # Length-weighted, so a long confident span isn't
+                    # dragged down by one marginal beat joining it.
+                    a = last.end_seconds - last.start_seconds
+                    b = span.end_seconds - span.start_seconds
+                    total = a + b
+                    confidence = (
+                        (last.confidence * a + span.confidence * b) / total if total else None
+                    )
+                merged[-1] = ChordSpan(last.start_seconds, span.end_seconds, last.name, confidence)
+            else:
+                merged.append(span)
+        if self.min_span_seconds > 0:
+            merged = [
+                s for s in merged if (s.end_seconds - s.start_seconds) >= self.min_span_seconds
+            ]
+        return merged

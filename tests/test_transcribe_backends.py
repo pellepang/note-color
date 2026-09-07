@@ -165,3 +165,130 @@ def test_dsp_backend_mono_and_polyphonic_are_a_selection_not_a_mode():
     poly = DspNoteTranscriber(polyphonic=True).transcribe(audio, sample_rate)
     mono = DspNoteTranscriber(polyphonic=False).transcribe(audio, sample_rate)
     assert isinstance(poly, list) and isinstance(mono, list)
+
+
+# --- TemplateChordEstimator (map #123, #141's no-extra tier) ---------------
+
+
+def _chord_audio(midis, seconds, sample_rate, amplitude=0.4):
+    """A sustained chord built from harmonic-rich tones -- the same
+    synthesize-don't-fixture rule the rest of this suite follows."""
+    total = np.zeros(int(seconds * sample_rate))
+    for midi in midis:
+        total += _tone(midi, seconds, sample_rate, amplitude=amplitude)
+    return total / max(np.max(np.abs(total)), 1e-9) * amplitude
+
+
+C_MAJOR = (48, 52, 55)      # C3 E3 G3
+F_MAJOR = (53, 57, 60)      # F3 A3 C4
+
+
+def test_template_estimator_names_a_sustained_major_triad():
+    from transcribe_backends import TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    audio = _chord_audio(C_MAJOR, 1.0, sample_rate)
+    spans = TemplateChordEstimator().estimate(audio, sample_rate)
+
+    assert spans, "expected at least one chord span"
+    assert spans[0].name.startswith("C"), f"expected a C chord, got {spans[0].name}"
+
+
+def test_template_estimator_merges_a_held_chord_into_one_span():
+    """Four beats of C must read as one two-second C, not four spans --
+    what <harmony> (#131) and a human reader both want."""
+    from transcribe_backends import BeatGrid, TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
+    grid = BeatGrid(beat_seconds=(0.0, 0.5, 1.0, 1.5, 2.0), downbeat_seconds=(0.0, 2.0))
+
+    spans = TemplateChordEstimator().estimate(audio, sample_rate, beats=grid)
+    assert len(spans) == 1, [s.name for s in spans]
+    assert spans[0].start_seconds == pytest.approx(0.0)
+    assert spans[0].end_seconds == pytest.approx(2.0)
+
+
+def test_template_estimator_segments_on_the_beat_grid_when_given_one():
+    """A chord change is found at the beat it happens on."""
+    from transcribe_backends import BeatGrid, TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    audio = np.concatenate(
+        [_chord_audio(C_MAJOR, 1.0, sample_rate), _chord_audio(F_MAJOR, 1.0, sample_rate)]
+    )
+    grid = BeatGrid(beat_seconds=(0.0, 0.5, 1.0, 1.5, 2.0), downbeat_seconds=(0.0, 1.0))
+
+    spans = TemplateChordEstimator().estimate(audio, sample_rate, beats=grid)
+    names = [s.name for s in spans]
+    assert len(spans) >= 2, names
+    assert names[0].startswith("C"), names
+    assert any(n.startswith("F") for n in names[1:]), names
+    # The change lands on the beat where it actually happens.
+    change = next(s for s in spans if s.name.startswith("F"))
+    assert change.start_seconds == pytest.approx(1.0, abs=0.51)
+
+
+def test_template_estimator_falls_back_to_fixed_windows_without_a_grid():
+    from transcribe_backends import TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    audio = _chord_audio(C_MAJOR, 1.0, sample_rate)
+    spans = TemplateChordEstimator(window_seconds=0.25).estimate(audio, sample_rate)
+    assert spans
+    assert spans[0].end_seconds <= 1.0 + 1e-6
+
+
+def test_template_estimator_covers_audio_past_the_last_detected_beat():
+    """A beat grid ends at the last detected beat, not at the end of the
+    file, and the tail can hold the final chord."""
+    from transcribe_backends import BeatGrid, TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
+    grid = BeatGrid(beat_seconds=(0.0, 0.5), downbeat_seconds=(0.0,))
+    spans = TemplateChordEstimator().estimate(audio, sample_rate, beats=grid)
+    assert spans
+    assert spans[-1].end_seconds == pytest.approx(2.0, abs=0.01)
+
+
+def test_template_estimator_returns_nothing_for_silence():
+    """Blank rather than a guess -- the posture chord_templates.match()
+    already takes, carried through rather than papered over."""
+    from transcribe_backends import TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    assert TemplateChordEstimator().estimate(np.zeros(sample_rate), sample_rate) == []
+
+
+def test_template_estimator_handles_empty_audio():
+    from transcribe_backends import TemplateChordEstimator
+
+    assert TemplateChordEstimator().estimate(np.array([]), config.SAMPLE_RATE) == []
+
+
+def test_template_estimator_min_span_filter_runs_after_merging():
+    """Documented ordering that matters: four beats of C merge into one
+    2s span which then survives a 1s minimum, where each individual beat
+    would have failed it."""
+    from transcribe_backends import BeatGrid, TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    audio = _chord_audio(C_MAJOR, 2.0, sample_rate)
+    grid = BeatGrid(beat_seconds=(0.0, 0.5, 1.0, 1.5, 2.0), downbeat_seconds=(0.0,))
+    spans = TemplateChordEstimator(min_span_seconds=1.0).estimate(audio, sample_rate, beats=grid)
+    assert len(spans) == 1
+    assert spans[0].end_seconds - spans[0].start_seconds >= 1.0
+
+
+def test_template_estimator_spans_are_ordered_and_non_overlapping():
+    from transcribe_backends import TemplateChordEstimator
+
+    sample_rate = config.SAMPLE_RATE
+    audio = np.concatenate(
+        [_chord_audio(C_MAJOR, 1.0, sample_rate), _chord_audio(F_MAJOR, 1.0, sample_rate)]
+    )
+    spans = TemplateChordEstimator(window_seconds=0.25).estimate(audio, sample_rate)
+    for a, b in zip(spans, spans[1:]):
+        assert a.end_seconds <= b.start_seconds + 1e-6
+        assert a.start_seconds < a.end_seconds
