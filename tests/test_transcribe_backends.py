@@ -292,3 +292,136 @@ def test_template_estimator_spans_are_ordered_and_non_overlapping():
     for a, b in zip(spans, spans[1:]):
         assert a.end_seconds <= b.start_seconds + 1e-6
         assert a.start_seconds < a.end_seconds
+
+
+# --- BeatThisTracker (map #123, #130's beat/downbeat source) --------------
+#
+# Beat This! is not installed here (it needs ~1.1 GB of CPU torch), so
+# these drive the adapter against an injected fake module -- the same
+# "test the decisions without the library" split `test_sf2_playback.py`
+# uses for FluidSynth. What is verified is the wiring: that the adapter
+# calls the API `beat_this` 1.1.0 actually exposes (read from its wheel),
+# converts the result correctly, and refuses with an install line when the
+# library is absent.
+
+
+class _FakeAudio2Beats:
+    instances = []
+
+    def __init__(self, checkpoint_path="final0", device="cpu", float16=False, dbn=False):
+        self.kwargs = dict(
+            checkpoint_path=checkpoint_path, device=device, float16=float16, dbn=dbn
+        )
+        self.calls = []
+        _FakeAudio2Beats.instances.append(self)
+
+    def __call__(self, signal, sr):
+        self.calls.append((len(signal), sr))
+        return np.array([0.0, 0.5, 1.0, 1.5]), np.array([0.0, 1.0])
+
+
+@pytest.fixture
+def fake_beat_this(monkeypatch):
+    import sys
+    import types
+
+    _FakeAudio2Beats.instances = []
+    pkg = types.ModuleType("beat_this")
+    inference = types.ModuleType("beat_this.inference")
+    inference.Audio2Beats = _FakeAudio2Beats
+    pkg.inference = inference
+    monkeypatch.setitem(sys.modules, "beat_this", pkg)
+    monkeypatch.setitem(sys.modules, "beat_this.inference", inference)
+    return _FakeAudio2Beats
+
+
+def test_beat_this_returns_a_beat_grid(fake_beat_this):
+    from transcribe_backends import BeatThisTracker
+
+    grid = BeatThisTracker().track(np.zeros(1000), 22050)
+    assert grid.beat_seconds == (0.0, 0.5, 1.0, 1.5)
+    assert grid.downbeat_seconds == (0.0, 1.0)
+    # Two downbeats is one bar -- not enough to take a mode over, so the
+    # grid correctly declines to guess a meter here.
+    assert grid.beats_per_bar() is None
+
+
+def test_beat_this_passes_the_sample_rate_through_rather_than_resampling(fake_beat_this):
+    """Beat This! resamples internally in Audio2Frames.signal2spect();
+    doing it here too would be strictly worse."""
+    from transcribe_backends import BeatThisTracker
+
+    BeatThisTracker().track(np.zeros(4321), 44100)
+    assert fake_beat_this.instances[0].calls == [(4321, 44100)]
+
+
+def test_beat_this_does_not_use_the_madmom_dbn(fake_beat_this):
+    """#130 declined madmom (git pin on 3.14), and Beat This!'s own
+    argument against the DBN is that its 55-215 BPM and constant-meter
+    priors break on real material -- exactly the tempo-drift case here."""
+    from transcribe_backends import BeatThisTracker
+
+    BeatThisTracker().track(np.zeros(1000), 22050)
+    assert fake_beat_this.instances[0].kwargs["dbn"] is False
+
+
+def test_beat_this_defaults_to_cpu(fake_beat_this):
+    """No GPU on the target machine (#123)."""
+    from transcribe_backends import BeatThisTracker
+
+    BeatThisTracker().track(np.zeros(1000), 22050)
+    assert fake_beat_this.instances[0].kwargs["device"] == "cpu"
+
+
+def test_beat_this_accepts_and_ignores_a_drum_stem(fake_beat_this):
+    """The finding that qualifies #130: beat_this 1.1.0's Audio2Beats
+    takes exactly one signal, with no extra-channel input anywhere. #127's
+    measured drum-stem gain came from Beat Transformer, a multi-channel
+    architecture, and does not transfer. Ignoring it is the Protocol's
+    documented path, not an oversight -- and mixing a boosted drum stem in
+    would be an unmeasured heuristic."""
+    from transcribe_backends import BeatThisTracker
+
+    drums = np.ones(1000)
+    grid = BeatThisTracker().track(np.zeros(1000), 22050, drum_stem=drums)
+    assert grid.beat_seconds  # still tracked
+    # The stem never reached the model: only the mix did.
+    assert fake_beat_this.instances[0].calls == [(1000, 22050)]
+
+
+def test_beat_this_loads_the_model_once_across_calls(fake_beat_this):
+    """Loading weights per call would dominate the runtime budget."""
+    from transcribe_backends import BeatThisTracker
+
+    tracker = BeatThisTracker()
+    tracker.track(np.zeros(1000), 22050)
+    tracker.track(np.zeros(1000), 22050)
+    assert len(fake_beat_this.instances) == 1
+
+
+def test_beat_this_refuses_with_an_install_line_when_absent(monkeypatch):
+    """#129's refuse-don't-degrade, at the backend boundary."""
+    import builtins
+
+    from transcribe_backends import BeatThisTracker
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name.startswith("beat_this"):
+            raise ImportError("no beat_this")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(ConversionUnavailable) as excinfo:
+        BeatThisTracker().track(np.zeros(1000), 22050)
+    assert excinfo.value.install_hint == "pip install -e .[convert]"
+
+
+def test_conversion_unavailable_keeps_the_reason_separate_from_the_hint():
+    """So a caller laying the two out itself isn't left splitting str(exc)
+    on a newline."""
+    exc = ConversionUnavailable("Beat tracking needs Beat This!.", "pip install -e .[convert]")
+    assert exc.message == "Beat tracking needs Beat This!."
+    assert "pip install" not in exc.message
+    assert exc.install_hint in str(exc)

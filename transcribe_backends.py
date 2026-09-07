@@ -64,6 +64,10 @@ class ConversionUnavailable(Exception):
     rather than a traceback."""
 
     def __init__(self, message, install_hint=None):
+        #: The reason on its own, without the install line appended -- so a
+        #: caller that wants to lay the two out itself (a status line, an
+        #: indented hint) is not left splitting `str(exc)` on a newline.
+        self.message = message
         self.install_hint = install_hint
         super().__init__(f"{message}\n{install_hint}" if install_hint else message)
 
@@ -376,3 +380,73 @@ class TemplateChordEstimator:
                 s for s in merged if (s.end_seconds - s.start_seconds) >= self.min_span_seconds
             ]
         return merged
+
+
+class BeatThisTracker:
+    """Beat This! (ISMIR 2024) behind the `BeatTracker` Protocol -- #130's
+    beat and downbeat source. MIT code **and** MIT weights, CPU by
+    default, verified by #127 to resolve on Python 3.14.
+
+    Expect ~0.89 beat F1 / ~0.78 downbeat F1 on genre-diverse pop/rock and
+    ~0.63 beat F1 on expressive/rubato material (#127). Downbeats are what
+    barlines are made of (#130 places a barline at each predicted
+    downbeat), so the second number is the one that bounds notation
+    quality.
+
+    **`drum_stem` is accepted and ignored, and that qualifies #130.**
+    Reading `beat_this` 1.1.0's own source (`inference.Audio2Beats`)
+    settles something the research did not: it takes exactly one signal
+    (`__call__(signal, sr)`), with no extra-input channel anywhere in
+    `Spect2Frames`/`Audio2Frames`. #127's measured drum-stem gain
+    (downbeat F1 0.699 -> 0.775) comes from **Beat Transformer**, which is
+    a multi-channel architecture; it does not transfer to a single-input
+    model. So with this tracker the timing-oracle role is currently
+    unrealised -- the Protocol's "a tracker that cannot use it ignores it"
+    path, taken for real. Mixing a boosted drum stem back into the input
+    would be an unmeasured heuristic, and this map does not do those; see
+    docs/DECISIONS.md.
+
+    `dbn=False` deliberately: the DBN post-processor is madmom, which #130
+    declined because it needs a git pin on Python 3.14, and Beat This!'s
+    own argument for its minimal post-processing is that the DBN's
+    55-215 BPM and constant-meter priors break on real material -- which
+    is exactly the tempo-drift case #130 cares about.
+    """
+
+    INSTALL_HINT = "pip install -e .[convert]"
+
+    def __init__(self, checkpoint="final0", device="cpu", float16=False):
+        self.checkpoint = checkpoint
+        self.device = device
+        self.float16 = float16
+        self._tracker = None
+
+    def _load(self):
+        if self._tracker is not None:
+            return self._tracker
+        try:
+            from beat_this.inference import Audio2Beats
+        except ImportError as exc:
+            raise ConversionUnavailable(
+                "Beat tracking needs Beat This! (and CPU torch).",
+                self.INSTALL_HINT,
+            ) from exc
+        # Weights download on first use. They are MIT, so unlike Demucs'
+        # (#139 category 2) this needs no terms prompt.
+        self._tracker = Audio2Beats(
+            checkpoint_path=self.checkpoint, device=self.device, float16=self.float16, dbn=False
+        )
+        return self._tracker
+
+    def track(
+        self, audio: np.ndarray, sample_rate: int, drum_stem: Optional[np.ndarray] = None
+    ) -> BeatGrid:
+        tracker = self._load()
+        # Beat This! resamples internally to its own 22050 Hz
+        # (`Audio2Frames.signal2spect`), so no resampling is done here --
+        # doing it twice would be strictly worse.
+        beats, downbeats = tracker(np.asarray(audio, dtype=np.float32), int(sample_rate))
+        return BeatGrid(
+            beat_seconds=tuple(float(t) for t in np.asarray(beats).ravel()),
+            downbeat_seconds=tuple(float(t) for t in np.asarray(downbeats).ravel()),
+        )

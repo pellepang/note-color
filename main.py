@@ -2517,6 +2517,22 @@ class _EditorPlayback:
         return base + score_audition.seconds_to_beats(now - self.start_time, self.tempo_bpm)
 
 
+class _PrecomputedBeatTracker:
+    """Wraps an already-computed `BeatGrid` as a `BeatTracker`.
+
+    `run_convert()` runs beat tracking itself so it can report progress
+    and degrade gracefully when the model is absent, but `convert()`'s
+    signature takes a tracker rather than a grid -- deliberately, since
+    that is what lets #132's harness swap trackers. This is the two-line
+    adapter between the two, not a third code path."""
+
+    def __init__(self, beats):
+        self.beats = beats
+
+    def track(self, audio, sample_rate, drum_stem=None):
+        return self.beats
+
+
 def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=None):
     """`virtualnote convert <file>` -- map #123's offline audio-to-score
     converter (issue #129).
@@ -2567,6 +2583,31 @@ def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=N
         # good at (~0.95 vs ~0.38 onset F1).
         pass
 
+    # Beat tracking is wanted whenever anything downstream needs a grid:
+    # chord spans segment on beats, and notes quantize against them
+    # (#130). It is skipped only when neither was asked for, so
+    # `--no-notes --no-chords` stays free.
+    if want_notes or want_chords:
+        from transcribe_backends import BeatThisTracker
+
+        candidate = BeatThisTracker()
+        try:
+            # Probing here rather than inside convert() keeps "what is
+            # installed" this function's question. An absent beat tracker
+            # is NOT fatal: chords fall back to fixed windows and notes
+            # to the snapping this repo already does, both of which are
+            # honest degradations of *timing*, unlike substituting a
+            # worse note model (#129's refuse-don't-degrade is about the
+            # latter).
+            beats = candidate.track(audio, sample_rate)
+            beat_tracker = _PrecomputedBeatTracker(beats)
+            print(f"convert: {len(beats.beat_seconds)} beats, "
+                  f"{len(beats.downbeat_seconds)} downbeats")
+        except ConversionUnavailable as exc:
+            print(f"convert: no beat tracking -- {exc.message}")
+            if exc.install_hint:
+                print(f"  {exc.install_hint}")
+
     try:
         result = convert_module.convert(
             audio,
@@ -2578,7 +2619,9 @@ def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=N
             want_chords=want_chords,
         )
     except ConversionUnavailable as exc:
-        print(f"convert: {exc}")
+        print(f"convert: {exc.message}")
+        if exc.install_hint:
+            print(f"  {exc.install_hint}")
         return 1
 
     print(f"convert: {result.duration_seconds:.1f}s of audio")

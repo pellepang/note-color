@@ -4950,3 +4950,42 @@ rarer than pointwise correct tracking. A score converter cares about
 continuity specifically, because **one dropped bar shifts everything after
 it**. `mir_eval.beat` implements all of them. Expressive/rubato material is
 where this whole stack is weakest and the metric has to be able to say so.
+
+### Beat This! cannot take the drum stem — #130's timing oracle qualified
+
+Found while building the `BeatThisTracker` adapter, by reading
+`beat_this` 1.1.0's own wheel rather than its paper.
+
+#130 decided that the separated drum stem is fed to the beat tracker "as
+an extra input channel", worth a measured **downbeat F1 0.699 → 0.775**
+on drum-heavy material. That number is real, but it comes from #127's
+citation of the **Beat Transformer** ablation — and Beat Transformer is a
+*multi-channel* architecture. **Beat This! is not.**
+
+`inference.Audio2Beats.__call__(signal, sr)` takes exactly one signal;
+`Audio2Frames.signal2spect()` reduces a 2-D input by `signal.mean(1)`
+(downmixing channels, not accepting stems) and raises on anything with
+more dimensions. There is no extra-input path anywhere in
+`Spect2Frames`/`Audio2Frames`.
+
+So with the tracker #130 chose, **the drums-as-timing-oracle role is
+currently unrealised.** `BeatTracker.track()` keeps its `drum_stem`
+parameter and `BeatThisTracker` takes the Protocol's documented "a
+tracker that cannot use it ignores it" path, for real rather than
+hypothetically.
+
+What was *not* done, deliberately: mixing a level-boosted drum stem back
+into the tracker's input. It is the obvious workaround, it is one line,
+and it is an **unmeasured heuristic** — there is no published evidence
+that emphasising drums in a mono mix reproduces a multi-channel model's
+gain, and this map's whole posture is that unmeasured mechanisms are
+hypotheses rather than features. It is a clean experiment for #132's
+harness (`track(mix)` vs `track(mix + k·drums)`), and belongs there.
+
+Three things this does not change: separation still earns its place (the
+multi-track deliverable structurally needs per-instrument audio, and
+#142's H1b keeps the percussive/timing case alive), Beat This! is still
+the right tracker (MIT code *and* weights, CPU, resolves on 3.14, and it
+beat madmom's own ensemble with one model), and barlines still go at
+predicted downbeats. What changes is the expected downbeat accuracy: plan
+on Beat This!'s own ~0.78 F1 on pop-rock, with no drum-stem bonus on top.
