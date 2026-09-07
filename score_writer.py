@@ -288,3 +288,287 @@ def write_score(result, path, time_signature=config.DEFAULT_TIME_SIGNATURE):
     score.insert(0, layout.StaffGroup([treble, bass], symbol="brace"))
 
     score.write("musicxml", fp=path)
+
+
+# --- Multi-track score projects (map #123, issues #129/#131) --------------
+
+#: Key of the JSON track manifest inside the score-level `<miscellaneous>`
+#: block. #128 measured that per-part `<identification>` is silently
+#: dropped by music21 and that `Part.id` does not survive a round trip, so
+#: `<part-name>` is the only stable track identity and this manifest is
+#: keyed by it.
+PROJECT_MANIFEST_KEY = "note-color.project"
+PROJECT_MANIFEST_VERSION = 1
+
+
+def _beat_positions(times, beat_seconds):
+    """Seconds -> position in beats, against a real beat grid.
+
+    This is #130's "quantize against the beat grid, not a global tempo" in
+    its most direct form: linear interpolation between detected beat
+    times, so a beat is one quarter-note of score time no matter how the
+    tempo drifts underneath it. Outside the grid's range it extrapolates
+    from the nearest beat interval rather than clamping, which keeps a
+    pickup before the first detected beat, or a tail after the last, at a
+    sane position instead of piling everything onto one offset."""
+    times = np.asarray(times, dtype=float)
+    beats = np.asarray(beat_seconds, dtype=float)
+    if beats.size < 2:
+        return None
+    indices = np.arange(beats.size, dtype=float)
+    positions = np.interp(times, beats, indices)
+    # np.interp clamps; redo the out-of-range ends by extrapolation.
+    first_gap = beats[1] - beats[0]
+    last_gap = beats[-1] - beats[-2]
+    if first_gap > 0:
+        before = times < beats[0]
+        positions[before] = (times[before] - beats[0]) / first_gap
+    if last_gap > 0:
+        after = times > beats[-1]
+        positions[after] = (beats.size - 1) + (times[after] - beats[-1]) / last_gap
+    return positions
+
+
+def _tempo_from_beats(beat_seconds, default_bpm=_FALLBACK_BPM_FOR_OFFSETS):
+    """Median BPM implied by a beat grid.
+
+    Median, not mean, so one dropped or doubled beat does not drag the
+    whole tempo marking. This is a single number written for legibility --
+    #131 settled that tempo is stored as a *curve*, and this is not it;
+    the curve is a later step, and the grid itself is the real record."""
+    beats = np.asarray(beat_seconds, dtype=float)
+    if beats.size < 2:
+        return default_bpm
+    gaps = np.diff(beats)
+    gaps = gaps[gaps > 1e-6]
+    if gaps.size == 0:
+        return default_bpm
+    return float(60.0 / np.median(gaps))
+
+
+#: Subdivisions of a beat that a converted onset may land on.
+#:
+#: 12 is the reference grid #127 found the field uses, and it is the
+#: smallest number covering both binary and ternary subdivision: a
+#: sixteenth is 3/12 of a beat, a triplet-eighth 4/12, a triplet-sixteenth
+#: 2/12. Without it, raw interpolated beat positions are arbitrary floats
+#: and music21 raises "Cannot convert inexpressible durations to
+#: MusicXML" -- it cannot express the rest it would need between two
+#: notes at unquantized offsets. That is the same constraint
+#: `score_writer.write_score()`'s existing 32nd-note offset guard exists
+#: for, met here by quantizing musically rather than by rounding after the
+#: fact.
+#:
+#: This constrains *onsets*, not durations. A note's duration is the
+#: difference between two grid positions, and one grid unit (1/12 beat,
+#: 0.083) still snaps to a thirtysecond (0.125) as its nearest class --
+#: measured, not assumed. So 32nd notes can appear in output even though
+#: no onset sits on a 32nd-note position off the beat grid. Clamping that
+#: away was considered and rejected: a 1/12-beat span is a real grid unit,
+#: and rewriting it as a sixteenth would misstate a duration the grid can
+#: actually resolve.
+BEAT_SUBDIVISIONS = 12
+
+
+def snap_to_grid(positions, subdivisions=BEAT_SUBDIVISIONS):
+    """Quantize beat positions to the nearest 1/`subdivisions` of a beat."""
+    return np.round(np.asarray(positions, dtype=float) * subdivisions) / float(subdivisions)
+
+
+def _confidence_triples(track, to_beats):
+    """[[beat, midi, confidence], ...] for the notes of `track` that have
+    one. Empty when the model reported none, rather than fabricating a
+    default -- a missing confidence and a confidence of zero are not the
+    same claim."""
+    scored = [n for n in track.notes if n.confidence is not None]
+    if not scored:
+        return []
+    positions = to_beats([n.onset_seconds for n in scored])
+    return [
+        [round(float(beat), 4), int(n.pitch_midi), round(float(n.confidence), 3)]
+        for n, beat in zip(scored, positions)
+    ]
+
+
+def _pad_to(part, result, to_beats):
+    """Extend `part` with a trailing rest so it spans the whole
+    conversion.
+
+    Without this, music21 creates measures only as far as the last
+    *note*, and a `ChordSymbol` positioned beyond that is **silently
+    dropped** on write (measured: a symbol at beat 4 in a part whose last
+    note ends at beat 2 does not survive the round trip). A lead sheet
+    routinely ends on a chord held past the final melody note, so this is
+    the common case rather than an edge one."""
+    from music21 import note as m21note
+
+    end_beats = float(to_beats([result.duration_seconds])[0]) if result.duration_seconds else 0.0
+    if result.chords:
+        end_beats = max(end_beats, float(to_beats([result.chords[-1].end_seconds])[0]))
+    current = float(part.highestTime)
+    if end_beats > current + 1e-6:
+        filler = m21note.Rest()
+        filler.duration.quarterLength = max(end_beats - current, 1.0 / BEAT_SUBDIVISIONS)
+        part.insert(current, filler)
+
+
+def write_project(result, path, key_fifths=0, melody_track=None, title=None):
+    """Write a `convert.ConversionResult` as a **multi-track MusicXML
+    project** (issue #131).
+
+    One track per `<score-part>`, identified by a unique `<part-name>`;
+    per-track provenance in a versioned JSON manifest in the *score-level*
+    `<miscellaneous>` block; tempo, time signature and key score-global on
+    the first part. Chord spans, if any, are written as MusicXML
+    `<harmony>` elements on the melody part -- verified here to round-trip
+    through `music21.converter.parse()` with figure and offset intact,
+    which #131 recorded as unverified.
+
+    Note onsets and durations are placed against `result.beats` when a
+    grid exists (#130), falling back to a constant tempo otherwise, and
+    durations snap through `duration_class_for_beats(allow_tuplets=True)`
+    so a triplet can be written at all (#130's tuplet decision).
+    """
+    import json
+
+    from music21 import harmony, metadata, tempo as m21tempo
+
+    from duration_tracker import beats_for_duration_class, duration_class_for_beats
+
+    beat_seconds = list(result.beats.beat_seconds)
+    bpm = _tempo_from_beats(beat_seconds)
+    beats_per_bar = result.beats_per_bar or config.DEFAULT_TIME_SIGNATURE[0]
+    # #130: the denominator is a convention, never an inference. 4, or 8
+    # when the numerator is a compound-meter value.
+    denominator = 8 if beats_per_bar in (6, 9, 12) else 4
+    time_sig_str = f"{beats_per_bar}/{denominator}"
+
+    def to_beats(times):
+        positions = _beat_positions(times, beat_seconds)
+        if positions is None:
+            positions = np.asarray(times, dtype=float) * (bpm / 60.0)
+        return snap_to_grid(positions)
+
+    score = stream.Score()
+    md = metadata.Metadata()
+    md.title = title or "Converted score"
+    manifest = {
+        "version": PROJECT_MANIFEST_VERSION,
+        "tracks": [
+            {
+                "name": track.name,
+                "source_stem": track.source_stem,
+                "model": track.model,
+                "low_confidence": bool(track.low_confidence),
+                "note_count": len(track.notes),
+                # Per-note confidence lives HERE, not on the notes
+                # themselves: MusicXML has no per-note certainty field and
+                # music21's `editorial` dict is **not exported** --
+                # measured, a note carrying editorial.confidence writes a
+                # file with no trace of it. Stored as [beat, midi,
+                # confidence] triples so a reader matches them back by
+                # position and pitch. #143 established the signal is free
+                # and useful; dropping it because the format has no slot
+                # would be the wrong trade.
+                "note_confidence": _confidence_triples(track, to_beats),
+            }
+            for track in result.tracks
+        ],
+        "meter_inferred": result.beats_per_bar is not None,
+        "beat_count": len(beat_seconds),
+    }
+    md.setCustom(PROJECT_MANIFEST_KEY, json.dumps(manifest))
+    score.insert(0, md)
+
+    melody_name = melody_track or (result.tracks[0].name if result.tracks else None)
+    used_names = set()
+
+    for index, track in enumerate(result.tracks):
+        part = stream.Part()
+        # Unique part names are load-bearing: #128 found this is the only
+        # track identity that survives, so a duplicate would silently
+        # merge two tracks' provenance on read.
+        name = track.name
+        suffix = 2
+        while name in used_names:
+            name = f"{track.name} {suffix}"
+            suffix += 1
+        used_names.add(name)
+        part.partName = name
+        part.insert(0, meter.TimeSignature(time_sig_str))
+        part.insert(0, m21key.KeySignature(key_fifths))
+        if index == 0:
+            # A MetronomeMark inserted on the Score itself is silently
+            # discarded by music21 (#128), so it goes on the first part.
+            part.insert(0, m21tempo.MetronomeMark(number=round(bpm, 2)))
+
+        if track.notes:
+            onsets = to_beats([n.onset_seconds for n in track.notes])
+            offsets = to_beats([n.offset_seconds for n in track.notes])
+            for transcribed, start, end in zip(track.notes, onsets, offsets):
+                # A note quantized to zero length would be dropped by
+                # music21 rather than written; give it the shortest value
+                # the grid can express instead of silently losing it.
+                span = max(float(end - start), 1.0 / BEAT_SUBDIVISIONS)
+                duration_class = duration_class_for_beats(span, allow_tuplets=True)
+                element = note.Note(transcribed.pitch_midi)
+                element.duration.quarterLength = QUARTER_LENGTHS[duration_class]
+                element.style.color = note_hex_color(transcribed.pitch_midi % 12)
+                part.insert(float(max(start, 0.0)), element)
+
+        if result.chords and name == melody_name:
+            chord_starts = to_beats([c.start_seconds for c in result.chords])
+            for span, start in zip(result.chords, chord_starts):
+                try:
+                    symbol = harmony.ChordSymbol(span.name)
+                except Exception:
+                    # This repo's jazz spelling (Δ7, ø7) is not always a
+                    # figure music21 parses. A chord we cannot express is
+                    # skipped rather than crashing the whole write --
+                    # the same blank-rather-than-a-guess posture
+                    # chord_templates.match() already takes.
+                    continue
+                part.insert(float(max(start, 0.0)), symbol)
+
+        _pad_to(part, result, to_beats)
+        score.insert(0, part)
+
+    if not result.tracks:
+        # A chords-only conversion still has to produce a readable file.
+        part = stream.Part()
+        part.partName = "chords"
+        part.insert(0, meter.TimeSignature(time_sig_str))
+        part.insert(0, m21tempo.MetronomeMark(number=round(bpm, 2)))
+        for span, start in zip(result.chords, to_beats([c.start_seconds for c in result.chords])):
+            try:
+                part.insert(float(max(start, 0.0)), harmony.ChordSymbol(span.name))
+            except Exception:
+                continue
+        score.insert(0, part)
+
+    score.write("musicxml", fp=str(path))
+    return str(path)
+
+
+def read_project_manifest(path):
+    """The JSON track manifest from a project file, or `None`.
+
+    `music21.metadata.Metadata.getCustom()` returns a **tuple** of `Text`
+    objects rather than a string (measured, not assumed), which is the
+    kind of detail that silently produces `"(<music21...Text ...>,)"` in a
+    manifest field if a caller stringifies it directly."""
+    import json
+
+    from music21 import converter
+
+    parsed = converter.parse(str(path))
+    if parsed.metadata is None:
+        return None
+    custom = parsed.metadata.getCustom(PROJECT_MANIFEST_KEY)
+    if not custom:
+        return None
+    raw = custom[0] if isinstance(custom, (tuple, list)) else custom
+    try:
+        return json.loads(str(raw))
+    except (ValueError, TypeError):
+        return None

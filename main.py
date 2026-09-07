@@ -2650,8 +2650,18 @@ def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=N
     elif result.beats.beat_seconds:
         print("  meter: 4/4 (default -- not enough agreement to infer one)")
 
-    if out_path is not None:
-        print(f"convert: writing a score project is not implemented yet ({out_path})")
+    # Default output is the input's name with a .musicxml extension, the
+    # same convention `transcribe`'s own dump file follows.
+    if out_path is None:
+        out_path = os.path.splitext(path)[0] + ".musicxml"
+    try:
+        from score_writer import write_project
+    except ImportError:
+        print("convert: writing a score needs music21.")
+        print("  pip install -e .[batch]")
+        return 1
+    written = write_project(result, out_path, title=os.path.basename(path))
+    print(f"convert: wrote {written}")
     return 0
 
 
