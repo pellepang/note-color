@@ -2576,6 +2576,16 @@ def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=N
     separator = None
     note_transcriber = None
     beat_tracker = None
+    if want_notes:
+        from transcribe_backends import BasicPitchTranscriber, ConversionUnavailable as _CU
+
+        # Probed by loading the model, not by importing a name: the graph
+        # is committed to the repo but onnxruntime is not, so "installed"
+        # is a runtime question. A failure here is reported by the
+        # ConversionUnavailable handler around convert() below, which is
+        # where every other missing-model message is laid out.
+        note_transcriber = BasicPitchTranscriber()
+
     if mode == "band":
         # #129: band mode separates first. Piano mode deliberately does
         # not -- separation introduces artifacts on an already-clean

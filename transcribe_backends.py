@@ -497,25 +497,47 @@ class Posteriorgrams:
         return np.arange(self.note.shape[0], dtype=float) / self.fps
 
 
-def _resample_linear(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
-    """Linear resampling, used only when the caller's rate is not the
-    model's own.
+def _resample(audio: np.ndarray, from_rate: int, to_rate: int) -> np.ndarray:
+    """Band-limited resampling to the model's own rate.
 
-    Deliberately not `librosa.resample`/`soxr`: this repo's live path
-    already avoids a librosa dependency, and at this project's own
-    `config.SAMPLE_RATE` (22050) the branch never runs at all. If a real
-    resampling need appears -- 44.1 kHz sources routinely -- this should
-    become soxr, which `[convert]` already pulls in transitively via
-    beat-this. Recorded rather than silently accepted."""
+    Uses `soxr` when present -- it arrives with `beat-this` in the
+    `[convert]` extra, so in a real converter install it always is -- and
+    otherwise an FFT method (rfft, truncate or zero-pad the spectrum,
+    irfft) which is band-limited by construction.
+
+    **Not linear interpolation**, which is what this function did when
+    first written and which was wrong in a way that would not have shown
+    up in its own test. Downsampling 44.1 kHz to 22.05 kHz by
+    interpolation applies no anti-aliasing, so everything above 11 kHz
+    folds back into the audible band -- cymbals and hiss landing on top of
+    real pitches. A pure sine test passes happily either way, which is
+    exactly why the defect survived; real music would have been quietly
+    degraded. 44.1 kHz is the common case for the files this converter
+    exists to read, so this path is not hypothetical."""
     if from_rate == to_rate or audio.size == 0:
         return np.asarray(audio, dtype=np.float32)
-    duration = audio.size / float(from_rate)
-    target_n = int(round(duration * to_rate))
-    if target_n <= 1:
-        return np.asarray(audio[:1], dtype=np.float32)
-    src_x = np.arange(audio.size, dtype=np.float64) / from_rate
-    dst_x = np.arange(target_n, dtype=np.float64) / to_rate
-    return np.interp(dst_x, src_x, np.asarray(audio, dtype=np.float64)).astype(np.float32)
+
+    try:
+        import soxr
+
+        return np.asarray(
+            soxr.resample(np.asarray(audio, dtype=np.float32), from_rate, to_rate),
+            dtype=np.float32,
+        )
+    except ImportError:
+        pass
+
+    target_n = int(round(audio.size * to_rate / float(from_rate)))
+    if target_n <= 0:
+        return np.zeros(0, dtype=np.float32)
+    spectrum = np.fft.rfft(np.asarray(audio, dtype=np.float64))
+    n_keep = target_n // 2 + 1
+    if n_keep <= spectrum.size:
+        spectrum = spectrum[:n_keep]          # downsample: discard above the new Nyquist
+    else:
+        spectrum = np.concatenate([spectrum, np.zeros(n_keep - spectrum.size, dtype=complex)])
+    resampled = np.fft.irfft(spectrum, n=target_n) * (target_n / float(audio.size))
+    return resampled.astype(np.float32)
 
 
 def _window_audio(audio: np.ndarray, hop_size: int) -> np.ndarray:
@@ -600,8 +622,7 @@ class BasicPitchModel:
 
     def posteriorgrams(self, audio: np.ndarray, sample_rate: int) -> Posteriorgrams:
         session = self._load()
-        audio = _resample_linear(np.asarray(audio).ravel(), int(sample_rate),
-                                 BASIC_PITCH_SAMPLE_RATE)
+        audio = _resample(np.asarray(audio).ravel(), int(sample_rate), BASIC_PITCH_SAMPLE_RATE)
         original_samples = audio.size
         if original_samples == 0:
             empty = np.zeros((0, 88), dtype=np.float32)
@@ -635,3 +656,216 @@ class BasicPitchModel:
             onset=_unwrap(np.concatenate(onset_out), original_samples),
             contour=_unwrap(np.concatenate(contour_out), original_samples),
         )
+
+
+#: basic-pitch's own decoding defaults, carried over so a number reported
+#: against this backend is comparable with a published one. #142's metric
+#: work argues these should eventually move -- a higher onset threshold
+#: buys precision at zero compute, and precision is what "editing effort"
+#: rewards -- but that is a measured change for #132 to make, not a
+#: default to quietly differ on.
+BASIC_PITCH_ONSET_THRESHOLD = 0.5
+BASIC_PITCH_FRAME_THRESHOLD = 0.3
+BASIC_PITCH_MIN_NOTE_MS = 127.70
+#: Frames of sub-threshold energy tolerated inside a note before it ends.
+BASIC_PITCH_ENERGY_TOLERANCE = 11
+
+
+def _local_maxima_mask(matrix: np.ndarray) -> np.ndarray:
+    """Strict local maxima down each column (axis 0).
+
+    Equivalent to `scipy.signal.argrelmax(matrix, axis=0)` at its default
+    `order=1`/`comparator=np.greater`, endpoints excluded. Written out
+    rather than imported because SciPy lives behind this repo's `[synth]`
+    extra (#111) and adding it to `[convert]` for four lines of comparison
+    would be a real dependency for no reason."""
+    mask = np.zeros(matrix.shape, dtype=bool)
+    if matrix.shape[0] < 3:
+        return mask
+    mask[1:-1] = (matrix[1:-1] > matrix[:-2]) & (matrix[1:-1] > matrix[2:])
+    return mask
+
+
+def _infer_extra_onsets(onsets: np.ndarray, frames: np.ndarray, n_diff: int = 2) -> np.ndarray:
+    """Add onsets implied by a sharp rise in frame energy.
+
+    A re-articulation on a note already sounding often produces little
+    onset activation but a clear jump in frame energy; without this, two
+    struck notes at one pitch merge into one long note. Takes the
+    elementwise *minimum* across several difference lags so a slow swell
+    does not register, rescaled to the onset matrix's own range."""
+    if frames.shape[0] <= n_diff:
+        return onsets
+    diffs = []
+    for n in range(1, n_diff + 1):
+        padded = np.concatenate([np.zeros((n, frames.shape[1])), frames])
+        diffs.append(padded[n:, :] - padded[:-n, :])
+    frame_diff = np.min(diffs, axis=0)
+    frame_diff[frame_diff < 0] = 0
+    frame_diff[:n_diff, :] = 0
+    peak = float(np.max(frame_diff))
+    if peak <= 0:
+        return onsets
+    frame_diff = float(np.max(onsets)) * frame_diff / peak
+    return np.max([onsets, frame_diff], axis=0)
+
+
+def decode_notes(
+    grams: "Posteriorgrams",
+    onset_threshold: float = BASIC_PITCH_ONSET_THRESHOLD,
+    frame_threshold: float = BASIC_PITCH_FRAME_THRESHOLD,
+    min_note_ms: float = BASIC_PITCH_MIN_NOTE_MS,
+    infer_onsets: bool = True,
+    melodia_trick: bool = True,
+    min_midi: Optional[int] = None,
+    max_midi: Optional[int] = None,
+    energy_tolerance: int = BASIC_PITCH_ENERGY_TOLERANCE,
+) -> list:
+    """`Posteriorgrams` -> `list[TranscribedNote]`.
+
+    A faithful port of Basic Pitch's `output_to_notes_polyphonic`
+    (Apache-2.0; `LICENSE`/`NOTICE` vendored under `vendor/basic_pitch/`),
+    rather than a simpler decoder of this project's own. Two reasons:
+    it is the decoder the model was trained and published against, so a
+    number measured here is comparable with the 0.709 MAESTRO F1 #125
+    quotes; and a hand-rolled thresholder would differ from it in ways
+    that would then be indistinguishable from the model's own errors when
+    #132 starts attributing blame.
+
+    The algorithm, in short: find onset peaks above `onset_threshold`;
+    walk each forward while frame energy holds above `frame_threshold`,
+    tolerating `energy_tolerance` frames of dropout; consume that energy
+    (and its immediate pitch neighbours, which is what stops one note
+    spawning three); then, if `melodia_trick`, repeatedly take whatever
+    energy is left over and grow a note outward from it in both directions
+    -- that last pass is what recovers notes whose onset the model missed.
+
+    The per-note `amplitude` -- mean frame activation across the note --
+    becomes `confidence`. #143 found basic-pitch computes exactly this and
+    then discards it into MIDI velocity, making it a **free** per-note
+    confidence signal, and one that measured within ~1 point of AUROC of
+    MC-Dropout at 50 forward passes. It is also written to `velocity`,
+    because it is the only loudness proxy available and that is
+    basic-pitch's own convention -- but treating it as a dynamic is a
+    convention, not a measurement, and callers should not read it as one.
+    """
+    frames = np.array(grams.note, dtype=np.float64, copy=True)
+    onsets = np.array(grams.onset, dtype=np.float64, copy=True)
+    n_frames, n_bins = frames.shape
+    if n_frames == 0:
+        return []
+
+    # Frequency constraint, applied before anything else so a bound note
+    # cannot consume energy a valid one needed.
+    if min_midi is not None:
+        lo = max(0, int(min_midi) - BASIC_PITCH_MIDI_OFFSET)
+        frames[:, :lo] = 0.0
+        onsets[:, :lo] = 0.0
+    if max_midi is not None:
+        hi = min(n_bins, int(max_midi) - BASIC_PITCH_MIDI_OFFSET + 1)
+        frames[:, hi:] = 0.0
+        onsets[:, hi:] = 0.0
+
+    if infer_onsets:
+        onsets = _infer_extra_onsets(onsets, frames)
+
+    fps = grams.fps
+    min_note_frames = int(round(min_note_ms / 1000.0 * fps))
+    max_bin = n_bins - 1
+
+    peaks = _local_maxima_mask(onsets)
+    peak_values = np.where(peaks, onsets, 0.0)
+    onset_frames, onset_bins = np.where(peak_values >= onset_threshold)
+    # Backwards in time: a later note's energy is claimed before an earlier
+    # one can absorb it, which is what keeps a repeated pitch separate.
+    onset_frames = onset_frames[::-1]
+    onset_bins = onset_bins[::-1]
+
+    remaining = np.array(frames, copy=True)
+    events = []  # (start_frame, end_frame, midi, amplitude)
+
+    for start, bin_idx in zip(onset_frames, onset_bins):
+        if start >= n_frames - 1:
+            continue
+        i = start + 1
+        k = 0
+        while i < n_frames - 1 and k < energy_tolerance:
+            k = k + 1 if remaining[i, bin_idx] < frame_threshold else 0
+            i += 1
+        i -= k  # back up to the last frame that was actually above threshold
+        if i - start <= min_note_frames:
+            continue
+        remaining[start:i, bin_idx] = 0
+        if bin_idx < max_bin:
+            remaining[start:i, bin_idx + 1] = 0
+        if bin_idx > 0:
+            remaining[start:i, bin_idx - 1] = 0
+        events.append((start, i, bin_idx + BASIC_PITCH_MIDI_OFFSET,
+                       float(np.mean(frames[start:i, bin_idx]))))
+
+    if melodia_trick:
+        while float(np.max(remaining)) > frame_threshold:
+            mid, bin_idx = np.unravel_index(int(np.argmax(remaining)), remaining.shape)
+            remaining[mid, bin_idx] = 0
+
+            i = mid + 1
+            k = 0
+            while i < n_frames - 1 and k < energy_tolerance:
+                k = k + 1 if remaining[i, bin_idx] < frame_threshold else 0
+                remaining[i, bin_idx] = 0
+                if bin_idx < max_bin:
+                    remaining[i, bin_idx + 1] = 0
+                if bin_idx > 0:
+                    remaining[i, bin_idx - 1] = 0
+                i += 1
+            end = i - 1 - k
+
+            i = mid - 1
+            k = 0
+            while i > 0 and k < energy_tolerance:
+                k = k + 1 if remaining[i, bin_idx] < frame_threshold else 0
+                remaining[i, bin_idx] = 0
+                if bin_idx < max_bin:
+                    remaining[i, bin_idx + 1] = 0
+                if bin_idx > 0:
+                    remaining[i, bin_idx - 1] = 0
+                i -= 1
+            begin = i + 1 + k
+
+            if end - begin <= min_note_frames:
+                continue
+            events.append((begin, end, bin_idx + BASIC_PITCH_MIDI_OFFSET,
+                           float(np.mean(frames[begin:end, bin_idx]))))
+
+    notes = [
+        TranscribedNote(
+            onset_seconds=start / fps,
+            offset_seconds=end / fps,
+            pitch_midi=int(midi),
+            velocity=float(np.clip(amplitude, 0.0, 1.0)),
+            confidence=float(np.clip(amplitude, 0.0, 1.0)),
+        )
+        for start, end, midi, amplitude in events
+    ]
+    notes.sort(key=lambda note: (note.onset_seconds, note.pitch_midi))
+    return notes
+
+
+class BasicPitchTranscriber:
+    """`BasicPitchModel` + `decode_notes()` behind the `NoteTranscriber`
+    Protocol -- #129's per-stem note detector.
+
+    Holds the model so the ONNX session is built once and reused across
+    stems, and exposes `posteriorgrams()` alongside `transcribe()` so a
+    caller wanting the raw matrices (frame-level ensembling, #143) does not
+    have to reach around this class to get them."""
+
+    def __init__(self, model=None, **decode_kwargs):
+        self.model = model or BasicPitchModel()
+        self.decode_kwargs = decode_kwargs
+
+    def posteriorgrams(self, audio: np.ndarray, sample_rate: int) -> "Posteriorgrams":
+        return self.model.posteriorgrams(audio, sample_rate)
+
+    def transcribe(self, audio: np.ndarray, sample_rate: int) -> list:
+        return decode_notes(self.posteriorgrams(audio, sample_rate), **self.decode_kwargs)

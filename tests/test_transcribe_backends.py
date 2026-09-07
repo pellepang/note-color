@@ -574,3 +574,221 @@ def test_basic_pitch_refuses_clearly_when_the_model_file_is_missing(tmp_path):
     with pytest.raises(ConversionUnavailable) as excinfo:
         BasicPitchModel(model_path=missing).posteriorgrams(np.zeros(1000), 22050)
     assert "incomplete checkout" in str(excinfo.value)
+
+
+# --- decode_notes / BasicPitchTranscriber (map #123) ----------------------
+
+
+def _melody_audio(midis, seconds_each=1.0, sample_rate=22050):
+    return np.concatenate([_midi_tone(m, seconds_each, sample_rate) for m in midis]) * 0.5
+
+
+def test_transcriber_finds_a_three_note_melody_at_the_right_pitches():
+    from transcribe_backends import BasicPitchTranscriber
+
+    notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050)
+    # The synthesized tones carry a 2nd harmonic, so an octave ghost is
+    # expected; assert the real notes are present and lead on confidence
+    # rather than that nothing else was found.
+    strong = [n for n in notes if n.confidence and n.confidence > 0.5]
+    assert {n.pitch_midi for n in strong} == {60, 64, 67}
+
+
+def test_transcriber_gets_the_timing_right():
+    from transcribe_backends import BasicPitchTranscriber
+
+    notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050)
+    by_pitch = {n.pitch_midi: n for n in notes if n.confidence and n.confidence > 0.5}
+    assert by_pitch[60].onset_seconds == pytest.approx(0.0, abs=0.1)
+    assert by_pitch[64].onset_seconds == pytest.approx(1.0, abs=0.1)
+    assert by_pitch[67].onset_seconds == pytest.approx(2.0, abs=0.1)
+    assert by_pitch[60].duration_seconds == pytest.approx(1.0, abs=0.15)
+
+
+def test_confidence_separates_real_notes_from_harmonic_ghosts():
+    """#143's finding made concrete: the per-note mean frame activation
+    basic-pitch discards into MIDI velocity is a usable confidence signal.
+    Here the octave ghost of the synthesized tone's own 2nd harmonic
+    scores well below the notes actually played."""
+    from transcribe_backends import BasicPitchTranscriber
+
+    notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050)
+    real = [n.confidence for n in notes if n.pitch_midi in (60, 64, 67)]
+    ghosts = [n.confidence for n in notes if n.pitch_midi not in (60, 64, 67)]
+    assert real, "expected the played notes"
+    # Not guarded by `if ghosts:` -- a version of this test that silently
+    # passes when nothing spurious was found is a test that has stopped
+    # testing. These tones carry a 2nd harmonic precisely so a ghost is
+    # guaranteed to exist for the separation to be measured against.
+    assert ghosts, "expected at least one harmonic ghost to separate against"
+    assert min(real) > max(ghosts), (
+        f"confidence failed to separate: real {real}, ghosts {ghosts}"
+    )
+
+
+def test_transcriber_is_polyphonic_on_a_sustained_triad():
+    from transcribe_backends import BasicPitchTranscriber
+
+    audio = sum(_midi_tone(m, 2.5) for m in (60, 64, 67))
+    audio = audio / np.max(np.abs(audio)) * 0.6
+    notes = BasicPitchTranscriber().transcribe(audio, 22050)
+    strong = {n.pitch_midi for n in notes if n.confidence and n.confidence > 0.5}
+    assert {60, 64, 67} <= strong
+
+
+def test_notes_come_back_in_time_order():
+    from transcribe_backends import BasicPitchTranscriber
+
+    notes = BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67, 72]), 22050)
+    onsets = [n.onset_seconds for n in notes]
+    assert onsets == sorted(onsets)
+
+
+def test_every_note_has_positive_duration_and_a_valid_pitch():
+    from transcribe_backends import BasicPitchTranscriber
+
+    for note in BasicPitchTranscriber().transcribe(_melody_audio([60, 64, 67]), 22050):
+        assert note.offset_seconds > note.onset_seconds
+        assert 0 <= note.pitch_midi <= 127
+        assert 0.0 <= note.confidence <= 1.0
+        assert 0.0 <= note.velocity <= 1.0
+
+
+def test_raising_the_onset_threshold_trades_recall_for_precision():
+    """#142's metric argument in one assertion: a higher threshold is free
+    precision, which is what an editing-effort metric rewards and what F1
+    penalises. The knob exists and does what it says."""
+    from transcribe_backends import BasicPitchTranscriber
+
+    audio = _melody_audio([60, 64, 67])
+    loose = BasicPitchTranscriber(onset_threshold=0.3).transcribe(audio, 22050)
+    tight = BasicPitchTranscriber(onset_threshold=0.9).transcribe(audio, 22050)
+    assert len(tight) <= len(loose)
+
+
+def test_frequency_bounds_exclude_out_of_range_notes():
+    from transcribe_backends import BasicPitchTranscriber
+
+    audio = _melody_audio([60, 64, 67])
+    notes = BasicPitchTranscriber(min_midi=62, max_midi=66).transcribe(audio, 22050)
+    assert all(62 <= n.pitch_midi <= 66 for n in notes), sorted(n.pitch_midi for n in notes)
+
+
+def test_min_note_length_drops_very_short_notes():
+    from transcribe_backends import BasicPitchTranscriber
+
+    audio = _melody_audio([60, 64, 67])
+    # Each note is ~1s, so a 2s minimum must remove all of them -- asserted
+    # as an actual outcome rather than "empty OR long", which would pass
+    # even if the filter did nothing and the model found nothing.
+    baseline = BasicPitchTranscriber().transcribe(audio, 22050)
+    assert baseline, "the baseline must find notes for this test to mean anything"
+    long_only = BasicPitchTranscriber(min_note_ms=2000.0).transcribe(audio, 22050)
+    assert long_only == []
+
+
+def test_decode_notes_on_empty_posteriorgrams():
+    from transcribe_backends import Posteriorgrams, decode_notes
+
+    empty = Posteriorgrams(
+        np.zeros((0, 88)), np.zeros((0, 88)), np.zeros((0, 264))
+    )
+    assert decode_notes(empty) == []
+
+
+def test_decode_notes_on_silence_finds_nothing():
+    from transcribe_backends import Posteriorgrams, decode_notes
+
+    silent = Posteriorgrams(
+        np.zeros((200, 88)), np.zeros((200, 88)), np.zeros((200, 264))
+    )
+    assert decode_notes(silent) == []
+
+
+def test_melodia_trick_can_be_switched_off():
+    """It is the pass that recovers notes whose onset the model missed, so
+    turning it off should never *add* notes -- a cheap invariant that
+    catches the two passes being wired the wrong way round."""
+    from transcribe_backends import BasicPitchTranscriber
+
+    audio = _melody_audio([60, 64, 67])
+    with_trick = BasicPitchTranscriber().transcribe(audio, 22050)
+    without = BasicPitchTranscriber(melodia_trick=False).transcribe(audio, 22050)
+    assert len(without) <= len(with_trick)
+
+
+def test_local_maxima_matches_scipy_argrelmax_semantics():
+    """The four lines written to avoid pulling SciPy into [convert]. Checked
+    against scipy itself when it is available, since this repo has it behind
+    the [synth] extra."""
+    from transcribe_backends import _local_maxima_mask
+
+    signal = pytest.importorskip("scipy.signal", reason="scipy is behind the [synth] extra")
+    rng = np.random.default_rng(7)
+    matrix = rng.random((60, 5))
+    mine = _local_maxima_mask(matrix)
+    theirs = np.zeros(matrix.shape, dtype=bool)
+    theirs[signal.argrelmax(matrix, axis=0)] = True
+    assert np.array_equal(mine, theirs)
+
+
+def test_transcriber_exposes_posteriorgrams_alongside_notes():
+    """So a caller wanting the raw matrices (#143's frame-level ensembling)
+    does not have to reach around this class for them."""
+    from transcribe_backends import BasicPitchTranscriber
+
+    transcriber = BasicPitchTranscriber()
+    grams = transcriber.posteriorgrams(_melody_audio([60]), 22050)
+    assert grams.note.shape[1] == 88
+
+
+def test_resampling_is_band_limited_not_interpolated():
+    """Regression for a real defect: `_resample` originally used linear
+    interpolation, which applies no anti-aliasing. Downsampling 44.1 kHz
+    to the model's 22.05 kHz that way folds a 15 kHz tone down to ~7 kHz
+    at FULL magnitude -- squarely into the musical range, landing on top
+    of real pitches.
+
+    It survived review because the only resampling test used a low pure
+    sine, which linear interpolation handles fine. This one uses content
+    above the target Nyquist, which is the case that actually
+    distinguishes the two methods."""
+    from transcribe_backends import _resample
+
+    sample_rate = 44100
+    x = np.arange(sample_rate) / sample_rate
+    above_nyquist = np.sin(2 * np.pi * 15000 * x)   # 15 kHz; target Nyquist is 11.025 kHz
+
+    out = _resample(above_nyquist, 44100, 22050)
+    spectrum = np.abs(np.fft.rfft(out))
+
+    # Linear interpolation puts ~11025 magnitude at ~7 kHz here. Anything
+    # band-limited rejects it almost entirely.
+    assert spectrum.max() < 100.0, (
+        f"content above the target Nyquist aliased into the band "
+        f"(peak magnitude {spectrum.max():.1f}) -- resampling is not band-limited"
+    )
+
+
+def test_resampling_preserves_an_in_band_tone():
+    """The other half: rejecting everything would also pass the test above."""
+    from transcribe_backends import _resample
+
+    sample_rate = 44100
+    x = np.arange(sample_rate) / sample_rate
+    in_band = np.sin(2 * np.pi * 440 * x)
+
+    out = _resample(in_band, 44100, 22050)
+    assert out.size == pytest.approx(22050, rel=0.01)
+    freqs = np.fft.rfftfreq(out.size, 1.0 / 22050)
+    peak_hz = freqs[int(np.argmax(np.abs(np.fft.rfft(out))))]
+    assert peak_hz == pytest.approx(440.0, abs=5.0)
+
+
+def test_resampling_is_a_no_op_at_the_native_rate():
+    """The path that actually runs in this pipeline, since
+    batch_transcribe.load_audio() already delivers config.SAMPLE_RATE."""
+    from transcribe_backends import _resample
+
+    audio = np.linspace(-1.0, 1.0, 1000, dtype=np.float32)
+    assert np.array_equal(_resample(audio, 22050, 22050), audio)
