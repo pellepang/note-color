@@ -11,7 +11,10 @@ music21's own makeMeasures() during write, which is a real, documented
 data-layer round-trip test should be exercising.
 """
 
+import pytest
+
 import config
+import score_editor_state
 from batch_transcribe import NoteEvent, TranscriptionResult
 from duration_tracker import DEFAULT_DURATION_CLASS
 from score_editor_state import (
@@ -223,3 +226,63 @@ def test_edit_history_bounded_depth_drops_oldest():
 
     assert history.undo(current) is None
     assert current.tempo_bpm == 9.0
+
+
+def test_load_score_refuses_a_multi_track_file(tmp_path):
+    """Issue #131: before this guard, load_score() iterated parsed.parts
+    with no count check, so a four-part file merged by offset into
+    four-note chords and save_score() then wrote it back as two staves --
+    silent data loss, reachable by opening any multi-part MusicXML."""
+    from music21 import note as m21note
+    from music21 import stream as m21stream
+
+    score = m21stream.Score()
+    for i, pitch_name in enumerate(("C4", "E4", "G4", "B4")):
+        part = m21stream.Part()
+        part.partName = f"Track {i + 1}"
+        part.append(m21note.Note(pitch_name, quarterLength=1.0))
+        score.insert(0, part)
+    path = tmp_path / "four_tracks.musicxml"
+    score.write("musicxml", fp=str(path))
+
+    with pytest.raises(score_editor_state.MultiTrackScoreError) as excinfo:
+        score_editor_state.load_score(path)
+    assert "4 parts" in str(excinfo.value)
+
+
+def test_load_score_refuses_two_unbraced_parts(tmp_path):
+    """Two parts are one grand-staff track only when a brace StaffGroup
+    joins them; two independent single-staff tracks are a multi-track file
+    and must be refused just like four are."""
+    from music21 import note as m21note
+    from music21 import stream as m21stream
+
+    score = m21stream.Score()
+    for i, pitch_name in enumerate(("C4", "G3")):
+        part = m21stream.Part()
+        part.partName = f"Track {i + 1}"
+        part.append(m21note.Note(pitch_name, quarterLength=1.0))
+        score.insert(0, part)
+    path = tmp_path / "two_tracks.musicxml"
+    score.write("musicxml", fp=str(path))
+
+    with pytest.raises(score_editor_state.MultiTrackScoreError):
+        score_editor_state.load_score(path)
+
+
+def test_load_score_still_accepts_its_own_grand_staff(tmp_path):
+    """The guard must not refuse the two-PartStaff grand staff save_score()
+    itself writes -- the round trip that every other test here relies on.
+    Regression cover for the guard being written against the PartStaff
+    class (which music21 does not preserve) rather than the brace."""
+    score = score_editor_state.new_blank_score()
+    score.columns[0].notes = [
+        score_editor_state.EditorNote(pitch_class=0, octave=4),
+        score_editor_state.EditorNote(pitch_class=7, octave=2),
+    ]
+    path = tmp_path / "grand_staff.musicxml"
+    score_editor_state.save_score(score, path)
+
+    loaded = score_editor_state.load_score(path)
+    assert len(loaded.columns) == 1
+    assert {(n.pitch_class, n.octave) for n in loaded.columns[0].notes} == {(0, 4), (7, 2)}

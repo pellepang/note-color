@@ -2575,10 +2575,26 @@ def run_score_editor(path, session=None, score=None):
     strictly non-dirtying -- only actually writing a note is an edit."""
     import score_editor_display as sed
     import score_properties_display as spd
-    from score_editor_state import EditHistory, load_score, new_blank_score, save_score
+    from score_editor_state import (
+        EditHistory,
+        MultiTrackScoreError,
+        load_score,
+        new_blank_score,
+        save_score,
+    )
 
     if score is None:
-        score = load_score(path) if os.path.exists(path) else new_blank_score()
+        try:
+            score = load_score(path) if os.path.exists(path) else new_blank_score()
+        except MultiTrackScoreError as exc:
+            # Issue #131: a multi-track file is refused rather than silently
+            # flattened. Report it the way every other unopenable-file case
+            # in this shell reports -- a plain message and back to the menu,
+            # not a traceback over the user's terminal.
+            print(f"\nCannot open this score: {exc}\n")
+            print("The score editor reads one grand-staff track. Multi-track")
+            print("scores are map #123's converter output and need its own editor.")
+            return "menu"
     history = EditHistory()
     dirty = False
     cursor_col = 0

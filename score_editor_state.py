@@ -174,6 +174,45 @@ def save_score(score: EditorScore, path) -> None:
     m21_score.write("musicxml", fp=str(path))
 
 
+def _is_one_grand_staff(parsed, parts) -> bool:
+    """Whether `parts` is *one* grand-staff track rather than two separate
+    single-staff tracks (issue #131).
+
+    A grand staff written by `save_score()` comes back from
+    `converter.parse()` as two plain `Part` objects -- **not** `PartStaff`
+    (measured: music21 10.5.0 does not preserve the subclass across a
+    round trip) -- joined by a `layout.StaffGroup` with `symbol == "brace"`
+    spanning both. That brace is therefore the only reliable in-file signal
+    for "these two staves are one instrument", which is exactly the
+    distinction the guard in `load_score()` needs."""
+    for group in parsed.recurse().getElementsByClass(layout.StaffGroup):
+        if group.symbol != "brace":
+            continue
+        spanned = set(id(element) for element in group.getSpannedElements())
+        if all(id(part) in spanned for part in parts):
+            return True
+    return False
+
+
+class MultiTrackScoreError(Exception):
+    """Raised by `load_score()` for a MusicXML file carrying more than one
+    track (issue #131).
+
+    This editor's data model is a single grand staff: one shared `columns`
+    sequence, split across two staves by `staff_map.staff_row()`. Before
+    this guard existed, `load_score()` iterated `parsed.parts` with no count
+    check, so a four-part file was merged by offset into four-note chords
+    and then written back out by `save_score()` as two staves -- silent
+    data loss on save, reachable by opening any multi-part MusicXML from
+    anywhere.
+
+    Map #85 excluded *foreign MusicXML import fidelity* from the editor's
+    scope, which is why this went unnoticed; excluding fidelity is not the
+    same as accepting silent corruption, so this refuses instead. Map
+    #123's multi-track converter (#131) is what will eventually read these
+    files properly."""
+
+
 def load_score(path) -> EditorScore:
     """Parses a MusicXML file at `path` via `music21.converter.parse()`
     and reconstructs it into an `EditorScore` -- the reverse of
@@ -194,6 +233,19 @@ def load_score(path) -> EditorScore:
     affects only scores whose total duration doesn't align to a measure
     boundary."""
     parsed = converter.parse(str(path))
+
+    # Issue #131: refuse a multi-track file rather than silently flattening
+    # it. A grand-staff score written by save_score() is two PartStaffs of
+    # one track, which is fine; three or more parts, or two that aren't a
+    # PartStaff pair, means a genuinely multi-track file this model cannot
+    # represent. See MultiTrackScoreError.
+    parts = list(parsed.parts)
+    if len(parts) > 2 or (len(parts) == 2 and not _is_one_grand_staff(parsed, parts)):
+        raise MultiTrackScoreError(
+            f"{path}: this score has {len(parts)} parts. The score editor "
+            f"reads a single grand-staff track; opening a multi-track score "
+            f"here would silently flatten it and lose parts on save."
+        )
 
     time_signature = config.DEFAULT_TIME_SIGNATURE
     ts_list = list(parsed.recurse().getElementsByClass(meter.TimeSignature))
