@@ -1,0 +1,112 @@
+# Evaluation corpora for map #123's converter (issue #133, protocol #132).
+#
+# This file is the committed record of what is EXPECTED to exist locally;
+# the material itself never enters the repo. #132 settled why: the public
+# corpora are large and separately licensed, and the real-world set is
+# commercial music paired with third-party sheet music. Numbers derived
+# from any of it are facts and are publishable. The audio is not.
+#
+# Every `url` below was checked live (HTTP 200) when this file was
+# written. Sizes are as published by the source, not measured here.
+#
+# Default staging root, outside the repo:
+#     ~/note-color-eval/
+
+[meta]
+version = 1
+staging_root = "~/note-color-eval"
+
+# --- Committed regression suite (#132) -----------------------------------
+# Reproducible, licence-clean, and the basis of the regression bar: no
+# change ships that lowers F0.5 or raises ghost rate on these.
+
+[corpora.multtipop]
+role = "The ONLY real band-mix corpus with aligned ground truth that exists"
+licence = "CC BY 4.0"
+size = "3.5 hours"
+url = "https://huggingface.co/datasets/gclef-cmu/multtipop"
+ground_truth = "aligned multitrack MIDI"
+audio = "NOT included -- YouTube pointers, fetched separately"
+notes = """
+The single most important corpus here, and the source of this map's
+headline number: 37.87% onset F1 for the best open model on real
+commercial band audio. Its authors ask that it be used for evaluation
+only. Audio needs a separate fetch step no loader library ships.
+"""
+
+[corpora.slakh2100]
+role = "Large synthetic proxy for iteration and ablation"
+licence = "CC BY 4.0"
+size = "104 GB"
+url = "https://zenodo.org/records/4599666"
+small_variant = "https://zenodo.org/records/4603870"   # BabySlakh, for smoke tests
+ground_truth = "per-stem MIDI, synthetic audio"
+notes = """
+Standing caveat, stated by MulTTiPop's own authors and endorsed by #124:
+GOOD SLAKH NUMBERS DO NOT TRANSFER TO REAL RECORDINGS. Use it for
+ablations where the comparison is internal, never for an accuracy claim
+in this project's voice. Start with BabySlakh -- 104 GB is a large
+commitment for a first pass.
+"""
+
+[corpora.groove]
+role = "Drum transcription and the beat grid it feeds (#130)"
+licence = "CC BY 4.0"
+size = "~4.8 GB full, ~3 MB MIDI-only"
+url = "https://magenta.tensorflow.org/datasets/groove"
+midi_only = "https://storage.googleapis.com/magentadata/datasets/groove/groove-v1.0.0-midionly.zip"
+ground_truth = "aligned drum MIDI"
+notes = """
+Only needed once a drum transcriber exists -- #130 put drum NOTATION out
+of scope, so for now this evaluates the beat grid via mir_eval.beat's
+CMLt/AMLt, which #130 requires alongside F-measure because a score
+converter cares about continuity: one dropped bar shifts everything after
+it.
+"""
+
+[corpora.asap]
+role = "Score-layer validation ONLY"
+licence = "CC BY-NC-SA 4.0"          # non-commercial
+size = "222 scores / 1068 performances"
+url = "https://github.com/cpjku/asap-dataset"
+ground_truth = "MusicXML + quantised MIDI, beats, downbeats, time sig, key sig"
+notes = """
+Non-commercial, and used anyway: #139 category 4 permits NC material for
+private evaluation, since audio never enters the repo and never ships.
+
+Its job is narrow and it must not be cited beyond it. This is SOLO PIANO
+and therefore the wrong genre -- but it is the only corpus anywhere
+pairing real audio with a human-written MusicXML, so it is the only place
+a musicdiff/MV2H notation harness can be validated against a real human
+score at all before being pointed at band material.
+"""
+
+# --- Real-world genre check (#132) ---------------------------------------
+# The project owner's own material. NOT downloadable, NOT in the repo.
+
+[corpora.owner_set]
+role = "Real-world genre check -- the numbers that actually matter"
+licence = "third-party; never redistributed, never committed"
+url = ""
+staged_at = "~/note-color-eval/"
+notes = """
+What the public corpora cannot provide: real recordings in the genres
+this converter is actually for, paired with sheet music a human wrote.
+
+Layout, one directory per song:
+
+    ~/note-color-eval/01-song-name/audio.mp3
+    ~/note-color-eval/01-song-name/score.musicxml
+
+Score format decides whether a pair is usable at all:
+  MusicXML (.musicxml/.mxl)  -- ideal, scored directly by musicdiff
+  MIDI aligned to the audio  -- good, scored on notes by mir_eval
+  MuseScore (.mscz)          -- fine, exports to MusicXML
+  PDF / scan / photo         -- NOT machine-readable, cannot be scored
+
+The score must match THAT recording -- same key, same arrangement. A
+piano reduction of a rock song scores as wrong even when the converter is
+right.
+
+Target roughly 8-12 songs spread across the genres in scope.
+"""
