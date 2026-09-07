@@ -84,10 +84,19 @@ all = [
     "note-color[batch,synth,sf2,convert]",
 ]
 
+[tool.setuptools.package-data]
+"vendor.basic_pitch" = ["*.onnx", "LICENSE", "NOTICE", "README.md"]
+
 [project.scripts]
 virtualnote = "virtualnote:main"
 
 [tool.setuptools]
+# The vendored basic-pitch graph (map #123, #129) is data, not code, and
+# `py-modules` alone would leave it out of a non-editable `pip install .`
+# -- `transcribe_backends.BasicPitchModel` resolves it relative to its own
+# module file, so it has to ship alongside. See vendor/basic_pitch/README.md
+# for provenance and why it is committed at all.
+packages = ["vendor", "vendor.basic_pitch"]
 py-modules = [
     "animation",
     "audio_capture",

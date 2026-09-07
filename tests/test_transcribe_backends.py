@@ -425,3 +425,152 @@ def test_conversion_unavailable_keeps_the_reason_separate_from_the_hint():
     assert exc.message == "Beat tracking needs Beat This!."
     assert "pip install" not in exc.message
     assert exc.install_hint in str(exc)
+
+
+# --- BasicPitchModel (map #123, #129's per-stem note detector) ------------
+#
+# These run the REAL vendored graph -- it is committed to the repo (225 KB,
+# Apache-2.0, under #139's 1 MB ceiling), so there is nothing to download
+# and no reason to fake it. They skip only when onnxruntime is absent,
+# since that lives behind the [convert] extra.
+
+ort = pytest.importorskip("onnxruntime", reason="onnxruntime lives behind the [convert] extra")
+
+
+def _midi_tone(midi, seconds, sample_rate=22050, harmonics=(1.0, 0.4)):
+    freq = 440.0 * 2.0 ** ((midi - 69) / 12.0)
+    x = np.arange(int(seconds * sample_rate)) / sample_rate
+    return sum(a * np.sin(2 * np.pi * freq * n * x) for n, a in enumerate(harmonics, start=1))
+
+
+def test_basic_pitch_model_loads_the_vendored_graph():
+    """No download: #125 found the pip package will not install on 3.14,
+    so the graph is committed and driven directly."""
+    from transcribe_backends import BasicPitchModel
+
+    import os
+
+    path = BasicPitchModel()._resolve_path()
+    assert os.path.exists(path), f"vendored model missing at {path}"
+    assert os.path.getsize(path) == 230444
+
+
+def test_basic_pitch_posteriorgram_shapes_and_frame_count():
+    """Frame count must follow the *original* audio duration, not the
+    zero-padded final window -- padding read as real frames would be
+    trailing phantom silence for a decoder to chew on."""
+    from transcribe_backends import BASIC_PITCH_FPS, BasicPitchModel
+
+    sample_rate = 22050
+    seconds = 3.0
+    audio = 0.5 * _midi_tone(69, seconds)
+    grams = BasicPitchModel().posteriorgrams(audio, sample_rate)
+
+    expected = int(np.floor(seconds * sample_rate * (BASIC_PITCH_FPS / sample_rate)))
+    assert grams.note.shape == (expected, 88)
+    assert grams.onset.shape == (expected, 88)
+    assert grams.contour.shape == (expected, 264)
+
+
+def test_basic_pitch_identifies_a_sustained_a4():
+    """The end-to-end check that the windowing, output-name mapping and
+    unwrapping are all right: get any of them wrong and the peak bin moves."""
+    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+
+    grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 3.0), 22050)
+    peak_bin = int(np.argmax(grams.note.mean(axis=0)))
+    assert peak_bin + BASIC_PITCH_MIDI_OFFSET == 69
+
+
+def test_basic_pitch_is_polyphonic():
+    """The reason this model is here rather than a monophonic detector."""
+    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+
+    sample_rate = 22050
+    audio = sum(_midi_tone(m, 2.5) for m in (60, 64, 67))
+    audio = audio / np.max(np.abs(audio)) * 0.6
+    grams = BasicPitchModel().posteriorgrams(audio, sample_rate)
+
+    mean = grams.note.mean(axis=0)
+    top3 = {int(b) + BASIC_PITCH_MIDI_OFFSET for b in np.argsort(mean)[-3:]}
+    assert top3 == {60, 64, 67}
+
+
+def test_basic_pitch_reports_onsets_where_a_note_starts():
+    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+
+    grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 2.0), 22050)
+    onset_column = grams.onset[:, 69 - BASIC_PITCH_MIDI_OFFSET]
+    assert onset_column.max() > 0.5
+    # The attack is near the start, not scattered through the sustain.
+    assert int(np.argmax(onset_column)) < len(onset_column) // 4
+
+
+def test_basic_pitch_frame_times_line_up_with_the_grid():
+    from transcribe_backends import BASIC_PITCH_FPS, BasicPitchModel
+
+    grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 2.0), 22050)
+    times = grams.frame_times()
+    assert times[0] == 0.0
+    assert times[1] == pytest.approx(1.0 / BASIC_PITCH_FPS)
+    assert len(times) == grams.note.shape[0]
+
+
+def test_basic_pitch_handles_empty_audio():
+    from transcribe_backends import BasicPitchModel
+
+    grams = BasicPitchModel().posteriorgrams(np.array([]), 22050)
+    assert grams.note.shape == (0, 88) and grams.contour.shape == (0, 264)
+
+
+def test_basic_pitch_handles_audio_shorter_than_one_window():
+    """A clip under 2 seconds still has to produce frames -- the final
+    window is zero-padded, and the unwrap has to trim that padding back off."""
+    from transcribe_backends import BasicPitchModel
+
+    grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 0.5), 22050)
+    assert 0 < grams.note.shape[0] <= int(0.5 * 86) + 1
+
+
+def test_basic_pitch_spans_several_windows_continuously():
+    """Longer than one 2s window, so unwrapping and overlap-trimming are
+    actually exercised: a sustained note must stay detected across the
+    seam rather than dropping out at it."""
+    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+
+    grams = BasicPitchModel().posteriorgrams(0.5 * _midi_tone(69, 6.0), 22050)
+    column = grams.note[:, 69 - BASIC_PITCH_MIDI_OFFSET]
+    # No sustained dropout anywhere in the middle of the note.
+    middle = column[10:-10]
+    assert middle.min() > 0.1, f"dropout at a window seam: min {middle.min():.3f}"
+
+
+def test_basic_pitch_resamples_a_non_native_rate():
+    """44.1 kHz is the common real case; the model is trained at 22050."""
+    from transcribe_backends import BASIC_PITCH_MIDI_OFFSET, BasicPitchModel
+
+    audio = 0.5 * _midi_tone(69, 3.0, sample_rate=44100)
+    grams = BasicPitchModel().posteriorgrams(audio, 44100)
+    peak_bin = int(np.argmax(grams.note.mean(axis=0)))
+    assert peak_bin + BASIC_PITCH_MIDI_OFFSET == 69
+
+
+def test_basic_pitch_reuses_one_session_across_calls():
+    """InferenceSession construction is not free and a converter runs this
+    per stem."""
+    from transcribe_backends import BasicPitchModel
+
+    model = BasicPitchModel()
+    model.posteriorgrams(0.5 * _midi_tone(69, 0.5), 22050)
+    first = model._session
+    model.posteriorgrams(0.5 * _midi_tone(69, 0.5), 22050)
+    assert model._session is first
+
+
+def test_basic_pitch_refuses_clearly_when_the_model_file_is_missing(tmp_path):
+    from transcribe_backends import BasicPitchModel
+
+    missing = tmp_path / "not_here.onnx"
+    with pytest.raises(ConversionUnavailable) as excinfo:
+        BasicPitchModel(model_path=missing).posteriorgrams(np.zeros(1000), 22050)
+    assert "incomplete checkout" in str(excinfo.value)

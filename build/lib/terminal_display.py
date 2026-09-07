@@ -1,0 +1,97 @@
+"""Terminal-only display: fills the terminal with a live ANSI truecolor
+background, no GUI window or display server required."""
+
+import shutil
+import sys
+
+
+class TerminalDisplay:
+    def __init__(self, fps=20):
+        self.fps = fps
+        self._last_size = None
+        sys.stdout.write("\033[?25l")  # hide cursor
+        sys.stdout.write("\033[2J")    # clear screen once
+        sys.stdout.flush()
+
+    def render(self, rgb, status="", legend=""):
+        r, g, b = rgb
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        cols, rows = size
+        # The H keybind-legend (issue #40) reserves a second trailing row
+        # only when it's actually populated -- legend="" (H off, or no
+        # caller support) reproduces the exact single-status-row layout
+        # this view always had.
+        text_rows = 2 if legend else 1
+        rows = max(rows - text_rows, 1)  # reserve the trailing row(s) for status/legend text
+
+        bg = f"\033[48;2;{r};{g};{b}m"
+        reset = "\033[0m"
+        block_line = bg + (" " * cols) + reset
+
+        fg = f"\033[38;2;{r};{g};{b}m"
+
+        # A tiling WM resizes the terminal window often; without a full
+        # clear on resize, stale content from the previous (larger) size
+        # is never overwritten and lingers as ghost/duplicated pixels.
+        clear = "\033[2J" if size != self._last_size else ""
+        self._last_size = size
+
+        # "\033[H" is a cursor-home command, not a line of content -- joining
+        # it into `out` with the rest and "\n".join()-ing the whole list (as
+        # this used to do) burns an extra "\n" between it and the first real
+        # line, pushing every line one row lower than the `rows`/`text_rows`
+        # accounting above assumes. On an exact-height terminal that shoves
+        # the status/legend row(s) one past the bottom margin, forcing the
+        # terminal to auto-scroll every frame -- the visible symptom being
+        # the status/legend text drifting upward and appearing to duplicate
+        # (old, scrolled-up content never gets overwritten by the new
+        # frame's own cursor-addressed writes). Prepending "\033[H" directly
+        # instead of joining it in keeps line 1 as the first real content
+        # line, matching what `rows`/`text_rows` already reserve.
+        out = [block_line] * rows
+        out.append(reset + "\033[K" + fg + status + reset)
+        if legend:
+            out.append(reset + "\033[K" + fg + legend + reset)
+        sys.stdout.write(clear + "\033[H" + "\n".join(out))
+        sys.stdout.flush()
+
+    def render_bands(self, rgbs, status="", legend=""):
+        """Chord mode: `rgbs` is a list of RGB tuples, bottom-to-top, one
+        per currently-active note -- splits the fill area into that many
+        proportional horizontal bands instead of one solid color. A
+        single-entry list reduces to exactly `render()`'s behavior."""
+        size = shutil.get_terminal_size(fallback=(80, 24))
+        cols, rows = size
+        text_rows = 2 if legend else 1
+        rows = max(rows - text_rows, 1)
+
+        n = len(rgbs)
+        base, remainder = divmod(rows, n)
+        counts = [base + (1 if i < remainder else 0) for i in range(n)]
+
+        clear = "\033[2J" if size != self._last_size else ""
+        self._last_size = size
+
+        reset = "\033[0m"
+        lines = []
+        for band_rgb, band_rows in reversed(list(zip(rgbs, counts))):
+            r, g, b = band_rgb
+            bg = f"\033[48;2;{r};{g};{b}m"
+            block_line = bg + (" " * cols) + reset
+            lines.extend([block_line] * band_rows)
+
+        top_r, top_g, top_b = rgbs[-1]
+        fg = f"\033[38;2;{top_r};{top_g};{top_b}m"
+
+        # See render()'s comment above on why "\033[H" is prepended directly
+        # rather than joined in as a list element -- same overflow/scroll bug.
+        out = list(lines)
+        out.append(reset + "\033[K" + fg + status + reset)
+        if legend:
+            out.append(reset + "\033[K" + fg + legend + reset)
+        sys.stdout.write(clear + "\033[H" + "\n".join(out))
+        sys.stdout.flush()
+
+    def quit(self):
+        sys.stdout.write("\033[0m\033[2J\033[H\033[?25h")
+        sys.stdout.flush()
