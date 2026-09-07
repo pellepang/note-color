@@ -39,6 +39,29 @@ sf2 = [
     "pyfluidsynth>=1.4.0",  # sf2_playback.py only -- pull-model rendering, never Synth.start()
 ]
 
+# Map #123's offline audio-to-score converter (issues #129/#139). Two
+# extras rather than one, because #129 established that solo piano and
+# band mix are genuinely two capabilities with different quality stories
+# (~0.95 vs ~0.38 onset F1) and very different install costs: #126
+# measured the full stack at a 1.1 GB venv plus 81 MB of Demucs weights
+# fetched on first use, where transkun alone is a far smaller ask.
+#
+# Every weight here is permissively licensed and fetched without an
+# account -- #139's rules plus the standing "easy install for anyone, not
+# just computer geeks" constraint. Nothing gated, nothing non-commercial,
+# no Hugging Face token. Demucs' own weights are the one exception and are
+# downloaded only after an explicit prompt naming their terms (#139
+# category 2), never bundled.
+piano = [
+    "transkun>=2.0",  # MIT code, MIT weights inside the wheel, CPU by default (0.95 onset F1)
+]
+convert = [
+    "transkun>=2.0",
+    "demucs>=4.1.0",    # MIT code; weights are research-use-only and prompted for, never bundled
+    "beat-this>=1.1.0", # MIT code AND weights -- beats/downbeats (#127/#130)
+    "onnxruntime>=1.20", # runs basic-pitch's vendored Apache-2.0 nmp.onnx (#125: the pip package won't install on 3.14)
+]
+
 # The subtractive synth's resonant filter is a per-sample IIR recurrence,
 # and #103 measured that there is no pure-NumPy substitute for one: a
 # scalar Python loop costs 594us/block and the vectorize-across-voices
@@ -53,8 +76,12 @@ sf2 = [
 synth = [
     "scipy>=1.10",    # synth_engine.py only -- the SVF filter and pink-noise filter (ticket #113)
 ]
+# Everything. Note this now pulls the converter stack, which is ~1.1 GB
+# of CPU torch (#126, measured) -- much larger than the rest of this
+# project combined. `[batch,synth,sf2]` remains the light "all the
+# tools, none of the neural weights" combination.
 all = [
-    "note-color[batch,synth,sf2]",
+    "note-color[batch,synth,sf2,convert]",
 ]
 
 [project.scripts]
@@ -123,4 +150,7 @@ py-modules = [
     "synth_layout",
     "synth_params",
     "synth_tool",
+    # Map #123, the offline converter (#129).
+    "convert",
+    "transcribe_backends",
 ]

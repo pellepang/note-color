@@ -160,6 +160,26 @@ def build_parser():
     # No _add_common_flags(edit_p) -- same reasoning as transcribe/replay:
     # no live audio, so --color-scheme/--sensitivity/--source don't apply.
 
+    convert_p = sub.add_parser(
+        "convert",
+        help="offline audio-to-multi-track-score conversion of a full band mix (map #123)",
+    )
+    convert_p.add_argument("file", help="path to the audio file to convert")
+    convert_p.add_argument("--mode", choices=("band", "piano"), default="band",
+                            help="'band' separates into stems first; 'piano' skips separation "
+                                 "entirely and transcribes solo piano directly (issue #129 -- "
+                                 "separation introduces artifacts on already-clean signals, and "
+                                 "solo piano is the case this converter is genuinely good at)")
+    convert_p.add_argument("--no-chords", action="store_true",
+                            help="skip chord estimation (the Real Book half)")
+    convert_p.add_argument("--no-notes", action="store_true",
+                            help="chords only -- no note transcription, so no model is needed")
+    convert_p.add_argument("--out", default=None,
+                            help="path for the score project written on completion "
+                                 "(default: the input file's name with a .musicxml extension)")
+    # No _add_common_flags(convert_p) -- same reasoning as transcribe/
+    # replay/edit: offline, one-shot, never touches live audio.
+
     sub.add_parser("synth", help="standalone synth -- play the QWERTY keyboard and pads (map #99)")
     # No _add_common_flags(synth_p) and no arguments at all: the synth is
     # an instrument, not a view of captured audio, so it takes no input
@@ -187,6 +207,21 @@ def main(argv=None):
     # TabDisplay from an already-recorded .jsonl log, not live capture.
     if args.view == "replay":
         run_replay_session(args.file, args.dump_file, args.speed, play=args.play)
+        return
+
+    # 'convert' likewise never touches SessionState/audio -- offline,
+    # one-shot, and it refuses rather than degrading when its models are
+    # not installed (issue #129).
+    if args.view == "convert":
+        from main import run_convert
+
+        run_convert(
+            args.file,
+            mode=args.mode,
+            want_notes=not args.no_notes,
+            want_chords=not args.no_chords,
+            out_path=args.out,
+        )
         return
 
     # 'edit' (issue #98) likewise never touches SessionState/audio -- the

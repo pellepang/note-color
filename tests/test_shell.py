@@ -330,3 +330,46 @@ def test_virtualnote_synth_subcommand_takes_no_audio_input_flags():
     assert args.view == "synth"
     with pytest.raises(SystemExit):
         build_parser().parse_args(["synth", "--source", "loopback"])
+
+
+# --- virtualnote convert (map #123, issue #129) ---------------------------
+
+
+def test_build_parser_accepts_the_convert_subcommand():
+    args = build_parser().parse_args(["convert", "song.wav"])
+    assert args.view == "convert"
+    assert args.file == "song.wav"
+    assert args.mode == "band"          # separation on by default
+    assert args.no_notes is False and args.no_chords is False
+
+
+def test_convert_mode_piano_skips_separation():
+    """#129: piano mode transcribes directly, because separation
+    introduces artifacts on an already-clean signal and solo piano is the
+    case this converter is genuinely good at."""
+    args = build_parser().parse_args(["convert", "song.wav", "--mode", "piano"])
+    assert args.mode == "piano"
+
+
+def test_convert_rejects_an_unknown_mode():
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit):
+        build_parser().parse_args(["convert", "song.wav", "--mode", "orchestra"])
+
+
+def test_convert_flags_parse():
+    args = build_parser().parse_args(
+        ["convert", "song.wav", "--no-notes", "--no-chords", "--out", "x.musicxml"]
+    )
+    assert args.no_notes is True and args.no_chords is True
+    assert args.out == "x.musicxml"
+
+
+def test_convert_takes_no_live_audio_flags():
+    """Offline and one-shot, like transcribe/replay/edit -- it must not
+    grow --source or --sensitivity."""
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit):
+        build_parser().parse_args(["convert", "song.wav", "--source", "loopback"])

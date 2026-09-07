@@ -2517,6 +2517,91 @@ class _EditorPlayback:
         return base + score_audition.seconds_to_beats(now - self.start_time, self.tempo_bpm)
 
 
+def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=None):
+    """`virtualnote convert <file>` -- map #123's offline audio-to-score
+    converter (issue #129).
+
+    Deliberately a separate command from `transcribe`, not a flag on it:
+    `transcribe` returns a dump or a one-part MusicXML in seconds, while
+    this eats a band mix for up to an hour and emits a multi-track
+    project. One flag surface covering both would mean a command whose
+    runtime varies by three orders of magnitude and whose output shape
+    changes underneath the user.
+
+    Like `transcribe`/`replay`/`edit`, never touches `SessionState` or the
+    mic. Imports the pipeline locally so `music21`/`librosa`/torch cost
+    nothing on a run that never converts anything.
+
+    Refuses rather than degrading (#129): a missing model is reported with
+    its install line and a non-zero exit, never silently replaced by the
+    live DSP pipeline, whose accuracy on a band mix is far below the
+    ~37.87% onset F1 #124 measured as the neural ceiling."""
+    import convert as convert_module
+    from transcribe_backends import ConversionUnavailable
+
+    if not os.path.exists(path):
+        print(f"convert: no such file: {path}")
+        return 1
+
+    try:
+        from batch_transcribe import load_audio
+    except ImportError:
+        print("convert: reading an audio file needs librosa.")
+        print("  pip install -e .[batch]")
+        return 1
+
+    print(f"convert: loading {path} ...")
+    audio = load_audio(path)
+    sample_rate = config.SAMPLE_RATE
+
+    # Backends are resolved here rather than inside convert() so this
+    # function owns every "what is installed" question and convert() stays
+    # a pure pipeline over whatever it is handed (issue #129's seam).
+    separator = None
+    note_transcriber = None
+    beat_tracker = None
+    if mode == "band":
+        # #129: band mode separates first. Piano mode deliberately does
+        # not -- separation introduces artifacts on an already-clean
+        # signal, and solo piano is the case this converter is genuinely
+        # good at (~0.95 vs ~0.38 onset F1).
+        pass
+
+    try:
+        result = convert_module.convert(
+            audio,
+            sample_rate,
+            separator=separator,
+            note_transcriber=note_transcriber,
+            beat_tracker=beat_tracker,
+            want_notes=want_notes,
+            want_chords=want_chords,
+        )
+    except ConversionUnavailable as exc:
+        print(f"convert: {exc}")
+        return 1
+
+    print(f"convert: {result.duration_seconds:.1f}s of audio")
+    if result.tracks:
+        for track in result.tracks:
+            marker = "  (low confidence)" if track.low_confidence else ""
+            print(f"  track {track.name!r}: {len(track.notes)} notes{marker}")
+    if result.chords:
+        print(f"  {len(result.chords)} chord spans:")
+        for span in result.chords[:20]:
+            print(f"    {span.start_seconds:7.2f}s  {span.name}")
+        if len(result.chords) > 20:
+            print(f"    ... and {len(result.chords) - 20} more")
+    if result.beats_per_bar is not None:
+        print(f"  meter: {result.beats_per_bar}/4 (inferred)")
+    elif result.beats.beat_seconds:
+        print("  meter: 4/4 (default -- not enough agreement to infer one)")
+
+    if out_path is not None:
+        print(f"convert: writing a score project is not implemented yet ({out_path})")
+    return 0
+
+
 def run_score_editor(path, session=None, score=None):
     """`virtualnote edit <path>` (issue #98): loads `path` via
     score_editor_state.load_score() if it already exists, otherwise
