@@ -189,4 +189,7 @@ py-modules = [
     # Map #123, the offline converter (#129).
     "convert",
     "transcribe_backends",
+    # Map #123, ticket #144 -- synthetic corpus and its scoring harness.
+    "synth_corpus",
+    "evaluate",
 ]
