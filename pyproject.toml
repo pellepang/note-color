@@ -52,6 +52,26 @@ sf2 = [
 # no Hugging Face token. Demucs' own weights are the one exception and are
 # downloaded only after an explicit prompt naming their terms (#139
 # category 2), never bundled.
+# IMPORTANT, and learned the hard way: install CPU-only torch FIRST.
+#
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#
+# `demucs` and `transkun` both depend on `torch`, and plain `pip install
+# torch` on Linux resolves to the CUDA build -- which drags in ~2-3 GB of
+# NVIDIA CUDA libraries that cannot execute on a machine with no GPU, and
+# which map #123's target machine does not have. #126's measured 1.1 GB
+# venv figure is the CPU build; the CUDA one is several times that.
+#
+# A pip extra cannot express an alternative index URL, so this cannot be
+# fixed by declaration -- it has to be done before installing the extra,
+# or torch has to be reinstalled afterwards from the CPU index.
+#
+# Second gotcha on the same install: pip unpacks wheels into TMPDIR, and a
+# tmpfs /tmp (7.8 GB on the target machine) is too small for torch's
+# wheels. Point it at real disk if the install dies with
+# "[Errno 122] Disk quota exceeded":
+#
+#     TMPDIR=~/.cache/pip-tmp pip install -e '.[convert]'
 piano = [
     "transkun>=2.0",  # MIT code, MIT weights inside the wheel, CPU by default (0.95 onset F1)
 ]
