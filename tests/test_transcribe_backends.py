@@ -792,3 +792,202 @@ def test_resampling_is_a_no_op_at_the_native_rate():
 
     audio = np.linspace(-1.0, 1.0, 1000, dtype=np.float32)
     assert np.array_equal(_resample(audio, 22050, 22050), audio)
+
+
+# --- DemucsSeparator and #139's terms gate --------------------------------
+#
+# Demucs is not installed here (1.1 GB of CPU torch), so these drive the
+# adapter against a fake module. What is verified is the licence gate --
+# which is a commitment from #139, not an implementation detail -- and the
+# shape conversions around the model.
+
+
+class _FakeDemucsModel:
+    sources = ["drums", "bass", "other", "vocals"]
+    samplerate = 44100
+    audio_channels = 2
+
+    def to(self, device):
+        self.device = device
+        return self
+
+    def eval(self):
+        return self
+
+
+@pytest.fixture
+def fake_demucs(monkeypatch):
+    import sys
+    import types
+
+    model = _FakeDemucsModel()
+    pretrained = types.ModuleType("demucs.pretrained")
+    pretrained.get_model = lambda name: model
+
+    calls = {}
+
+    def fake_apply_model(m, mix, **kwargs):
+        import torch
+
+        calls["kwargs"] = kwargs
+        calls["shape"] = tuple(mix.shape)
+        n = mix.shape[-1]
+        return torch.zeros((1, len(m.sources), m.audio_channels, n))
+
+    apply_mod = types.ModuleType("demucs.apply")
+    apply_mod.apply_model = fake_apply_model
+    pkg = types.ModuleType("demucs")
+    pkg.pretrained = pretrained
+    pkg.apply = apply_mod
+    for name, mod in (("demucs", pkg), ("demucs.pretrained", pretrained),
+                      ("demucs.apply", apply_mod)):
+        monkeypatch.setitem(sys.modules, name, mod)
+    return calls
+
+
+def test_terms_are_shown_and_refusal_blocks_the_download(fake_demucs):
+    """#139 category 2: weights this project does not redistribute may be
+    fetched, but never silently. Declining must stop it.
+
+    Needs torch, because the dependency check deliberately runs *before*
+    the terms check -- there is no point asking someone to consent to a
+    download that cannot happen anyway. The consent logic itself is
+    covered without torch by the `model_terms_accepted` tests above."""
+    pytest.importorskip("torch", reason="torch lives behind the [convert] extra")
+    from transcribe_backends import DemucsSeparator
+
+    with pytest.raises(ConversionUnavailable) as excinfo:
+        DemucsSeparator(terms_check=lambda: False).separate(np.zeros(1000), 22050)
+    assert "not accepted" in str(excinfo.value)
+
+
+def test_accepting_the_terms_lets_separation_proceed(fake_demucs):
+    """Needs torch, which is only present with the [convert] extra. The
+    licence gate itself is tested above without it, because that is the
+    decision-bearing half."""
+    pytest.importorskip("torch", reason="torch lives behind the [convert] extra")
+    from transcribe_backends import DemucsSeparator
+
+    stems = DemucsSeparator(terms_check=lambda: True).separate(np.zeros(4410), 22050)
+    assert set(stems) == {"drums", "bass", "other", "vocals"}
+
+
+def test_terms_prompt_says_the_weights_are_not_open_source():
+    """The wording is the point: #126 verified from the maintainer that
+    the code is MIT and the weights are not, and that the repos they come
+    from declare no licence at all. A user agreeing to this has to be told
+    that, not just asked to press y."""
+    from transcribe_backends import DEMUCS_WEIGHTS_TERMS
+
+    lowered = " ".join(DEMUCS_WEIGHTS_TERMS.lower().split())
+    assert "not open source" in lowered
+    assert "scientific purposes" in lowered
+    assert "no licence at all" in lowered
+
+
+def test_a_preference_pre_accepts_without_prompting():
+    """A prompt that cannot be pre-answered is a wall in front of batch
+    use, not a consent mechanism (#139)."""
+    from transcribe_backends import ACCEPT_TERMS_PREFERENCE, model_terms_accepted
+
+    class Store:
+        def preference(self, name, default):
+            return True if name == ACCEPT_TERMS_PREFERENCE else default
+
+    def must_not_be_called(_prompt):
+        raise AssertionError("prompted despite a stored acceptance")
+
+    assert model_terms_accepted(prompt=must_not_be_called, store=Store()) is True
+
+
+def test_non_interactive_declines_rather_than_hanging(capsys):
+    """A background run must not block forever on a prompt nobody can see."""
+    import sys
+
+    from transcribe_backends import model_terms_accepted
+
+    class Store:
+        def preference(self, name, default):
+            return default
+
+    def would_hang(_prompt):
+        raise AssertionError("prompted on a non-interactive stream")
+
+    if sys.stdin.isatty():
+        pytest.skip("stdin is a TTY in this environment")
+    assert model_terms_accepted(prompt=would_hang, store=Store()) is False
+    assert "accept_model_terms" in capsys.readouterr().out
+
+
+# The array plumbing around the model is pure and tested without torch --
+# the same "pure logic unit-tested, heavy dependency smoke-tested" split
+# this repo applies to librosa, music21 and FluidSynth. A fake torch would
+# mostly test the fake.
+
+
+def test_mono_input_is_duplicated_to_the_stereo_the_model_expects():
+    from transcribe_backends import prepare_separator_input
+
+    prepared = prepare_separator_input(np.zeros(22050), 22050, 44100, 2)
+    assert prepared.shape == (2, 44100)
+    assert np.array_equal(prepared[0], prepared[1])
+
+
+def test_separator_input_is_resampled_to_the_model_rate():
+    """Demucs runs at 44.1 kHz; this project's audio arrives at 22.05."""
+    from transcribe_backends import prepare_separator_input
+
+    prepared = prepare_separator_input(np.zeros(11025), 22050, 44100, 2)
+    assert prepared.shape[1] == pytest.approx(22050, rel=0.01)
+
+
+def test_stems_come_back_mono_at_the_callers_sample_rate():
+    """Every downstream stage expects this project's own convention, not
+    Demucs' 44.1 kHz stereo."""
+    from transcribe_backends import stems_from_estimates
+
+    estimates = np.zeros((4, 2, 44100))
+    stems = stems_from_estimates(estimates, ["drums", "bass", "other", "vocals"], 44100, 22050)
+    assert set(stems) == {"drums", "bass", "other", "vocals"}
+    for name, stem in stems.items():
+        assert stem.ndim == 1, name
+        assert abs(stem.size - 22050) < 100, (name, stem.size)
+
+
+def test_stems_are_downmixed_by_averaging_channels():
+    from transcribe_backends import stems_from_estimates
+
+    estimates = np.zeros((1, 2, 100))
+    estimates[0, 0, :] = 1.0
+    estimates[0, 1, :] = 3.0
+    stem = stems_from_estimates(estimates, ["drums"], 22050, 22050)["drums"]
+    assert stem == pytest.approx(np.full(100, 2.0), abs=1e-5)
+
+
+def test_overlap_is_the_speed_dial_not_a_lighter_model(fake_demucs):
+    """#126 measured mdx_extra_q as the slowest and hungriest four-stem
+    model despite the smallest weight file, and recommended --overlap as
+    the fast end instead."""
+    pytest.importorskip("torch", reason="torch lives behind the [convert] extra")
+    from transcribe_backends import DemucsSeparator
+
+    DemucsSeparator(terms_check=lambda: True, overlap=0.1).separate(np.zeros(4410), 22050)
+    assert fake_demucs["kwargs"]["overlap"] == 0.1
+
+
+def test_separator_refuses_with_an_install_line_when_demucs_is_absent(monkeypatch):
+    import builtins
+
+    from transcribe_backends import DemucsSeparator
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name.startswith("demucs"):
+            raise ImportError("no demucs")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    with pytest.raises(ConversionUnavailable) as excinfo:
+        DemucsSeparator().separate(np.zeros(1000), 22050)
+    assert excinfo.value.install_hint == "pip install -e .[convert]"

@@ -869,3 +869,157 @@ class BasicPitchTranscriber:
 
     def transcribe(self, audio: np.ndarray, sample_rate: int) -> list:
         return decode_notes(self.posteriorgrams(audio, sample_rate), **self.decode_kwargs)
+
+
+# --- Demucs source separation (map #123, #126/#129) -----------------------
+
+#: Verbatim summary of the terms a user is agreeing to before Demucs'
+#: weights are fetched. #126 verified this from the maintainer directly:
+#: the CODE is MIT, the WEIGHTS are not, and the Hugging Face repos they
+#: come from carry no licence field at all.
+DEMUCS_WEIGHTS_TERMS = (
+    "Demucs' source-separation weights are NOT open source.\n"
+    "  The code is MIT, but its authors state the weights are\n"
+    "  \"provided only for scientific purposes\", and the repositories they are\n"
+    "  downloaded from state no licence at all.\n"
+    "  Roughly 81 MB will be downloaded on first use.\n"
+    "  note-color itself is MIT and does not redistribute them."
+)
+
+#: Setting that pre-accepts the above, so a batch run is not blocked by a
+#: prompt nobody is there to answer (#139). Consent recorded deliberately
+#: in a config file is stronger evidence of informed acceptance than a "y"
+#: typed to dismiss something, not weaker.
+ACCEPT_TERMS_PREFERENCE = "accept_model_terms"
+
+
+def model_terms_accepted(terms=DEMUCS_WEIGHTS_TERMS, prompt=None, store=None):
+    """Whether the user has accepted a model's non-open weight terms.
+
+    #139 category 2: weights this project does not redistribute may be
+    fetched, but **never silently** -- the user is told what they are
+    agreeing to first. Returns True if `[preferences].accept_model_terms`
+    is set, otherwise asks once; on a non-interactive stream it declines
+    rather than hanging, and says how to pre-accept."""
+    import sys
+
+    if store is None:
+        from config_store import store as store
+    if store.preference(ACCEPT_TERMS_PREFERENCE, False):
+        return True
+
+    ask = prompt or input
+    print("\n" + terms)
+    if not sys.stdin.isatty():
+        print(
+            "  Not an interactive terminal, so nothing was downloaded.\n"
+            f"  To accept in advance, set [preferences].{ACCEPT_TERMS_PREFERENCE} = true\n"
+            "  in note-color's config.toml."
+        )
+        return False
+    try:
+        answer = ask("  Download these weights? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return str(answer).strip().lower() in ("y", "yes")
+
+
+def prepare_separator_input(audio, sample_rate, model_rate, channels):
+    """Mono audio at the caller's rate -> (channels, samples) at the
+    model's rate.
+
+    Demucs is trained on stereo, so a mono source is duplicated across
+    channels rather than passed as one -- the model rejects the latter.
+    Pure and array-only so it is testable without torch installed, the
+    same split this repo applies everywhere its logic sits behind a heavy
+    dependency."""
+    mono = np.asarray(audio, dtype=np.float32).ravel()
+    resampled = _resample(mono, int(sample_rate), int(model_rate))
+    return np.repeat(resampled[np.newaxis, :], int(channels), axis=0)
+
+
+def stems_from_estimates(estimates, sources, model_rate, sample_rate):
+    """(n_sources, channels, samples) at the model's rate -> {name: mono
+    array at `sample_rate`}.
+
+    Converting back to this project's own mono-at-`sample_rate`
+    convention here means every downstream stage sees the shape it already
+    expects, rather than each learning Demucs' output format."""
+    estimates = np.asarray(estimates)
+    stems = {}
+    for index, name in enumerate(sources):
+        mono = estimates[index].mean(axis=0)
+        stems[name] = _resample(mono, int(model_rate), int(sample_rate))
+    return stems
+
+
+class DemucsSeparator:
+    """Demucs (`htdemucs`) behind the `Separator` Protocol.
+
+    #126 measured this on the target machine: **~2.1x real time** (a
+    4-minute song in ~8.3 minutes, ~14% of the map's hourly budget), 1.3 GB
+    peak RSS, 4 stems. It is also, by a wide margin, the most expensive
+    stage of the pipeline -- basic-pitch transcription measured ~32-38x
+    real time here, so separation dominates the budget by roughly 15x.
+    Any speed dial worth having (#134) varies *this*, which is also why
+    #126 recommended `--overlap` rather than a lighter model as the fast
+    end. `mdx_extra_q` is explicitly not offered: measured slowest and
+    hungriest of the four-stem models despite the smallest weight file.
+
+    Whether separation improves *note* accuracy is #129's H1 and remains
+    unmeasured by anyone; #142's one real datapoint is +0.20 points. It
+    earns its place here regardless, because a multi-track deliverable
+    structurally needs per-instrument audio.
+
+    The weights are fetched only after the user accepts their terms
+    (#139) -- they are research-use-only, unlike everything else in this
+    stack."""
+
+    INSTALL_HINT = "pip install -e .[convert]"
+
+    def __init__(self, model_name="htdemucs", device="cpu", overlap=0.25, shifts=0,
+                 terms_check=None):
+        self.model_name = model_name
+        self.device = device
+        self.overlap = overlap
+        self.shifts = shifts
+        self.terms_check = terms_check or model_terms_accepted
+        self._model = None
+
+    def _load(self):
+        if self._model is not None:
+            return self._model
+        try:
+            import torch  # noqa: F401  -- checked here so a missing torch
+            from demucs.pretrained import get_model  # refuses cleanly too
+        except ImportError as exc:
+            raise ConversionUnavailable(
+                "Source separation needs Demucs (and CPU torch).", self.INSTALL_HINT
+            ) from exc
+        if not self.terms_check():
+            raise ConversionUnavailable(
+                "Demucs' weights were not accepted, so no separation was run."
+            )
+        self._model = get_model(self.model_name)
+        self._model.to(self.device)
+        self._model.eval()
+        return self._model
+
+    def separate(self, audio: np.ndarray, sample_rate: int) -> dict:
+        model = self._load()
+        import torch
+
+        from demucs.apply import apply_model
+
+        model_rate = int(getattr(model, "samplerate", 44100))
+        channels = int(getattr(model, "audio_channels", 2))
+
+        prepared = prepare_separator_input(audio, int(sample_rate), model_rate, channels)
+        with torch.no_grad():
+            estimates = apply_model(
+                model, torch.from_numpy(prepared[np.newaxis, ...]), device=self.device,
+                overlap=self.overlap, shifts=self.shifts, progress=False,
+            )
+        return stems_from_estimates(
+            estimates[0].cpu().numpy(), model.sources, model_rate, int(sample_rate)
+        )

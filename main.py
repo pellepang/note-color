@@ -2517,6 +2517,20 @@ class _EditorPlayback:
         return base + score_audition.seconds_to_beats(now - self.start_time, self.tempo_bpm)
 
 
+class _PrecomputedSeparator:
+    """Wraps already-separated stems as a `Separator`, for the same reason
+    `_PrecomputedBeatTracker` exists: `run_convert()` runs the slow stage
+    itself so it can report progress and degrade clearly, while
+    `convert()` takes a backend rather than the stems so #132's harness
+    can swap separators."""
+
+    def __init__(self, stems):
+        self.stems = stems
+
+    def separate(self, audio, sample_rate):
+        return self.stems
+
+
 class _PrecomputedBeatTracker:
     """Wraps an already-computed `BeatGrid` as a `BeatTracker`.
 
@@ -2588,10 +2602,29 @@ def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=N
 
     if mode == "band":
         # #129: band mode separates first. Piano mode deliberately does
-        # not -- separation introduces artifacts on an already-clean
-        # signal, and solo piano is the case this converter is genuinely
-        # good at (~0.95 vs ~0.38 onset F1).
-        pass
+        # NOT -- separation introduces artifacts on an already-clean
+        # signal (arXiv 2605.06685 bypasses it behind a --piano-solo flag
+        # for exactly this reason), and solo piano is the case this
+        # converter is genuinely good at (~0.95 vs ~0.38 onset F1).
+        from transcribe_backends import DemucsSeparator
+
+        candidate_separator = DemucsSeparator()
+        try:
+            print("convert: separating stems (the slow step -- "
+                  "~2 minutes per minute of audio) ...")
+            stems = candidate_separator.separate(audio, sample_rate)
+            separator = _PrecomputedSeparator(stems)
+            print(f"convert: {len(stems)} stems: {', '.join(sorted(stems))}")
+        except ConversionUnavailable as exc:
+            # Not fatal, and NOT the same as a missing note model. Without
+            # separation the mix is transcribed directly -- which is H1's
+            # control arm rather than a degraded mode (#129), so saying
+            # "no separation" is an accurate description of what ran, not
+            # an apology.
+            print(f"convert: no separation -- {exc.message}")
+            if exc.install_hint:
+                print(f"  {exc.install_hint}")
+            print("  transcribing the mix directly instead (one track).")
 
     # Beat tracking is wanted whenever anything downstream needs a grid:
     # chord spans segment on beats, and notes quantize against them

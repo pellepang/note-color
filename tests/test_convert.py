@@ -269,3 +269,95 @@ def test_track_can_be_marked_low_confidence():
     track = Track(name="other", low_confidence=True)
     assert track.low_confidence is True
     assert Track(name="bass").low_confidence is False
+
+
+# --- run_convert mode routing (map #123, #129) ----------------------------
+#
+# Regression cover for a real defect: `--mode {band,piano}` was accepted by
+# the CLI and then ignored entirely, so both modes did the same thing. An
+# advertised choice that changes nothing is worse than no choice.
+
+
+def _silent_wav(tmp_path, seconds=0.5, sample_rate=22050):
+    soundfile = pytest.importorskip("soundfile")
+    path = tmp_path / "clip.wav"
+    soundfile.write(str(path), np.zeros(int(seconds * sample_rate)), sample_rate)
+    return path
+
+
+def test_band_mode_attempts_separation(tmp_path, monkeypatch, capsys):
+    pytest.importorskip("librosa")
+    import main
+    import transcribe_backends as tb
+
+    attempted = []
+
+    class Spy:
+        def separate(self, audio, sample_rate):
+            attempted.append(True)
+            return {"bass": audio, "other": audio}
+
+    monkeypatch.setattr(tb, "DemucsSeparator", lambda *a, **k: Spy())
+    main.run_convert(str(_silent_wav(tmp_path)), mode="band",
+                     want_notes=False, want_chords=False, out_path=str(tmp_path / "o.musicxml"))
+    assert attempted, "band mode did not attempt separation"
+
+
+def test_piano_mode_does_not_separate(tmp_path, monkeypatch):
+    """#129: separation introduces artifacts on an already-clean signal,
+    and solo piano is the case this converter is genuinely good at."""
+    pytest.importorskip("librosa")
+    import main
+    import transcribe_backends as tb
+
+    def must_not_be_constructed(*args, **kwargs):
+        raise AssertionError("piano mode constructed a separator")
+
+    monkeypatch.setattr(tb, "DemucsSeparator", must_not_be_constructed)
+    rc = main.run_convert(str(_silent_wav(tmp_path)), mode="piano",
+                          want_notes=False, want_chords=False,
+                          out_path=str(tmp_path / "o.musicxml"))
+    assert rc == 0
+
+
+def test_missing_separation_is_reported_but_not_fatal(tmp_path, monkeypatch, capsys):
+    """Unlike a missing note model, which refuses: without separation the
+    mix is transcribed directly, which is H1's control arm rather than a
+    degraded mode."""
+    pytest.importorskip("librosa")
+    import main
+    import transcribe_backends as tb
+    from transcribe_backends import ConversionUnavailable
+
+    class Absent:
+        def separate(self, audio, sample_rate):
+            raise ConversionUnavailable("Source separation needs Demucs.",
+                                        "pip install -e .[convert]")
+
+    monkeypatch.setattr(tb, "DemucsSeparator", lambda *a, **k: Absent())
+    rc = main.run_convert(str(_silent_wav(tmp_path)), mode="band",
+                          want_notes=False, want_chords=False,
+                          out_path=str(tmp_path / "o.musicxml"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no separation" in out
+    assert "transcribing the mix directly" in out
+
+
+def test_missing_note_model_refuses_rather_than_degrading(tmp_path, monkeypatch):
+    """The asymmetry #129 settled, asserted against its sibling above."""
+    pytest.importorskip("librosa")
+    import main
+    import transcribe_backends as tb
+    from transcribe_backends import ConversionUnavailable
+
+    class Absent:
+        def transcribe(self, audio, sample_rate):
+            raise ConversionUnavailable("Note detection needs onnxruntime.",
+                                        "pip install -e .[convert]")
+
+    monkeypatch.setattr(tb, "BasicPitchTranscriber", lambda *a, **k: Absent())
+    rc = main.run_convert(str(_silent_wav(tmp_path)), mode="piano",
+                          want_notes=True, want_chords=False,
+                          out_path=str(tmp_path / "o.musicxml"))
+    assert rc == 1
