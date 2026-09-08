@@ -18,6 +18,8 @@ from notecolor.analysis.color_map import (
     NOTE_NAMES_FIFTHS, fifths_index, hsl_to_rgb255, hue_for_step,
 )
 from notecolor.gui import theme
+from notecolor.project import edit
+from notecolor.project.bundle import bundle_path, default_projects_dir, save_project
 from notecolor.project.model import AUDIO_TRACK, NoteClip
 
 LANE_H, HEADER_W, RULER_H = 54, 196, 22
@@ -125,11 +127,50 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
 
 
 class Ruler(QtWidgets.QWidget):
+    """Bar numbers, click-to-locate, and drag-to-set-a-loop.
+
+    Clicking a ruler to move the playhead is close to muscle memory, so it is
+    here rather than behind a menu. Dragging sets the loop region, which is the
+    same gesture the `tab` view's `[`/`]` marks express in a terminal -- one
+    concept, two front-ends, per this map's parity rule.
+    """
+
+    located = QtCore.Signal(float)          # beat
+    loop_set = QtCore.Signal(float, float)  # start beat, end beat
+
     def __init__(self, scene):
         super().__init__()
         self.scene, self.offset = scene, 0
+        self.loop = None
+        self._drag_from = None
         self.setFixedHeight(RULER_H)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
+
+    def _beat_at(self, x):
+        return max(0.0, (x + self.offset) / self.scene.px_per_beat)
+
+    def mousePressEvent(self, event):
+        beat = self._beat_at(event.position().x())
+        if event.button() == QtCore.Qt.RightButton:
+            self.loop_set.emit(0.0, 0.0)     # right-click clears the loop
+            return
+        self._drag_from = beat
+        self.located.emit(beat)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_from is None:
+            return
+        beat = self._beat_at(event.position().x())
+        # Order-independent, exactly as the tab view's marks are: dragging
+        # right-to-left means the same thing as left-to-right.
+        self.loop = (min(self._drag_from, beat), max(self._drag_from, beat))
+        self.update()
+
+    def mouseReleaseEvent(self, _event):
+        if self.loop and self.loop[1] - self.loop[0] > 0.05:
+            self.loop_set.emit(*self.loop)
+        self._drag_from = None
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
@@ -145,23 +186,56 @@ class Ruler(QtWidgets.QWidget):
                 p.setPen(theme.TEXT_DIM)
                 p.drawText(x + 3, RULER_H - 9, f"{bar + 1}")
             bar += 1
+        if self.loop and self.loop[1] > self.loop[0]:
+            x1 = int(self.loop[0] * self.scene.px_per_beat - self.offset)
+            x2 = int(self.loop[1] * self.scene.px_per_beat - self.offset)
+            p.fillRect(x1, 0, max(1, x2 - x1), RULER_H - 2, theme.SELECTION)
         p.setPen(theme.RULE)
         p.drawLine(0, RULER_H - 1, self.width(), RULER_H - 1)
         p.end()
 
 
 class TrackHeaders(QtWidgets.QWidget):
+    """Track names and their mute/solo buttons.
+
+    Same discipline as the transport: the rectangles used for hit-testing are
+    the ones used for drawing.
+    """
+
+    toggled = QtCore.Signal(int, str)       # track index, "m" | "s"
+    selected = QtCore.Signal(int)
+
+    LETTERS = ("m", "s", "r")
+
     def __init__(self, project):
         super().__init__()
         self.project = project
+        self.selected_index = 0
+        self.scroll = 0
         self.setFixedWidth(HEADER_W)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+    def _button_rect(self, row, index):
+        return QtCore.QRect(12 + index * 22, row * LANE_H - self.scroll + 24, 18, 14)
+
+    def mousePressEvent(self, event):
+        point = event.position().toPoint()
+        row = int((point.y() + self.scroll) // LANE_H)
+        if not 0 <= row < len(self.project.tracks):
+            return
+        self.selected_index = row
+        self.selected.emit(row)
+        for index, letter in enumerate(self.LETTERS):
+            if letter != "r" and self._button_rect(row, index).contains(point):
+                self.toggled.emit(row, letter)
+                return
+        self.update()
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
         p.fillRect(self.rect(), theme.CHROME)
         for row, track in enumerate(self.project.tracks):
-            y = row * LANE_H
+            y = row * LANE_H - self.scroll
             if row % 2:
                 p.fillRect(0, y, HEADER_W, LANE_H, theme.CHROME_DEEP)
             p.setPen(theme.RULE)
@@ -176,9 +250,11 @@ class TrackHeaders(QtWidgets.QWidget):
             p.setFont(theme.font(7))
             p.drawText(HEADER_W - 46, y + 17,
                        "perc" if track.color_pitch_class is None else "note")
+            if row == self.selected_index:
+                p.fillRect(0, y, 3, LANE_H - 1, theme.PLAYHEAD)
             for i, (letter, on) in enumerate((("m", track.muted), ("s", track.soloed),
                                               ("r", False))):
-                box = QtCore.QRect(12 + i * 22, y + 24, 18, 14)
+                box = self._button_rect(row, i)
                 p.setPen(theme.RULE_STRONG)
                 p.drawRect(box)
                 p.setPen(theme.ARMED if on else theme.TEXT_FAINT)
@@ -189,6 +265,23 @@ class TrackHeaders(QtWidgets.QWidget):
 
 
 class TransportBar(QtWidgets.QWidget):
+    """Transport controls. Buttons are real hit targets, not painted decor.
+
+    Their rectangles are computed once in `_button_rects()` and used for both
+    drawing and hit-testing, so what is clickable is exactly what is drawn --
+    the two cannot drift apart the way parallel geometry always eventually
+    does.
+    """
+
+    #: (id, glyph, tooltip) in the order every transport in the world has them.
+    BUTTONS = (("rewind", "|◀", "return to start (home)"),
+               ("stop", "■", "stop (space)"),
+               ("play", "▶", "play (space)"),
+               ("record", "●", "record — not implemented yet"),
+               ("loop", "⟲", "toggle loop (l)"))
+
+    clicked = QtCore.Signal(str)
+
     def __init__(self, project):
         super().__init__()
         self.project = project
@@ -196,6 +289,35 @@ class TransportBar(QtWidgets.QWidget):
         self.message = ""
         self.setFixedHeight(38)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setMouseTracking(True)
+        self._hover = None
+
+    def _button_rects(self):
+        return {name: QtCore.QRect(10 + i * 30, 8, 26, 22)
+                for i, (name, _glyph, _tip) in enumerate(self.BUTTONS)}
+
+    def _at(self, point):
+        for name, rect in self._button_rects().items():
+            if rect.contains(point):
+                return name
+        return None
+
+    def mousePressEvent(self, event):
+        name = self._at(event.position().toPoint())
+        if name:
+            self.clicked.emit(name)
+
+    def mouseMoveEvent(self, event):
+        name = self._at(event.position().toPoint())
+        if name != self._hover:
+            self._hover = name
+            tips = {n: t for n, _g, t in self.BUTTONS}
+            self.setToolTip(tips.get(name, ""))
+            self.update()
+
+    def leaveEvent(self, _event):
+        self._hover = None
+        self.update()
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
@@ -204,13 +326,17 @@ class TransportBar(QtWidgets.QWidget):
         p.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
 
         playing = bool(self.snapshot and self.snapshot.playing)
+        looping = bool(self.snapshot and self.snapshot.loop_enabled)
+        lit = {"stop": not playing, "play": playing, "loop": looping}
+        rects = self._button_rects()
         p.setFont(theme.font(10))
-        for i, (glyph, lit) in enumerate((("|◀", False), ("■", not playing),
-                                          ("▶", playing), ("●", False))):
-            box = QtCore.QRect(10 + i * 30, 8, 26, 22)
+        for name, glyph, _tip in self.BUTTONS:
+            box = rects[name]
+            if name == self._hover:
+                p.fillRect(box, theme.SELECTION)
             p.setPen(theme.RULE_STRONG)
             p.drawRect(box)
-            p.setPen(theme.PLAYHEAD if lit else theme.TEXT_FAINT)
+            p.setPen(theme.PLAYHEAD if lit.get(name) else theme.TEXT_FAINT)
             p.drawText(box, QtCore.Qt.AlignCenter, glyph)
 
         beat = self.snapshot.beat if self.snapshot else 0.0
@@ -251,13 +377,26 @@ class StudioWindow(QtWidgets.QMainWindow):
     #: so a slow repaint looks choppy but is never wrong.
     REPAINT_MS = 16
 
-    def __init__(self, project, transport=None, player=None, audio_error=None):
+    #: Zoom limits, in pixels per beat. Below the floor a bar is a few pixels
+    #: wide and nothing is clickable; above the ceiling one screen holds less
+    #: than a bar. Both are clamps, not wraps -- the convention this repo's
+    #: numeric settings already follow.
+    MIN_PX_PER_BEAT, MAX_PX_PER_BEAT = 4.0, 220.0
+    ZOOM_STEP = 1.25
+
+    def __init__(self, project, transport=None, player=None, audio_error=None,
+                 path=None):
         super().__init__()
         self.project = project
         self.transport = transport
         self.player = player
         self.audio_error = audio_error
+        self.path = path
+        self.edits = edit.EditStack()
+        self.saved_revision = 0
+        self._status = ""
         self.setWindowTitle(f"visualnote studio — {project.name}")
+        self.setAcceptDrops(True)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.resize(1280, 720)
         self._build()
@@ -273,6 +412,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         outer.setSpacing(0)
 
         self.transport_bar = TransportBar(self.project)
+        self.transport_bar.clicked.connect(self._transport_action)
         if self.audio_error:
             self.transport_bar.message = f"no audio — {self.audio_error}"
         outer.addWidget(self.transport_bar)
@@ -292,10 +432,14 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         self.ruler = Ruler(self.scene)
+        self.ruler.located.connect(self._locate)
+        self.ruler.loop_set.connect(self._set_loop)
         self.headers = TrackHeaders(self.project)
+        self.headers.toggled.connect(self._toggle_track)
+        self.headers.selected.connect(lambda _i: self.headers.update())
         self.view.horizontalScrollBar().valueChanged.connect(self._sync_ruler)
-        self.view.verticalScrollBar().valueChanged.connect(
-            lambda _v: self.headers.update())
+        self.view.verticalScrollBar().valueChanged.connect(self._sync_headers)
+        self.view.viewport().installEventFilter(self)
 
         corner = QtWidgets.QWidget()
         corner.setFixedSize(HEADER_W, RULER_H)
@@ -323,6 +467,161 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.ruler.offset = value
         self.ruler.update()
 
+    def _sync_headers(self, value):
+        self.headers.scroll = value
+        self.headers.update()
+
+    # -- actions ----------------------------------------------------------
+
+    def _transport_action(self, name):
+        if self.transport is None:
+            return
+        if name == "play":
+            self.transport.play()
+        elif name == "stop":
+            self.transport.stop()
+        elif name == "rewind":
+            self.transport.stop()
+            self.transport.locate(0.0)
+        elif name == "loop":
+            self._toggle_loop()
+        elif name == "record":
+            self.say("record is not implemented yet")
+
+    def _locate(self, beat):
+        if self.transport is not None:
+            self.transport.locate(self.snap(beat))
+
+    def snap(self, beat):
+        """Nearest grid position. The grid is one beat, or a bar when zoomed
+        far enough out that a beat is only a few pixels wide -- snapping to
+        something you cannot see is indistinguishable from a bug."""
+        step = 1.0 if self.scene.px_per_beat >= 12 else self.scene.beats_per_bar
+        return round(beat / step) * step
+
+    def _set_loop(self, start, end):
+        if self.transport is None:
+            return
+        if end <= start:
+            self.ruler.loop = None
+            self.transport.set_loop(0.0, 0.0, enabled=False)
+            self.say("loop cleared")
+            return
+        start, end = self.snap(start), self.snap(end)
+        if end <= start:
+            end = start + self.scene.beats_per_bar
+        self.ruler.loop = (start, end)
+        self.transport.set_loop(start, end, enabled=True)
+        self.say(f"loop {start:g}..{end:g}")
+
+    def _toggle_loop(self):
+        if self.transport is None:
+            return
+        snapshot = self.transport.snapshot()
+        if snapshot.loop_enabled:
+            self.transport.set_loop(snapshot.loop_start_beat,
+                                    snapshot.loop_end_beat, enabled=False)
+            self.say("loop off")
+        elif self.ruler.loop:
+            self.transport.set_loop(*self.ruler.loop, enabled=True)
+            self.say("loop on")
+        else:
+            self.say("drag on the ruler to set a loop first")
+
+    def _toggle_track(self, index, letter):
+        track = self.project.tracks[index]
+        command = (edit.SetTrackMute(track, not track.muted) if letter == "m"
+                   else edit.SetTrackSolo(track, not track.soloed))
+        self.run(command)
+
+    def run(self, command):
+        """Apply an edit through the undo stack, and tell playback about it."""
+        self.edits.run(command)
+        self._after_edit(command.name)
+
+    def _after_edit(self, name):
+        if self.player is not None:
+            self.player.refresh()
+        self.headers.update()
+        self.scene.rebuild()
+        self.say(name)
+
+    def undo(self):
+        command = self.edits.undo()
+        self._after_edit(f"undo {command.name}" if command else "nothing to undo")
+
+    def redo(self):
+        command = self.edits.redo()
+        self._after_edit(f"redo {command.name}" if command else "nothing to redo")
+
+    # -- zoom -------------------------------------------------------------
+
+    def zoom(self, factor, anchor_beat=None):
+        """Zoom horizontally, keeping `anchor_beat` under the same pixel.
+
+        Without an anchor, zooming walks the music sideways out of view, which
+        is the difference between a zoom that feels like a lens and one that
+        feels like a scroll accident.
+        """
+        before = self.scene.px_per_beat
+        after = max(self.MIN_PX_PER_BEAT,
+                    min(self.MAX_PX_PER_BEAT, before * factor))
+        if after == before:
+            return
+        bar = self.view.horizontalScrollBar()
+        if anchor_beat is None:
+            anchor_beat = (bar.value() + self.view.viewport().width() / 2) / before
+        offset_px = anchor_beat * before - bar.value()
+        self.scene.px_per_beat = after
+        self.scene.rebuild()
+        if self.transport is not None:
+            self.scene.move_playhead(self.transport.snapshot().beat)
+        bar.setValue(int(max(0, anchor_beat * after - offset_px)))
+        self.ruler.update()
+        self.say(f"zoom {after:.0f} px/beat")
+
+    def eventFilter(self, watched, event):
+        if (watched is self.view.viewport()
+                and event.type() == QtCore.QEvent.Wheel
+                and event.modifiers() & QtCore.Qt.ControlModifier):
+            beat = ((self.view.horizontalScrollBar().value()
+                     + event.position().x()) / self.scene.px_per_beat)
+            self.zoom(self.ZOOM_STEP if event.angleDelta().y() > 0
+                      else 1 / self.ZOOM_STEP, beat)
+            return True
+        return super().eventFilter(watched, event)
+
+    # -- files ------------------------------------------------------------
+
+    @property
+    def dirty(self):
+        return self.edits.revision != self.saved_revision
+
+    def save(self, path=None):
+        target = path or self.path
+        if target is None:
+            return self.save_as()
+        try:
+            self.path = save_project(self.project, target)
+        except OSError as exc:
+            self.say(f"save failed: {exc}")
+            return False
+        self.saved_revision = self.edits.revision
+        self.say(f"saved {os.path.basename(self.path)}")
+        return True
+
+    def save_as(self):
+        base = os.path.join(default_projects_dir(), f"{self.project.name}")
+        os.makedirs(default_projects_dir(), exist_ok=True)
+        chosen, _filter = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save project", base, "VisualNote project (*.ncproj)")
+        return self.save(bundle_path(chosen)) if chosen else False
+
+    def say(self, message):
+        self._status = message
+        self.transport_bar.message = message
+        self.transport_bar.update()
+
     def _refresh(self):
         if self.transport is None:
             return
@@ -343,16 +642,65 @@ class StudioWindow(QtWidgets.QMainWindow):
             bar.setValue(int(max(0, x - width * 0.25)))
 
     def keyPressEvent(self, event):
-        key = event.key()
-        if key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
+        key, mods = event.key(), event.modifiers()
+        control = bool(mods & QtCore.Qt.ControlModifier)
+        shift = bool(mods & QtCore.Qt.ShiftModifier)
+
+        if control and key == QtCore.Qt.Key_S:
+            self.save_as() if shift else self.save()
+        elif control and key == QtCore.Qt.Key_Z:
+            self.redo() if shift else self.undo()
+        elif control and key == QtCore.Qt.Key_Y:
+            self.redo()
+        elif key in (QtCore.Qt.Key_Plus, QtCore.Qt.Key_Equal):
+            self.zoom(self.ZOOM_STEP)
+        elif key == QtCore.Qt.Key_Minus:
+            self.zoom(1 / self.ZOOM_STEP)
+        elif key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
             self.close()
+        elif key == QtCore.Qt.Key_M:
+            self._toggle_track(self.headers.selected_index, "m")
+        elif key == QtCore.Qt.Key_S:
+            self._toggle_track(self.headers.selected_index, "s")
+        elif key == QtCore.Qt.Key_L:
+            self._toggle_loop()
+        elif key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
+            step = -1 if key == QtCore.Qt.Key_Up else 1
+            count = max(1, len(self.project.tracks))
+            self.headers.selected_index = (self.headers.selected_index + step) % count
+            self.headers.update()
         elif self.transport is None:
             return
         elif key == QtCore.Qt.Key_Space:
-            if self.transport.snapshot().playing:
-                self.transport.stop()
-            else:
-                self.transport.play()
+            self._transport_action("stop" if self.transport.snapshot().playing
+                                   else "play")
         elif key == QtCore.Qt.Key_Home:
-            self.transport.stop()
-            self.transport.locate(0.0)
+            self._transport_action("rewind")
+        elif key == QtCore.Qt.Key_End:
+            self.transport.locate(self.project.end_beat)
+        elif key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+            beats = self.scene.beats_per_bar if shift else 1.0
+            direction = -1 if key == QtCore.Qt.Key_Left else 1
+            self.transport.locate(max(0.0, self.transport.snapshot().beat
+                                      + direction * beats))
+
+    def closeEvent(self, event):
+        """Refuse to lose work silently.
+
+        The score editor already requires a second press to quit while dirty;
+        this is the same promise in a window's idiom, and it is the one place
+        in this app where closing can destroy something.
+        """
+        if not self.dirty:
+            return event.accept()
+        choice = QtWidgets.QMessageBox.question(
+            self, "Unsaved changes",
+            f"{self.project.name} has unsaved changes.",
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel)
+        if choice == QtWidgets.QMessageBox.Save:
+            event.accept() if self.save() else event.ignore()
+        elif choice == QtWidgets.QMessageBox.Discard:
+            event.accept()
+        else:
+            event.ignore()

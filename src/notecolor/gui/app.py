@@ -96,7 +96,7 @@ def main(argv=None):
 
     transport, player, engine, error = start_audio(project)
     window = StudioWindow(project, transport=transport, player=player,
-                          audio_error=error)
+                          audio_error=error, path=args.file)
     window.show()
     try:
         return app.exec()
