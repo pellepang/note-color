@@ -1,24 +1,30 @@
-"""VisualNote Studio skeleton -- a throwaway look at the arrange window.
+"""VisualNote Studio skeleton -- arrange window, second pass.
 
-Wayfinder map #145, ticket #152. Nothing here is meant to be kept: it exists
-so there is something concrete to react to before the real window is built.
+Wayfinder map #145, ticket #152. Throwaway; nothing here is meant to be kept.
 
-Two questions it is asking:
+The first pass was rejected for looking like generic modern software. This one
+follows a stated visual language, in `notecolor/gui/theme.py`:
 
-1. Does this read as a DAW? Transport, track headers, arrange canvas with a
-   live ruler and moving playhead, a bottom editor pane, and mixer/inspector
-   docks that are deliberately empty.
-2. **How does this app's fifths colour palette coexist with DAW chrome?**
-   Colour on every note is the entire point of the project, but a DAW surface
-   is designed to recede, and saturated per-pitch hues fight it. Two takes,
-   toggled live -- see the keys below.
+- **Saturation means pitch, and nothing else.** Every surface, label, rule and
+  button is muted ink. The only vivid things on screen are notes, carrying this
+  app's own circle-of-fifths hue -- so a C is the colour a C is in `tab`, in an
+  exported score and on the synth keyboard. Colour is information, not paint.
+- **Kanagawa** ink-wash palette, **JetBrains Mono Nerd Font** everywhere
+  (labels included -- a DAW is a grid of numbers, and this project's other
+  front-end is a terminal; they should look like one program).
+- **Translucent**, so the compositor shows through. Square corners, hairlines,
+  no gradients, no shadows.
 
-Keys:  C  colour take (clip-level <-> note-level)
-       T  chrome (graphite <-> silver, the Logic 9 register)
-       Space  run/stop the playhead        Q / Esc  quit
+That rule also answers the question the first pass was asking. Clip-level
+colour is out: a clip is not a pitch, so it may not be vivid. Colour lives on
+the notes inside, which means the arrangement shows you *harmony* rather than
+track identity.
+
+Keys:  Space  run/stop the playhead      B  toggle the note-colour layer
+       Q / Esc  quit
 
 Run:  .venv/bin/python prototypes/visualnote-studio-skeleton/demo.py
-      ... --shot out.png   renders one frame offscreen and exits
+      ... --shot out.png   renders offscreen and exits
 """
 
 import os
@@ -34,159 +40,98 @@ if "--shot" in sys.argv and not (os.environ.get("WAYLAND_DISPLAY") or os.environ
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from notecolor.analysis.color_map import (  # noqa: E402
-    NOTE_NAMES_FIFTHS,
-    fifths_index,
-    hsl_to_rgb255,
-    hue_for_step,
+    NOTE_NAMES_FIFTHS, fifths_index, hsl_to_rgb255, hue_for_step,
 )
+from notecolor.gui import theme  # noqa: E402
 
-# --------------------------------------------------------------------------
-# Palette
-# --------------------------------------------------------------------------
-# Two chromes rather than one, because "old Logic Pro" is genuinely ambiguous:
-# Logic 9 was a light silver-metallic window, while every DAW since has gone
-# dark. The colour question below answers differently against each, so both
-# are here to be compared rather than guessed at.
-
-GRAPHITE = dict(
-    name="graphite",
-    window="#1e2024", chrome="#2b2e33", chrome_hi="#34383e",
-    ruler="#26292e", lane_a="#212429", lane_b="#1c1f23",
-    grid="#2f333a", grid_bar="#3d434c", text="#c8ccd2", text_dim="#7b828c",
-    lcd="#10161a", lcd_text="#8fe3c0", playhead="#ff5f56", accent="#4c8dff",
-    clip_neutral="#3a3f47", clip_edge="#4a5058",
-)
-SILVER = dict(
-    name="silver",
-    window="#b9bcc1", chrome="#d2d5da", chrome_hi="#e4e7ea",
-    ruler="#c6c9cf", lane_a="#9fa3a9", lane_b="#989ca2",
-    grid="#8b8f95", grid_bar="#75797f", text="#22252a", text_dim="#5c6views",
-    lcd="#1b2320", lcd_text="#9ff0c8", playhead="#c8301f", accent="#2f6fd0",
-    clip_neutral="#8e939a", clip_edge="#6f747b",
-)
-SILVER["text_dim"] = "#4d5157"
-
-CLIP_COLOUR, NOTE_COLOUR = "clip", "note"
-
-BARS = 32
-BEATS_PER_BAR = 4
-PX_PER_BEAT = 34
-LANE_H = 62
-HEADER_W = 186
-RULER_H = 26
+BARS, BEATS_PER_BAR, PX_PER_BEAT = 32, 4, 34
+LANE_H, HEADER_W, RULER_H = 54, 196, 22
 
 
-def pitch_rgb(pitch_class, lightness=0.5):
-    """This app's own fifths hue for a pitch class, at a chosen lightness --
-    the same mapping `tab`, the score writer and the synth keys already use, so
-    a C here is the colour a detected C is everywhere else."""
-    hue = hue_for_step(fifths_index(pitch_class))
-    return hsl_to_rgb255(hue, 0.62, lightness)
+def pitch_colour(pitch_class, lightness=0.56, alpha=255):
+    """The one place a saturated colour is allowed, and it always means pitch."""
+    rgb = hsl_to_rgb255(hue_for_step(fifths_index(pitch_class)), 0.55, lightness)
+    return QtGui.QColor(*rgb, alpha)
 
-
-def qcolor(pitch_class, lightness=0.5):
-    return QtGui.QColor(*pitch_rgb(pitch_class, lightness))
-
-
-# --------------------------------------------------------------------------
-# Fake content -- one bar of "music" per clip, enough to colour
-# --------------------------------------------------------------------------
 
 PARTS = [
-    ("Vocals",  7, [(0, 7), (2, 11), (4, 2), (6, 7), (8, 4)]),
-    ("Guitar",  4, [(0, 4), (1, 9), (3, 0), (5, 4), (7, 11), (9, 2)]),
-    ("Bass",    0, [(0, 0), (2, 0), (4, 7), (6, 5), (8, 0)]),
-    ("Keys",    9, [(0, 9), (2, 4), (4, 0), (6, 9), (8, 2), (10, 7)]),
-    ("Drums",  None, [(i, None) for i in range(0, 12, 1)]),
+    ("VOX",   7, [(0, 7), (2, 11), (4, 2), (6, 7), (8, 4), (10, 9)]),
+    ("GTR",   4, [(0, 4), (1, 9), (3, 0), (5, 4), (7, 11), (9, 2), (11, 4)]),
+    ("BASS",  0, [(0, 0), (2, 0), (4, 7), (6, 5), (8, 0), (10, 5)]),
+    ("KEYS",  9, [(0, 9), (2, 4), (4, 0), (6, 9), (8, 2), (10, 7)]),
+    ("DRUMS", None, [(i, None) for i in range(12)]),
 ]
-CLIPS = [
-    (0, 0, 8), (0, 12, 12),
-    (1, 4, 12), (1, 20, 8),
-    (2, 0, 28),
-    (3, 8, 16),
-    (4, 0, 32),
-]
+CLIPS = [(0, 0, 8), (0, 12, 12), (1, 4, 12), (1, 20, 8),
+         (2, 0, 28), (3, 8, 16), (4, 0, 32)]
 
 
 class ArrangeScene(QtWidgets.QGraphicsScene):
-    """The arrange canvas.
+    """The arrange canvas (QGraphicsView per ticket #147)."""
 
-    `QGraphicsView`/`QGraphicsScene` per ticket #147's research: its default
-    `MinimalViewportUpdate` already scopes repaints to what changed, which is
-    what makes a playhead cheap to move across a mostly-static background
-    without hand-rolling the double-buffering Qtractor does.
-    """
-
-    def __init__(self, theme, take):
+    def __init__(self):
         super().__init__()
-        self.theme, self.take = theme, take
+        self.show_notes = True
         self.width_px = BARS * BEATS_PER_BAR * PX_PER_BEAT
         self.height_px = len(PARTS) * LANE_H
         self.setSceneRect(0, 0, self.width_px, self.height_px)
         self.playhead = None
         self.rebuild()
 
+    def _line(self, x1, y1, x2, y2, colour, width=1):
+        pen = QtGui.QPen(colour)
+        pen.setWidth(width)
+        pen.setCosmetic(True)
+        return self.addLine(x1, y1, x2, y2, pen)
+
     def rebuild(self):
         self.clear()
-        t = self.theme
         for row in range(len(PARTS)):
-            colour = t["lane_a"] if row % 2 == 0 else t["lane_b"]
             self.addRect(0, row * LANE_H, self.width_px, LANE_H,
-                         QtGui.QPen(QtCore.Qt.NoPen), QtGui.QBrush(QtGui.QColor(colour)))
+                         QtGui.QPen(QtCore.Qt.NoPen),
+                         QtGui.QBrush(theme.LANE if row % 2 == 0 else theme.LANE_ALT))
+            self._line(0, (row + 1) * LANE_H, self.width_px, (row + 1) * LANE_H, theme.RULE)
         for beat in range(BARS * BEATS_PER_BAR + 1):
             x = beat * PX_PER_BEAT
-            bar_line = beat % BEATS_PER_BAR == 0
-            pen = QtGui.QPen(QtGui.QColor(t["grid_bar"] if bar_line else t["grid"]))
-            pen.setWidth(1)
-            self.addLine(x, 0, x, self.height_px, pen)
+            on_bar = beat % BEATS_PER_BAR == 0
+            self._line(x, 0, x, self.height_px,
+                       theme.RULE_STRONG if on_bar else theme.RULE)
         for row, start, length in CLIPS:
             self._clip(row, start, length)
-        pen = QtGui.QPen(QtGui.QColor(t["playhead"]))
-        pen.setWidth(2)
-        self.playhead = self.addLine(0, 0, 0, self.height_px, pen)
+        self.playhead = self._line(0, 0, 0, self.height_px, theme.PLAYHEAD)
         self.playhead.setZValue(100)
 
     def _clip(self, row, start_beat, length_beats):
-        t, name, pc, notes = self.theme, *PARTS[row]
-        x, y = start_beat * PX_PER_BEAT, row * LANE_H + 5
-        w, h = length_beats * PX_PER_BEAT - 2, LANE_H - 12
+        name, pitch_class, notes = PARTS[row]
+        x, y = start_beat * PX_PER_BEAT, row * LANE_H + 4
+        w, h = length_beats * PX_PER_BEAT - 1, LANE_H - 9
 
-        if self.take == CLIP_COLOUR and pc is not None:
-            body = qcolor(pc, 0.34)
-            edge = qcolor(pc, 0.58)
-        else:
-            body = QtGui.QColor(t["clip_neutral"])
-            edge = QtGui.QColor(t["clip_edge"])
-
+        # The clip body is muted ink. A clip is not a pitch, so it is not vivid.
         rect = QtWidgets.QGraphicsRectItem(x, y, w, h)
-        rect.setBrush(QtGui.QBrush(body))
-        rect.setPen(QtGui.QPen(edge, 1))
+        rect.setBrush(QtGui.QBrush(theme.CLIP_BODY))
+        rect.setPen(QtGui.QPen(theme.CLIP_EDGE, 1))
         self.addItem(rect)
+        head = QtWidgets.QGraphicsRectItem(x, y, w, 12)
+        head.setBrush(QtGui.QBrush(theme.CLIP_HEAD))
+        head.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+        self.addItem(head)
+        label = self.addText(name.lower(), theme.font(7))
+        label.setDefaultTextColor(theme.TEXT_DIM)
+        label.setPos(x + 2, y - 3)
 
-        strip = QtWidgets.QGraphicsRectItem(x, y, w, 13)
-        strip.setBrush(QtGui.QBrush(edge))
-        strip.setPen(QtGui.QPen(QtCore.Qt.NoPen))
-        self.addItem(strip)
-        label = self.addText(name, QtGui.QFont("Sans", 7))
-        label.setDefaultTextColor(QtGui.QColor("#12141a"))
-        label.setPos(x + 3, y - 2)
-
-        # The notes inside. In the note-level take this is where all the colour
-        # lives, so a clip's harmony is legible from the arrangement itself.
-        inner_top, inner_h = y + 16, h - 20
+        if not self.show_notes:
+            return
+        top, span = y + 15, h - 19
         for beat_off, note_pc in notes:
             if beat_off >= length_beats:
                 continue
-            nx = x + beat_off * PX_PER_BEAT + 2
-            nw = PX_PER_BEAT - 5
-            if note_pc is None:                       # drums: no pitch to be honest about
-                ny, nh, colour = inner_top + inner_h * 0.5, 3, QtGui.QColor(t["text_dim"])
+            nx, nw = x + beat_off * PX_PER_BEAT + 2, PX_PER_BEAT - 6
+            if note_pc is None:
+                # Percussion has no pitch to be honest about, so it gets no
+                # hue -- the same posture the synth tool's pads take.
+                ny, nh, colour = top + span * 0.55, 2, theme.TEXT_FAINT
             else:
-                slot = fifths_index(note_pc) / 12.0
-                ny = inner_top + inner_h * (1.0 - slot) - 3
-                nh = 4
-                colour = (qcolor(note_pc, 0.62) if self.take == NOTE_COLOUR
-                          else QtGui.QColor(255, 255, 255, 150))
+                ny = top + span * (1.0 - fifths_index(note_pc) / 12.0) - 2
+                nh, colour = 3, pitch_colour(note_pc)
             bar = QtWidgets.QGraphicsRectItem(nx, ny, nw, nh)
             bar.setBrush(QtGui.QBrush(colour))
             bar.setPen(QtGui.QPen(QtCore.Qt.NoPen))
@@ -198,165 +143,189 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
 
 
 class Ruler(QtWidgets.QWidget):
-    def __init__(self, theme):
+    def __init__(self):
         super().__init__()
-        self.theme, self.offset = theme, 0
+        self.offset = 0
         self.setFixedHeight(RULER_H)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
-        t = self.theme
-        p.fillRect(self.rect(), QtGui.QColor(t["ruler"]))
-        p.setPen(QtGui.QColor(t["text_dim"]))
-        f = QtGui.QFont("Sans", 7)
-        p.setFont(f)
+        p.fillRect(self.rect(), theme.CHROME_DEEP)
+        p.setFont(theme.font(7))
         for bar in range(BARS + 1):
             x = bar * BEATS_PER_BAR * PX_PER_BEAT - self.offset
-            if -40 < x < self.width() + 40:
-                p.drawLine(x, RULER_H - 8, x, RULER_H)
-                p.drawText(x + 3, RULER_H - 11, str(bar + 1))
+            if not -40 < x < self.width() + 40:
+                continue
+            p.setPen(theme.RULE_STRONG)
+            p.drawLine(x, RULER_H - 6, x, RULER_H)
+            p.setPen(theme.TEXT_DIM)
+            p.drawText(x + 3, RULER_H - 9, f"{bar + 1}")
+        p.setPen(theme.RULE)
+        p.drawLine(0, RULER_H - 1, self.width(), RULER_H - 1)
         p.end()
 
 
 class TrackHeaders(QtWidgets.QWidget):
-    def __init__(self, theme, take):
+    def __init__(self):
         super().__init__()
-        self.theme, self.take = theme, take
         self.setFixedWidth(HEADER_W)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.Antialiasing)
-        t = self.theme
-        p.fillRect(self.rect(), QtGui.QColor(t["chrome"]))
-        for row, (name, pc, _notes) in enumerate(PARTS):
+        p.fillRect(self.rect(), theme.CHROME)
+        for row, (name, pitch_class, _notes) in enumerate(PARTS):
             y = row * LANE_H
-            p.fillRect(0, y, HEADER_W, LANE_H - 1, QtGui.QColor(t["chrome_hi"] if row % 2 else t["chrome"]))
-            swatch = QtGui.QColor(t["text_dim"]) if pc is None else qcolor(pc, 0.5)
-            p.fillRect(0, y, 5, LANE_H - 1, swatch)
-            p.setPen(QtGui.QColor(t["text"]))
-            p.setFont(QtGui.QFont("Sans", 9, QtGui.QFont.DemiBold))
-            p.drawText(16, y + 20, name)
-            for i, (letter, on) in enumerate((("M", False), ("S", False), ("R", row == 0))):
-                bx = 16 + i * 26
-                box = QtCore.QRect(bx, y + 30, 22, 16)
-                p.fillRect(box, QtGui.QColor(t["playhead"] if on else t["window"]))
-                p.setPen(QtGui.QColor("#ffffff" if on else t["text_dim"]))
-                p.setFont(QtGui.QFont("Sans", 7, QtGui.QFont.Bold))
+            if row % 2:
+                p.fillRect(0, y, HEADER_W, LANE_H, theme.CHROME_DEEP)
+            p.setPen(theme.RULE)
+            p.drawLine(0, y + LANE_H - 1, HEADER_W, y + LANE_H - 1)
+
+            # A 2px pitch tick, not a colour block: it refers to the note
+            # system, so it is allowed a hue -- but it is not the loudest
+            # thing in the row.
+            if pitch_class is not None:
+                p.fillRect(0, y + 6, 2, LANE_H - 13, pitch_colour(pitch_class))
+
+            p.setPen(theme.TEXT)
+            p.setFont(theme.font(9, bold=True))
+            p.drawText(12, y + 17, name)
+            p.setPen(theme.TEXT_FAINT)
+            p.setFont(theme.font(7))
+            p.drawText(HEADER_W - 46, y + 17,
+                       f"{'note' if pitch_class is not None else 'perc'}")
+            p.setFont(theme.font(7))
+            for i, (letter, on) in enumerate((("m", False), ("s", False), ("r", row == 0))):
+                bx = 12 + i * 22
+                box = QtCore.QRect(bx, y + 24, 18, 14)
+                p.setPen(theme.RULE_STRONG)
+                p.drawRect(box)
+                p.setPen(theme.ARMED if on else theme.TEXT_FAINT)
                 p.drawText(box, QtCore.Qt.AlignCenter, letter)
+        p.setPen(theme.RULE_STRONG)
+        p.drawLine(HEADER_W - 1, 0, HEADER_W - 1, self.height())
         p.end()
 
 
 class Transport(QtWidgets.QWidget):
-    def __init__(self, theme):
+    def __init__(self):
         super().__init__()
-        self.theme, self.beat = theme, 0.0
-        self.setFixedHeight(56)
+        self.beat, self.running = 0.0, True
+        self.setFixedHeight(38)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
-        p.setRenderHint(QtGui.QPainter.Antialiasing)
-        t = self.theme
-        grad = QtGui.QLinearGradient(0, 0, 0, self.height())
-        grad.setColorAt(0, QtGui.QColor(t["chrome_hi"]))
-        grad.setColorAt(1, QtGui.QColor(t["chrome"]))
-        p.fillRect(self.rect(), grad)
+        p.fillRect(self.rect(), theme.CHROME)
+        p.setPen(theme.RULE_STRONG)
+        p.drawLine(0, self.height() - 1, self.width(), self.height() - 1)
 
-        for i, glyph in enumerate("⏮⏹▶⏺⟳"):
-            box = QtCore.QRect(14 + i * 38, 12, 32, 30)
-            p.setBrush(QtGui.QColor(t["window"]))
-            p.setPen(QtGui.QPen(QtGui.QColor(t["grid_bar"]), 1))
-            p.drawRoundedRect(box, 4, 4)
-            p.setPen(QtGui.QColor(t["playhead"] if glyph == "⏺" else t["text"]))
-            p.setFont(QtGui.QFont("Sans", 12))
+        p.setFont(theme.font(10))
+        for i, (glyph, armed) in enumerate((("|◀", False), ("■", False),
+                                            ("▶", False), ("●", True), ("⟲", False))):
+            box = QtCore.QRect(10 + i * 30, 8, 26, 22)
+            p.setPen(theme.RULE_STRONG)
+            p.drawRect(box)
+            p.setPen(theme.ARMED if armed else theme.TEXT_DIM)
             p.drawText(box, QtCore.Qt.AlignCenter, glyph)
 
-        lcd = QtCore.QRect(230, 10, 250, 36)
-        p.setBrush(QtGui.QColor(t["lcd"]))
-        p.setPen(QtGui.QPen(QtGui.QColor(t["grid_bar"]), 1))
-        p.drawRoundedRect(lcd, 3, 3)
         bar = int(self.beat // BEATS_PER_BAR) + 1
         beat_in_bar = int(self.beat % BEATS_PER_BAR) + 1
-        p.setPen(QtGui.QColor(t["lcd_text"]))
-        p.setFont(QtGui.QFont("Monospace", 13, QtGui.QFont.Bold))
-        p.drawText(lcd.adjusted(10, 0, 0, 0), QtCore.Qt.AlignVCenter,
-                   f"{bar:>3} {beat_in_bar} 1 1")
-        p.setFont(QtGui.QFont("Monospace", 8))
-        p.drawText(lcd.adjusted(168, 0, 0, 0), QtCore.Qt.AlignVCenter, "120.00\n4/4")
+        tick = int((self.beat % 1.0) * 960)
+        readouts = [("position", f"{bar:03d}.{beat_in_bar}.{tick:03d}"),
+                    ("tempo", "120.00"), ("sig", "4/4")]
+        x = 176
+        for label, value in readouts:
+            p.setPen(theme.TEXT_FAINT)
+            p.setFont(theme.font(6))
+            p.drawText(x, 15, label.upper())
+            p.setPen(theme.TEXT)
+            p.setFont(theme.font(11, bold=True))
+            p.drawText(x, 30, value)
+            x += max(76, len(value) * 9 + 22)
+            p.setPen(theme.RULE)
+            p.drawLine(x - 14, 8, x - 14, 30)
 
-        p.setPen(QtGui.QColor(t["text_dim"]))
-        p.setFont(QtGui.QFont("Sans", 8))
-        p.drawText(502, 32, "C  colour take     T  chrome     Space  play     Q  quit")
+        p.setPen(theme.TEXT_FAINT)
+        p.setFont(theme.font(7))
+        p.drawText(x, 24, "space  play      b  notes      q  quit")
         p.end()
 
 
 class EditorPane(QtWidgets.QWidget):
-    """The bottom editor pane -- a piano roll, sketched only."""
+    """Bottom editor pane -- piano roll, sketched."""
 
-    def __init__(self, theme, take):
+    def __init__(self):
         super().__init__()
-        self.theme, self.take = theme, take
         self.setMinimumHeight(150)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
-        t = self.theme
-        p.fillRect(self.rect(), QtGui.QColor(t["lane_b"]))
-        key_w, row_h = 54, 13
-        for i in range(24):
-            pc = (60 + 23 - i) % 12
+        p.fillRect(self.rect(), theme.CANVAS)
+        p.setPen(theme.RULE_STRONG)
+        p.drawLine(0, 0, self.width(), 0)
+        key_w, row_h = 46, 13
+        p.setFont(theme.font(6))
+        for i in range(22):
+            pc = (71 - i) % 12
             black = pc in (1, 3, 6, 8, 10)
-            y = i * row_h
+            y = 4 + i * row_h
             p.fillRect(0, y, key_w, row_h - 1,
-                       QtGui.QColor("#1a1c20") if black else QtGui.QColor("#dfe2e6"))
+                       theme.CHROME_DEEP if black else theme.CHROME)
             p.fillRect(key_w, y, self.width(), row_h - 1,
-                       QtGui.QColor(t["lane_a"] if black else t["lane_b"]))
-            if not black:
-                p.setPen(QtGui.QColor("#3a3f46"))
-                p.setFont(QtGui.QFont("Sans", 6))
-                p.drawText(4, y + row_h - 4, NOTE_NAMES_FIFTHS[fifths_index(pc)])
-        for beat, pc in [(0, 0), (2, 4), (4, 7), (6, 11), (8, 7), (10, 4), (12, 0)]:
-            row = 23 - ((pc - 60) % 12) - 6
-            x = key_w + 10 + beat * 30
-            colour = qcolor(pc, 0.6) if self.take == NOTE_COLOUR else QtGui.QColor(t["accent"])
-            p.fillRect(x, row * row_h + 1, 56, row_h - 3, colour)
+                       theme.LANE_ALT if black else theme.LANE)
+            p.setPen(theme.RULE)
+            p.drawLine(key_w, y + row_h - 1, self.width(), y + row_h - 1)
+            # The key letter is the one label allowed a hue: it names a pitch.
+            p.setPen(pitch_colour(pc, 0.5) if not black else theme.TEXT_FAINT)
+            p.drawText(5, y + row_h - 3, NOTE_NAMES_FIFTHS[fifths_index(pc)])
+        p.setPen(theme.RULE_STRONG)
+        p.drawLine(key_w, 0, key_w, self.height())
+        for beat, pc in [(0, 0), (2, 4), (4, 7), (6, 11), (8, 7), (10, 4), (12, 0), (14, 5)]:
+            row = (71 - (60 + pc)) % 12 + 5
+            x = key_w + 12 + beat * 30
+            p.fillRect(x, 4 + row * row_h + 2, 54, row_h - 5, pitch_colour(pc))
         p.end()
 
 
 class Window(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.theme, self.take = GRAPHITE, CLIP_COLOUR
         self.beat, self.running = 0.0, True
-        self.setWindowTitle("VisualNote Studio — skeleton (prototype)")
-        self.resize(1280, 760)
+        self.setWindowTitle("visualnote studio")
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.resize(1280, 720)
         self._build()
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(16)
 
     def _build(self):
-        t = self.theme
         central = QtWidgets.QWidget()
+        central.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         outer = QtWidgets.QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        self.transport = Transport(t)
+        self.transport = Transport()
         outer.addWidget(self.transport)
 
         split = QtWidgets.QSplitter(QtCore.Qt.Vertical)
         top = QtWidgets.QWidget()
+        top.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         grid = QtWidgets.QGridLayout(top)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(0)
 
-        self.ruler = Ruler(t)
-        self.headers = TrackHeaders(t, self.take)
-        self.scene = ArrangeScene(t, self.take)
+        self.ruler = Ruler()
+        self.headers = TrackHeaders()
+        self.scene = ArrangeScene()
         self.view = QtWidgets.QGraphicsView(self.scene)
         self.view.setFrameShape(QtWidgets.QFrame.NoFrame)
-        self.view.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(t["window"])))
+        self.view.setBackgroundBrush(QtGui.QBrush(theme.CANVAS))
+        self.view.setStyleSheet("background: transparent; border: 0;")
         self.view.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         self.view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
@@ -365,37 +334,43 @@ class Window(QtWidgets.QMainWindow):
 
         self.corner = QtWidgets.QWidget()
         self.corner.setFixedSize(HEADER_W, RULER_H)
-        self.corner.setStyleSheet(f"background:{t['chrome']};")
         grid.addWidget(self.corner, 0, 0)
         grid.addWidget(self.ruler, 0, 1)
         grid.addWidget(self.headers, 1, 0)
         grid.addWidget(self.view, 1, 1)
         split.addWidget(top)
 
-        self.editor = EditorPane(t, self.take)
+        self.editor = EditorPane()
         split.addWidget(self.editor)
-        split.setSizes([520, 190])
+        split.setSizes([460, 200])
         outer.addWidget(split)
         self.setCentralWidget(central)
 
-        self.dock_bodies = []
-        for title, area in (("Inspector", QtCore.Qt.LeftDockWidgetArea),
-                            ("Mixer", QtCore.Qt.RightDockWidgetArea)):
+        for title, area in (("inspector", QtCore.Qt.LeftDockWidgetArea),
+                            ("mixer", QtCore.Qt.RightDockWidgetArea)):
             dock = QtWidgets.QDockWidget(title, self)
-            body = QtWidgets.QLabel(f"  {title}\n  (empty -- skeleton only)")
-            body.setAlignment(QtCore.Qt.AlignTop)
-            body.setStyleSheet(f"color:{t['text_dim']}; background:{t['chrome']}; padding:8px;")
-            body.setFixedWidth(132)
-            self.dock_bodies.append(body)
-            dock.setWidget(body)
             dock.setFeatures(QtWidgets.QDockWidget.NoDockWidgetFeatures)
+            body = QtWidgets.QLabel(f"  {title}\n  ── empty ──")
+            body.setAlignment(QtCore.Qt.AlignTop)
+            body.setFont(theme.font(8))
+            body.setFixedWidth(128)
+            dock.setWidget(body)
             self.addDockWidget(area, dock)
 
-        self.setStyleSheet(
-            f"QMainWindow{{background:{t['window']};}}"
-            f"QDockWidget{{color:{t['text']}; font-size:10px;}}"
-            f"QDockWidget::title{{background:{t['chrome_hi']}; padding:4px;}}"
-        )
+        rule = theme.SUMI_INK_4
+        self.setStyleSheet(f"""
+            QMainWindow, QWidget {{ background: transparent; }}
+            QLabel {{ color: {theme.FUJI_GRAY}; background: rgba(42,42,55,{theme.PANEL_ALPHA/255:.2f});
+                      padding: 8px; }}
+            QDockWidget {{ color: {theme.FUJI_GRAY}; font-family: "{theme.FONT_FAMILY}";
+                           font-size: 10px; }}
+            QDockWidget::title {{ background: rgba(22,22,29,0.88); padding: 4px 8px;
+                                  text-align: left; border-bottom: 1px solid {rule}; }}
+            QSplitter::handle {{ background: {rule}; height: 1px; }}
+            QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 0; }}
+            QScrollBar::handle:horizontal {{ background: {rule}; min-width: 40px; }}
+            QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+        """)
 
     def _sync_ruler(self, value):
         self.ruler.offset = value
@@ -405,8 +380,8 @@ class Window(QtWidgets.QMainWindow):
         if not self.running:
             return
         # A prototype timer. The real playhead reads the audio callback's own
-        # sample clock through a lock-free snapshot (map #145) -- a Qt timer
-        # would drift against the audio it is supposed to be pointing at.
+        # sample clock through `audio.transport`'s snapshot -- a Qt timer would
+        # drift against the audio it is meant to be pointing at.
         self.beat = (self.beat + 0.033) % (BARS * BEATS_PER_BAR)
         self.scene.move_playhead(self.beat)
         self.transport.beat = self.beat
@@ -416,79 +391,49 @@ class Window(QtWidgets.QMainWindow):
         key = event.key()
         if key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
             self.close()
-        elif key == QtCore.Qt.Key_C:
-            self.take = NOTE_COLOUR if self.take == CLIP_COLOUR else CLIP_COLOUR
-            self._reload()
-        elif key == QtCore.Qt.Key_T:
-            self.theme = SILVER if self.theme is GRAPHITE else GRAPHITE
-            self._reload()
         elif key == QtCore.Qt.Key_Space:
             self.running = not self.running
-
-    def _reload(self):
-        """Re-skin in place rather than rebuilding the window.
-
-        Calling `_build()` a second time left the ruler connected to the old
-        (now deleted) scroll bar and crashed. Nothing about a colour or chrome
-        change needs new widgets anyway -- only new values in the ones that
-        are already there.
-        """
-        t = self.theme
-        for widget in (self.ruler, self.headers, self.transport, self.editor):
-            widget.theme = t
-        self.headers.take = self.take
-        self.editor.take = self.take
-        self.scene.theme, self.scene.take = t, self.take
-        self.scene.rebuild()
-        self.scene.move_playhead(self.beat)
-        self.view.horizontalScrollBar().setValue(0)
-        self.view.setBackgroundBrush(QtGui.QBrush(QtGui.QColor(t["window"])))
-        self.corner.setStyleSheet(f"background:{t['chrome']};")
-        for body in self.dock_bodies:
-            body.setStyleSheet(
-                f"color:{t['text_dim']}; background:{t['chrome']}; padding:8px;")
-        self.setStyleSheet(
-            f"QMainWindow{{background:{t['window']};}}"
-            f"QDockWidget{{color:{t['text']}; font-size:10px;}}"
-            f"QDockWidget::title{{background:{t['chrome_hi']}; padding:4px;}}"
-        )
-        for widget in (self.ruler, self.headers, self.transport, self.editor):
-            widget.update()
-        print(f"[take={self.take}  chrome={self.theme['name']}]", flush=True)
+        elif key == QtCore.Qt.Key_B:
+            self.scene.show_notes = not self.scene.show_notes
+            self.scene.rebuild()
+            self.scene.move_playhead(self.beat)
 
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
+    app.setApplicationName("visualnote studio")
+    app.setFont(theme.font(9))
     window = Window()
     if "--shot" in sys.argv:
         index = sys.argv.index("--shot")
         out = sys.argv[index + 1] if len(sys.argv) > index + 1 else "skeleton.png"
-        takes = [(CLIP_COLOUR, GRAPHITE), (NOTE_COLOUR, GRAPHITE),
-                 (CLIP_COLOUR, SILVER), (NOTE_COLOUR, SILVER)]
+        # Hyprland tiles, so a shown window is whatever size the compositor
+        # decides and resize() is ignored. Render the widget offscreen at a
+        # fixed size instead of grabbing a live window -- Qt renders hidden
+        # widgets fine, and the result is reproducible.
         window.timer.stop()
-        window.show()
-        # resize() only takes effect after show() under Wayland, and the view
-        # otherwise opens scrolled to the middle of the scene -- past every clip.
-        for _ in range(5):
-            app.processEvents()
-        window.resize(1400, 820)
+        window.resize(1400, 800)
+        window.ensurePolished()
         for _ in range(10):
             app.processEvents()
-        for take, theme in takes:
-            shot = window
-            shot.take, shot.theme = take, theme
-            shot._reload()
-            shot.resize(1400, 820)   # re-applied: restyling relayouts the docks
-            shot.beat = 9.0
-            shot.scene.move_playhead(9.0)
-            shot.transport.beat = 9.0
-            for _ in range(40):
-                app.processEvents()
-            path = out.replace(".png", f"-{take}-{theme['name']}.png")
-            shot.grab().save(path)
-            print("wrote", path)
+        window.view.horizontalScrollBar().setValue(0)
+        window.beat = 9.0
+        window.scene.move_playhead(9.0)
+        window.transport.beat = 9.0
+        for _ in range(10):
+            app.processEvents()
+        # The window is translucent, so a bare grab has transparent pixels
+        # that read as white in a PNG. Composite over a dark ground so the
+        # screenshot shows roughly what the compositor will.
+        shot = QtGui.QPixmap(window.size())
+        shot.fill(QtGui.QColor("#0B0B10"))
+        painter = QtGui.QPainter(shot)
+        window.render(painter, QtCore.QPoint(0, 0))
+        painter.end()
+        shot.save(out)
+        print("wrote", out)
         sys.stdout.flush()
-        os._exit(0)  # Qt's offscreen platform segfaults on teardown; files are written.
+        os._exit(0)   # Qt's offscreen platform segfaults on teardown
     window.show()
     return app.exec()
 
