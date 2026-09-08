@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=VisualNote Studio
+GenericName=Audio Workstation
+Comment=Arrange, analyse and hear music in colour
+Exec=visualnote %f
+Icon=visualnote
+Terminal=false
+Categories=AudioVideo;Audio;Music;
+MimeType=application/vnd.recordare.musicxml+xml;application/vnd.recordare.musicxml;
+Keywords=daw;music;notation;colour;color;
+StartupNotify=true

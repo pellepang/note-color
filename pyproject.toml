@@ -130,6 +130,11 @@ all = [
 
 [project.scripts]
 virtualnote = "notecolor.tui.cli:main"
+# VisualNote Studio, the windowed front-end (map #145). A separate script
+# rather than a `virtualnote` subcommand: it is a different application with
+# a different dependency (PySide6, the `gui` extra), and it must be startable
+# from a desktop entry with no terminal involved.
+visualnote = "notecolor.gui.app:main"
 
 [tool.setuptools.packages.find]
 # src layout with automatic discovery (wayfinder map #145, ticket #146).

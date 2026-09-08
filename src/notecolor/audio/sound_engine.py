@@ -526,9 +526,33 @@ class SoundEngine:
 
     # -- the audio callback ------------------------------------------------
 
+    def set_block_listener(self, listener):
+        """Call `listener(frames)` once per audio block, before rendering.
+
+        This is how the transport gets driven by the clock that actually
+        produces sound (map #145, ticket #151): the callback owns time, so
+        anything that needs to advance with it -- the playhead, a project's
+        note schedule -- hangs off here rather than off a timer thread that
+        would drift against the audio.
+
+        The listener runs inside the callback, so it must not block, allocate
+        heavily, or raise. It is called before `render_block()` specifically so
+        a scheduler's `note_on()` for this block is audible in *this* block
+        rather than the next one. An exception is swallowed and counted: a bug
+        in a scheduler must not take the audio device down mid-performance.
+        """
+        self._block_listener = listener
+
     def _callback(self, outdata, frames, time_info, status):
         if status:
             self.callback_status_count += 1
+        listener = getattr(self, "_block_listener", None)
+        if listener is not None:
+            try:
+                listener(frames)
+            except Exception:
+                self.block_listener_error_count = (
+                    getattr(self, "block_listener_error_count", 0) + 1)
         self._frame_clock += frames
         self._resolve_due_offs(self._frame_clock)
         mix = np.zeros(frames, dtype=np.float32)

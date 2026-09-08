@@ -193,6 +193,35 @@ version 1 manifest's `tracks`. Note the words that were *not* renamed:
 sense — to track something — and are untouched. See `CONTEXT.md`.
 
 
+## VisualNote Studio (the GUI front-end)
+
+`visualnote` opens the windowed front-end (wayfinder map
+[#145](https://github.com/pellepang/note-color/issues/145)), installed as its
+own console script plus a `.desktop` entry so it starts from the application
+menu with no terminal. It is a **second front-end over the same core**, not a
+replacement: `virtualnote` keeps every terminal tool, and parity is promised on
+the core rather than on the pixels.
+
+Milestone 1 is done: import a MusicXML file (one **Part** per **Track**), hear
+it through the existing `SoundEngine`, watch the playhead move. The load-bearing
+detail is that **the playhead is not driven by a Qt timer** -- `SoundEngine`'s
+audio callback advances `audio/transport.py`'s `Transport` via
+`set_block_listener()`, and the window reads a published snapshot. The Qt timer
+only decides how often to repaint, so a slow frame looks choppy but is never
+wrong. Measured on a real device: 259 blocks in 3.01s at 44100/512, zero xruns.
+
+Audio is optional -- no output device or no `[synth]` extra means the window
+still opens and shows the project, with the reason in the transport bar, the
+same posture the score editor's `sound=unavailable` already takes.
+
+| Module | Responsibility |
+|---|---|
+| `gui/theme.py` | The visual language: the **Copper** palette (taken from the theme's own JSON), JetBrains Mono Nerd Font, translucent surfaces, and the standing rule that **saturation means pitch and nothing else** -- chrome is muted, only notes are vivid, and Copper's own orange is confined to hairline scale (playhead, record letter). Owns the Qt stylesheet too, so no widget names a raw hex value. |
+| `gui/studio.py` | The arrange window -- ruler, track headers, `QGraphicsView` canvas (per #147), transport bar. Owns no clock; reads the transport's snapshot. |
+| `gui/app.py` | `visualnote`'s entry point: load a `.ncproj` bundle or a MusicXML file, start audio, show the window. |
+| `audio/player.py` | `ProjectPlayer` -- turns the transport's half-open beat window into note-ons, with note lengths scheduled against the callback's frame clock. Honours mute/solo. |
+| `notation/musicxml_import.py` | MusicXML -> `Project`, one Part per Track. The third module permitted to import `music21`. Deliberately not `score_editor_state.load_score()`, which refuses multi-part files -- exactly the limit this lifts. |
+
 ## Package layout
 
 The code lives in a `src/notecolor/` package (wayfinder map
@@ -328,6 +357,9 @@ virtualnote synth                                                      # standal
 virtualnote convert song.mp3                                            # offline band-mix -> multi-track score (map #123)
 virtualnote convert song.mp3 --mode piano                                # solo piano: no separation, straight to transkun
 virtualnote convert song.mp3 --no-notes                                   # chords only -- needs no model installed
+visualnote                                                                # VisualNote Studio (GUI), empty project
+visualnote song.musicxml                                                   # ... importing a score, one Part per Track
+visualnote MySong.ncproj                                                    # ... opening a saved project bundle
 .venv/bin/python -m pytest tests/                              # run the test suite
 pip install -e .                                                 # src layout; needed after a fresh clone
 ```
