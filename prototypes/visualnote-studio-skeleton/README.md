@@ -16,9 +16,17 @@ in this prototype, because it outlives the prototype:
   app's own circle-of-fifths hue -- so a C here is the colour a C is in `tab`,
   in an exported score and on the synth keyboard. Colour is information, not
   decoration. The one exception is record-armed, and it is deliberately a dull
-  autumn red rather than a signal red so it can never outrank a note.
-- **Kanagawa** -- the Hokusai-derived ink-wash palette. Chosen because it is
-  already built around that restraint, so note hues sit on it without fighting.
+  clay red rather than a signal red so it can never outrank a note.
+
+  A warm ground has a real cost: notes in the red-orange third of the fifths
+  wheel sank into it, and the bass part became almost unreadable. Note
+  lightness and saturation were lifted rather than the ground being cooled --
+  pitch has to stay the vivid layer or the rule means nothing.
+- **Copper** (MrPanda376's VS Code theme), taken from its own source rather
+  than eyeballed: deep charcoal browns, copper accents, soft amber, muted teal.
+  Copper's signature orange is genuinely strong, which pulls against the rule
+  above, so it is confined to **hairline scale** -- a one-pixel playhead and a
+  14-pixel record letter. It never fills an area.
 - **JetBrains Mono Nerd Font** everywhere, labels included. Structural, not
   nostalgic: a DAW is a dense grid of numbers, monospace aligns columns without
   measuring, and this project's other front-end is a terminal -- the two should

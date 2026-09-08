@@ -48,9 +48,16 @@ BARS, BEATS_PER_BAR, PX_PER_BEAT = 32, 4, 34
 LANE_H, HEADER_W, RULER_H = 54, 196, 22
 
 
-def pitch_colour(pitch_class, lightness=0.56, alpha=255):
-    """The one place a saturated colour is allowed, and it always means pitch."""
-    rgb = hsl_to_rgb255(hue_for_step(fifths_index(pitch_class)), 0.55, lightness)
+def pitch_colour(pitch_class, lightness=0.66, alpha=255):
+    """The one place a saturated colour is allowed, and it always means pitch.
+
+    Lighter and a touch more saturated than the first pass. Copper's ground is
+    warm brown, so a note in the red-orange third of the fifths wheel sank into
+    it -- the bass part became almost unreadable. Pitch has to stay the vivid
+    layer for the palette rule to mean anything, so the notes are lifted rather
+    than the ground being cooled.
+    """
+    rgb = hsl_to_rgb255(hue_for_step(fifths_index(pitch_class)), 0.62, lightness)
     return QtGui.QColor(*rgb, alpha)
 
 
@@ -357,20 +364,7 @@ class Window(QtWidgets.QMainWindow):
             dock.setWidget(body)
             self.addDockWidget(area, dock)
 
-        rule = theme.SUMI_INK_4
-        self.setStyleSheet(f"""
-            QMainWindow, QWidget {{ background: transparent; }}
-            QLabel {{ color: {theme.FUJI_GRAY}; background: rgba(42,42,55,{theme.PANEL_ALPHA/255:.2f});
-                      padding: 8px; }}
-            QDockWidget {{ color: {theme.FUJI_GRAY}; font-family: "{theme.FONT_FAMILY}";
-                           font-size: 10px; }}
-            QDockWidget::title {{ background: rgba(22,22,29,0.88); padding: 4px 8px;
-                                  text-align: left; border-bottom: 1px solid {rule}; }}
-            QSplitter::handle {{ background: {rule}; height: 1px; }}
-            QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 0; }}
-            QScrollBar::handle:horizontal {{ background: {rule}; min-width: 40px; }}
-            QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
-        """)
+        self.setStyleSheet(theme.main_stylesheet())
 
     def _sync_ruler(self, value):
         self.ruler.offset = value
@@ -426,7 +420,7 @@ def main():
         # that read as white in a PNG. Composite over a dark ground so the
         # screenshot shows roughly what the compositor will.
         shot = QtGui.QPixmap(window.size())
-        shot.fill(QtGui.QColor("#0B0B10"))
+        shot.fill(QtGui.QColor("#0E0A09"))
         painter = QtGui.QPainter(shot)
         window.render(painter, QtCore.QPoint(0, 0))
         painter.end()

@@ -1,26 +1,30 @@
 """VisualNote Studio's visual language.
 
-One rule governs everything here, and it is *semantic* rather than a matter of
+One rule governs everything, and it is *semantic* rather than a matter of
 taste:
 
     **Saturation means pitch. Nothing else in the interface gets a strong
     colour.**
 
-Every chrome surface, label, border and button is drawn from a muted ink
-palette. The only saturated things on screen are notes, and the hue they carry
-is this app's own circle-of-fifths mapping -- the same one `tab`, the score
-writer and the synth keys already use, so a C is the same colour everywhere.
-That makes colour *information* rather than decoration: if something is vivid,
-it is telling you a pitch.
+Every surface, rule, label and button is muted. The only saturated things on
+screen are notes, carrying this app's own circle-of-fifths hue -- the same one
+`tab`, the score writer and the synth keys already use, so a C is the same
+colour everywhere. Colour is information, not decoration: if something is
+vivid, it is telling you a pitch.
 
-The palette is **Kanagawa** -- the Hokusai-derived ink-wash scheme (sumi ink
-grounds, fuji white text, muted autumn accents). It suits this because it is
-already built around that restraint, so note hues sit on top without competing.
+The palette is **Copper** (MrPanda376's VS Code theme), taken from its own
+source rather than eyeballed from a screenshot -- deep charcoal browns, copper
+accents, soft amber, muted teal.
+
+Copper's signature accent is a genuinely strong orange, which sits in tension
+with the rule above, so it is confined to **hairline scale**: a one-pixel
+playhead and a 14-pixel record letter. It never fills an area. That keeps the
+app's identity without letting chrome compete with a note.
 
 The typeface is **JetBrains Mono Nerd Font** everywhere, labels included. That
-is structural, not nostalgic: a DAW is a dense grid of numbers and names,
-monospace makes columns line up without measuring, and this project's other
-front-end is a terminal -- the two should look like the same program.
+is structural rather than nostalgic: a DAW is a dense grid of numbers and
+names, monospace aligns columns without measuring, and this project's other
+front-end is a terminal -- the two should look like one program.
 
 Surfaces are painted with alpha so the compositor shows through. Square
 corners, hairline rules, no gradients, no shadows, no rounded blobs.
@@ -28,21 +32,27 @@ corners, hairline rules, no gradients, no shadows, no rounded blobs.
 
 from PySide6 import QtGui
 
-# --- Kanagawa --------------------------------------------------------------
+# --- Copper ---------------------------------------------------------------
+# github.com/MrPanda376/copper-vscode-theme -> themes/copper-color-theme.json
 
-SUMI_INK_0 = "#16161D"
-SUMI_INK_1 = "#1F1F28"
-SUMI_INK_2 = "#2A2A37"
-SUMI_INK_3 = "#363646"
-SUMI_INK_4 = "#54546D"
-FUJI_WHITE = "#DCD7BA"
-OLD_WHITE = "#C8C093"
-FUJI_GRAY = "#727169"
-KATANA_GRAY = "#717C7C"
-WAVE_BLUE_2 = "#2D4F67"
-AUTUMN_RED = "#C34043"
-DRAGON_BLUE = "#658594"
-CARP_YELLOW = "#E6C384"
+INK_0 = "#16100E"         # deeper than the theme's own floor, for wells
+INK_1 = "#1A1412"         # editor.background
+INK_2 = "#221A17"         # sideBar / statusBar / titleBar
+INK_3 = "#2A211D"         # tab.active / input
+RULE_1 = "#3D2F27"        # editorGroup.border, indent guides
+RULE_2 = "#4A3428"        # list.activeSelection
+LINEN = "#E8D5C4"         # foreground
+LINEN_DIM = "#C4AA96"     # sideBar.foreground
+LINEN_FAINT = "#8A7565"   # editorLineNumber.foreground
+EMBER = "#6B5647"         # comments -- the faintest legible tone
+
+COPPER = "#FF7034"        # focusBorder / button / badge -- signature accent
+COPPER_LIGHT = "#FF8F5F"  # editorCursor
+AMBER = "#F0A855"
+CORAL = "#F77C4F"
+TEAL = "#5A8A9A"          # keywords
+TEAL_PALE = "#9BB3B8"     # variables
+CLAY_RED = "#E65C4F"      # errorForeground
 
 #: How much desktop shows through. Chrome is more opaque than the canvas --
 #: text has to stay readable over whatever happens to be behind the window.
@@ -68,24 +78,52 @@ def font(size=9, bold=False):
 
 # --- semantic roles, so no widget reaches for a raw hex value --------------
 
-CANVAS = ink(SUMI_INK_1, CANVAS_ALPHA)
-LANE = ink(SUMI_INK_1, CANVAS_ALPHA)
-LANE_ALT = ink(SUMI_INK_0, CANVAS_ALPHA)
-CHROME = ink(SUMI_INK_2, CHROME_ALPHA)
-CHROME_DEEP = ink(SUMI_INK_0, CHROME_ALPHA)
-PANEL = ink(SUMI_INK_2, PANEL_ALPHA)
-RULE = ink(SUMI_INK_3)
-RULE_STRONG = ink(SUMI_INK_4)
-TEXT = ink(FUJI_WHITE)
-TEXT_DIM = ink(FUJI_GRAY)
-TEXT_FAINT = ink(SUMI_INK_4)
-CLIP_BODY = ink(SUMI_INK_2, 232)
-CLIP_HEAD = ink(SUMI_INK_3, 240)
-CLIP_EDGE = ink(SUMI_INK_4)
-#: The playhead is deliberately *not* a strong colour: bone white, one pixel.
-#: It reads by contrast and motion rather than by shouting.
-PLAYHEAD = ink(FUJI_WHITE, 230)
-#: The single muted accent that is not pitch: record-armed. Autumn red, not a
-#: signal red, so it can never outrank a note on screen.
-ARMED = ink(AUTUMN_RED, 210)
-SELECTION = ink(WAVE_BLUE_2, 150)
+CANVAS = ink(INK_1, CANVAS_ALPHA)
+LANE = ink(INK_1, CANVAS_ALPHA)
+LANE_ALT = ink(INK_0, CANVAS_ALPHA)
+CHROME = ink(INK_2, CHROME_ALPHA)
+CHROME_DEEP = ink(INK_0, CHROME_ALPHA)
+PANEL = ink(INK_3, PANEL_ALPHA)
+RULE = ink(RULE_1)
+RULE_STRONG = ink(RULE_2)
+TEXT = ink(LINEN)
+TEXT_DIM = ink(LINEN_DIM)
+TEXT_FAINT = ink(EMBER)
+CLIP_BODY = ink(INK_2, 236)
+CLIP_HEAD = ink(INK_3, 244)
+CLIP_EDGE = ink(RULE_2)
+
+#: The two places the accent is allowed, both hairline-scale rather than an
+#: area of colour: the playhead and record-armed.
+PLAYHEAD = ink(COPPER, 235)
+ARMED = ink(CLAY_RED, 225)
+FOCUS = ink(COPPER, 180)
+SELECTION = ink(RULE_2, 170)
+
+
+def rgba(colour):
+    """A Qt stylesheet colour string for one of the roles above."""
+    return f"rgba({colour.red()},{colour.green()},{colour.blue()},{colour.alpha() / 255:.3f})"
+
+
+def main_stylesheet():
+    """Chrome Qt draws for us -- docks, splitters, scrollbars, labels.
+
+    Lives here rather than in a window, so that every colour in the interface
+    comes from a named role in this module. A widget that reaches for a raw
+    hex value is how a palette quietly stops being a palette.
+    """
+    return f"""
+        QMainWindow, QWidget {{ background: transparent; }}
+        QLabel {{ color: {rgba(TEXT_DIM)}; background: {rgba(PANEL)}; padding: 8px; }}
+        QDockWidget {{ color: {rgba(TEXT_DIM)}; font-family: "{FONT_FAMILY}";
+                       font-size: 10px; }}
+        QDockWidget::title {{ background: {rgba(CHROME_DEEP)}; padding: 4px 8px;
+                              text-align: left;
+                              border-bottom: 1px solid {rgba(RULE)}; }}
+        QSplitter::handle {{ background: {rgba(RULE_STRONG)}; height: 1px; }}
+        QScrollBar:horizontal {{ background: transparent; height: 11px; margin: 0; }}
+        QScrollBar::handle:horizontal {{ background: {rgba(RULE_STRONG)};
+                                         min-width: 40px; }}
+        QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+    """
