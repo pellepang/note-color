@@ -98,6 +98,11 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
         body = QtWidgets.QGraphicsRectItem(x, y, w, h)
         body.setBrush(QtGui.QBrush(theme.CLIP_BODY))
         body.setPen(QtGui.QPen(theme.CLIP_EDGE, 1))
+        # Carry enough to identify what was grabbed. `MoveClip` existed and was
+        # tested from the start with nothing able to drive it from the mouse.
+        body.setData(0, row)
+        body.setData(1, clip)
+        body.setZValue(1)
         self.addItem(body)
         head = QtWidgets.QGraphicsRectItem(x, y, w, 12)
         head.setBrush(QtGui.QBrush(theme.CLIP_HEAD))
@@ -121,6 +126,17 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
             item.setBrush(QtGui.QBrush(pitch_colour(note.pitch_class)))
             item.setPen(QtGui.QPen(QtCore.Qt.NoPen))
             self.addItem(item)
+
+    def clip_at(self, scene_point):
+        """`(row, clip)` under a scene position, or `None`.
+
+        Topmost first, so a clip wins over the lane behind it.
+        """
+        for item in self.items(scene_point):
+            clip = item.data(1)
+            if clip is not None:
+                return item.data(0), clip
+        return None
 
     def move_playhead(self, beat):
         if self.playhead is None:
@@ -161,17 +177,26 @@ class Ruler(QtWidgets.QWidget):
         self._drag_from = beat
         self.located.emit(beat)
 
+    #: A drag has to exceed this before it counts as one. Below it, the
+    #: gesture was a click that jittered -- extremely common on a trackpad --
+    #: and overwriting the committed loop's highlight with a near-invisible
+    #: sliver at the click point is not what the user did.
+    DRAG_THRESHOLD_BEATS = 0.05
+
     def mouseMoveEvent(self, event):
         if self._drag_from is None:
             return
         beat = self._beat_at(event.position().x())
+        if abs(beat - self._drag_from) < self.DRAG_THRESHOLD_BEATS:
+            return
         # Order-independent, exactly as the tab view's marks are: dragging
         # right-to-left means the same thing as left-to-right.
         self.loop = (min(self._drag_from, beat), max(self._drag_from, beat))
         self.update()
 
     def mouseReleaseEvent(self, _event):
-        if self.loop and self.loop[1] - self.loop[0] > 0.05:
+        if (self._drag_from is not None and self.loop
+                and self.loop[1] - self.loop[0] > self.DRAG_THRESHOLD_BEATS):
             self.loop_set.emit(*self.loop)
         self._drag_from = None
 
@@ -258,9 +283,14 @@ class TrackHeaders(QtWidgets.QWidget):
             for i, (letter, on) in enumerate((("m", track.muted), ("s", track.soloed),
                                               ("r", False))):
                 box = self._button_rect(row, i)
-                p.setPen(theme.RULE_STRONG)
+                # "r" is drawn but does nothing yet, so it is drawn as
+                # disabled -- a control that looks live and is inert is worse
+                # than one that says it is not ready.
+                inert = letter == "r"
+                p.setPen(theme.RULE if inert else theme.RULE_STRONG)
                 p.drawRect(box)
-                p.setPen(theme.ARMED if on else theme.TEXT_FAINT)
+                p.setPen(theme.TEXT_FAINT if inert
+                         else (theme.ARMED if on else theme.TEXT_DIM))
                 p.drawText(box, QtCore.Qt.AlignCenter, letter)
         p.setPen(theme.RULE_STRONG)
         p.drawLine(HEADER_W - 1, 0, HEADER_W - 1, self.height())
@@ -396,6 +426,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.audio_error = audio_error
         self.path = path
         self._shown = False
+        self._drag = None
         self.edits = edit.EditStack()
         self.saved_revision = 0
         self._status = ""
@@ -489,6 +520,11 @@ class StudioWindow(QtWidgets.QMainWindow):
         edit_menu = bar.addMenu("&Edit")
         self.undo_action = self._add(edit_menu, "&Undo", "Ctrl+Z", self.undo)
         self.redo_action = self._add(edit_menu, "&Redo", "Ctrl+Shift+Z", self.redo)
+        edit_menu.addSeparator()
+        self._add(edit_menu, "&Add Track", "Ctrl+T", self.add_track)
+        self._add(edit_menu, "&Remove Track", "Ctrl+Shift+T", self.remove_track)
+        self._add(edit_menu, "Re&name Track…", "F2", self.rename_track)
+        self._add(edit_menu, "Set Te&mpo…", None, self.set_tempo)
 
         view_menu = bar.addMenu("&View")
         self._add(view_menu, "Zoom &In", "Ctrl++", lambda: self.zoom(self.ZOOM_STEP))
@@ -513,6 +549,45 @@ class StudioWindow(QtWidgets.QMainWindow):
 
     def _playing(self):
         return bool(self.transport and self.transport.snapshot().playing)
+
+    def _playhead_beat(self):
+        return self.transport.snapshot().beat if self.transport else 0.0
+
+    # -- track and tempo edits ---------------------------------------------
+
+    def add_track(self):
+        self.run(edit.AddTrack(self.project))
+        self.headers.selected_index = len(self.project.tracks) - 1
+
+    def remove_track(self):
+        if not self.project.tracks:
+            return self.say("no tracks to remove")
+        index = min(self.headers.selected_index, len(self.project.tracks) - 1)
+        self.run(edit.RemoveTrack(self.project, index))
+        self.headers.selected_index = max(0, index - 1)
+
+    def rename_track(self):
+        if not self.project.tracks:
+            return self.say("no tracks to rename")
+        track = self.project.tracks[self.headers.selected_index]
+        name, ok = QtWidgets.QInputDialog.getText(
+            self, "Rename track", "Name:", text=track.name)
+        if ok and name.strip():
+            self.run(edit.RenameTrack(track, self.project.unique_track_name(
+                name.strip())))
+
+    def set_tempo(self):
+        current = self.project.tempo_map.bpm_at(0)
+        bpm, ok = QtWidgets.QInputDialog.getDouble(
+            self, "Tempo", "Beats per minute:", current, 20.0, 400.0, 2)
+        if not ok:
+            return
+        self.run(edit.SetTempo(self.project, bpm))
+        if self.transport is not None:
+            # The transport holds its own reference; without this it keeps
+            # converting beats at the old tempo and the playhead drifts from
+            # the grid it is drawn on.
+            self.transport.set_tempo_map(self.project.tempo_map)
 
     def _retitle(self):
         """The title says what is open and whether it is saved.
@@ -543,6 +618,8 @@ class StudioWindow(QtWidgets.QMainWindow):
     # -- opening -----------------------------------------------------------
 
     def open_dialog(self):
+        if not self._can_show_dialogs():
+            return
         chosen, _f = QtWidgets.QFileDialog.getOpenFileName(
             self, "Open", default_projects_dir(),
             "Projects and scores (*.ncproj *.musicxml *.xml);;All files (*)")
@@ -679,8 +756,14 @@ class StudioWindow(QtWidgets.QMainWindow):
             self.transport.set_loop(snapshot.loop_start_beat,
                                     snapshot.loop_end_beat, enabled=False)
             self.say("loop off")
-        elif self.ruler.loop:
-            self.transport.set_loop(*self.ruler.loop, enabled=True)
+        elif snapshot.loop_end_beat > snapshot.loop_start_beat:
+            # Read the transport's own last-set region, not the ruler's
+            # transient drag state -- those disagree after an aborted drag,
+            # and re-enabling the wrong one is an audible micro-stutter.
+            self.transport.set_loop(snapshot.loop_start_beat,
+                                    snapshot.loop_end_beat, enabled=True)
+            self.ruler.loop = (snapshot.loop_start_beat, snapshot.loop_end_beat)
+            self.ruler.update()
             self.say("loop on")
         else:
             self.say("drag on the ruler to set a loop first")
@@ -745,8 +828,40 @@ class StudioWindow(QtWidgets.QMainWindow):
         if (watched is self.view.viewport()
                 and event.type() == QtCore.QEvent.MouseButtonPress
                 and event.button() == QtCore.Qt.LeftButton):
-            scene_x = self.view.mapToScene(event.position().toPoint()).x()
-            self._locate(max(0.0, scene_x / self.scene.px_per_beat))
+            point = self.view.mapToScene(event.position().toPoint())
+            hit = self.scene.clip_at(point)
+            if hit is not None:
+                row, clip = hit
+                self.headers.selected_index = row
+                self.headers.update()
+                self._drag = {"row": row, "clip": clip,
+                              "grab": point.x() / self.scene.px_per_beat,
+                              "from": clip.start_beat, "moved": False}
+                return True
+            self._locate(max(0.0, point.x() / self.scene.px_per_beat))
+            return True
+        if (watched is self.view.viewport()
+                and event.type() == QtCore.QEvent.MouseMove and self._drag):
+            point = self.view.mapToScene(event.position().toPoint())
+            beat = point.x() / self.scene.px_per_beat
+            target = self.snap(max(0.0, self._drag["from"]
+                                   + beat - self._drag["grab"]))
+            if target != self._drag["clip"].start_beat:
+                self._drag["clip"].start_beat = target
+                self._drag["moved"] = True
+                self.scene.rebuild()
+                self.scene.move_playhead(self._playhead_beat())
+            return True
+        if (watched is self.view.viewport()
+                and event.type() == QtCore.QEvent.MouseButtonRelease and self._drag):
+            drag, self._drag = self._drag, None
+            if drag["moved"]:
+                # The drag already moved the clip for live feedback; put it
+                # back and redo it as a command, so one gesture is one undo.
+                landed = drag["clip"].start_beat
+                drag["clip"].start_beat = drag["from"]
+                self.run(edit.MoveClip(self.project, drag["row"],
+                                       drag["clip"], landed))
             return True
         if (watched is self.view.viewport()
                 and event.type() == QtCore.QEvent.Wheel
@@ -769,8 +884,15 @@ class StudioWindow(QtWidgets.QMainWindow):
         if target is None:
             return self.save_as()
         try:
+            os.makedirs(os.path.dirname(os.path.abspath(bundle_path(target))),
+                        exist_ok=True)
             self.path = save_project(self.project, target)
         except OSError as exc:
+            # One guarded write path. `save_as()` used to create the parent
+            # directory itself, unguarded, *before* opening its dialog -- so a
+            # read-only or missing `~/Music` made Save As do nothing at all,
+            # with the traceback going to a stderr that a .desktop launch does
+            # not have.
             self.say(f"save failed: {exc}")
             return False
         self.saved_revision = self.edits.revision
@@ -782,11 +904,30 @@ class StudioWindow(QtWidgets.QMainWindow):
         return True
 
     def save_as(self):
+        if not self._can_show_dialogs():
+            return False
         base = os.path.join(default_projects_dir(), f"{self.project.name}")
-        os.makedirs(default_projects_dir(), exist_ok=True)
-        chosen, _filter = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save project", base, "VisualNote project (*.ncproj)")
+        try:
+            chosen, _filter = QtWidgets.QFileDialog.getSaveFileName(
+                self, "Save project", base, "VisualNote project (*.ncproj)")
+        except Exception as exc:                    # noqa: BLE001
+            self.say(f"save failed: {exc}")
+            return False
         return self.save(bundle_path(chosen)) if chosen else False
+
+    def _can_show_dialogs(self):
+        """Whether a modal file dialog can actually be shown.
+
+        Qt's `offscreen` and `minimal` platforms accept a modal dialog and
+        then never return from it -- the window appears to freeze, with no
+        diagnostic, which is exactly what a misconfigured `.desktop` entry or
+        a container would produce. Saying so is better than hanging.
+        """
+        platform = QtWidgets.QApplication.platformName()
+        if platform in ("offscreen", "minimal", ""):
+            self.say(f"file dialogs need a real display (running on '{platform}')")
+            return False
+        return True
 
     def say(self, message):
         self._status = message

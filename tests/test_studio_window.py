@@ -303,18 +303,37 @@ def test_the_title_shows_the_project_and_whether_it_is_saved(window, tmp_path):
     assert "p.ncproj" in window.windowTitle()
 
 
-def test_clicking_the_canvas_moves_the_playhead(window):
+def _press(window, scene_x, scene_y):
+    point = QtCore.QPointF(scene_x, scene_y)
+    return QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, point,
+                             QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
+                             QtCore.Qt.NoModifier)
+
+
+def test_clicking_empty_canvas_moves_the_playhead(window):
     """The track area is the largest target on screen; restricting seeking to
-    the ruler strip makes it inert."""
+    the ruler strip makes it inert. Empty lane space, not a clip -- clicking a
+    clip grabs it, as every DAW does."""
     window.resize(900, 500)
     window.show()
-    point = QtCore.QPointF(window.scene.px_per_beat * 6 + 2, 40)
+    empty_y = len(window.project.tracks) * 54 + 30
+    point = QtCore.QPointF(window.scene.px_per_beat * 6 + 2, empty_y)
     event = QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, point,
                               QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
                               QtCore.Qt.NoModifier)
     assert window.eventFilter(window.view.viewport(), event) is True
     _pump(window)
     assert window.transport.snapshot().beat == pytest.approx(6.0, abs=0.6)
+
+
+def test_clicking_a_clip_grabs_it_instead_of_seeking(window):
+    window.resize(900, 500)
+    window.show()
+    before = window.transport.snapshot().beat
+    window.eventFilter(window.view.viewport(), _press(window, 40, 20))
+    _pump(window)
+    assert window._drag is not None
+    assert window.transport.snapshot().beat == pytest.approx(before, abs=1e-3)
 
 
 def test_the_file_menu_can_open_and_undo_is_labelled(window):
@@ -355,3 +374,139 @@ def test_the_view_opens_at_bar_one_not_the_middle(window):
     window.resize(900, 500)
     window.show()
     assert window.view.horizontalScrollBar().value() == 0
+
+
+# --- round 3 regressions ---------------------------------------------------
+
+
+def test_dragging_a_clip_is_one_undoable_move(window):
+    """Live feedback moves the clip directly; the release replays it as a
+    command so one gesture is one undo, not one per mouse-move."""
+    window.resize(900, 500)
+    window.show()
+    clip = window.project.tracks[0].clips[0]
+    window.eventFilter(window.view.viewport(), _press(window, 20, 20))
+    move = QtGui.QMouseEvent(
+        QtCore.QEvent.MouseMove,
+        QtCore.QPointF(20 + window.scene.px_per_beat * 4, 20),
+        QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier)
+    window.eventFilter(window.view.viewport(), move)
+    release = QtGui.QMouseEvent(
+        QtCore.QEvent.MouseButtonRelease, QtCore.QPointF(20, 20),
+        QtCore.Qt.LeftButton, QtCore.Qt.NoButton, QtCore.Qt.NoModifier)
+    window.eventFilter(window.view.viewport(), release)
+
+    assert clip.start_beat == pytest.approx(4.0)
+    assert window.edits.undo_name() == "Move Clip"
+    window.undo()
+    assert clip.start_beat == pytest.approx(0.0)
+
+
+def test_adding_and_removing_tracks_is_undoable(window):
+    before = len(window.project.tracks)
+    window.add_track()
+    assert len(window.project.tracks) == before + 1
+    window.remove_track()
+    assert len(window.project.tracks) == before
+    window.undo()
+    assert len(window.project.tracks) == before + 1
+
+
+def test_removing_the_last_track_says_so_rather_than_raising(window):
+    while window.project.tracks:
+        window.remove_track()
+    window.remove_track()
+    assert "no tracks" in window._status
+
+
+def test_changing_the_tempo_reaches_the_transport(window):
+    """The transport holds its own tempo map reference; without an explicit
+    handoff it keeps converting beats at the old tempo and the playhead drifts
+    off the grid it is drawn on."""
+    from notecolor.project import edit as project_edit
+
+    window.run(project_edit.SetTempo(window.project, 60.0))
+    window.transport.set_tempo_map(window.project.tempo_map)
+    _pump(window)
+    assert window.transport.tempo_map.bpm_at(0) == 60.0
+
+
+def test_a_jittery_click_does_not_overwrite_a_committed_loop(window):
+    """A plain click that moves a pixel used to replace the loop highlight
+    with an invisible sliver, and toggling the loop then activated *that*."""
+    window.ruler.loop_set.emit(2.0, 6.0)
+    _pump(window)
+    window.ruler._drag_from = 20.0
+    jitter = QtGui.QMouseEvent(
+        QtCore.QEvent.MouseMove,
+        QtCore.QPointF(20.01 * window.scene.px_per_beat, 5),
+        QtCore.Qt.NoButton, QtCore.Qt.NoButton, QtCore.Qt.NoModifier)
+    window.ruler.mouseMoveEvent(jitter)
+    assert window.ruler.loop == (2.0, 6.0)
+
+
+def test_re_enabling_a_loop_uses_the_transports_region_not_the_rulers(window):
+    window.ruler.loop_set.emit(2.0, 6.0)
+    _pump(window)
+    window._toggle_loop()                      # off
+    _pump(window)
+    window.ruler.loop = (99.0, 99.1)           # stale drag state
+    window._toggle_loop()                      # on
+    _pump(window)
+    snapshot = window.transport.snapshot()
+    assert (snapshot.loop_start_beat, snapshot.loop_end_beat) == (2.0, 6.0)
+
+
+def test_file_dialogs_refuse_rather_than_hang_without_a_display(window, monkeypatch):
+    """Qt's offscreen platform accepts a modal dialog and never returns from
+    it -- the window simply freezes, which is what a misconfigured .desktop
+    entry or a container would produce.
+
+    The platform is forced rather than assumed: relying on the ambient one
+    made this test open a real dialog and hang when the environment happened
+    to have a display.
+    """
+    monkeypatch.setattr(QtWidgets.QApplication, "platformName",
+                        staticmethod(lambda: "offscreen"))
+    assert window.save_as() is False
+    assert "real display" in window._status
+    window.open_dialog()
+    assert "real display" in window._status
+
+
+def test_save_reports_a_failure_it_cannot_recover_from(window, tmp_path):
+    """save_as() used to create the parent directory unguarded, before its
+    dialog, so a read-only ~/Music made Save As do nothing at all -- with the
+    traceback going to a stderr a .desktop launch does not have."""
+    blocker = tmp_path / "afile"
+    blocker.write_text("not a directory")
+    window._toggle_track(0, "m")
+    assert window.save(blocker / "nested" / "p") is False
+    assert "save failed" in window._status
+    assert window.dirty is True
+
+
+def test_the_block_listener_error_counter_starts_at_zero_and_counts(monkeypatch):
+    """It was created lazily on first error and displayed nowhere, so a
+    scheduler bug degraded to 'notes stopped happening' with no signal."""
+    import numpy as np
+
+    from notecolor.audio.sound_engine import SoundEngine
+
+    engine = SoundEngine.__new__(SoundEngine)
+    engine.callback_status_count = 0
+    engine._frame_clock = 0
+    engine._block_listener = None
+    engine.block_listener_error_count = 0
+    assert engine.block_listener_error_count == 0
+
+    def explode(_frames):
+        raise RuntimeError("scheduler bug")
+
+    engine.set_block_listener(explode)
+    engine.voices = type("V", (), {"render_block": lambda self, m, f: None})()
+    engine.effects = type("E", (), {"process": lambda self, m: m})()
+    engine._resolve_due_offs = lambda _f: None
+    out = np.zeros((64, 1), dtype=np.float32)
+    engine._callback(out, 64, None, None)
+    assert engine.block_listener_error_count == 1

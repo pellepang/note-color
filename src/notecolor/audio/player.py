@@ -20,6 +20,20 @@ as the block size and needs no timer thread.
 from notecolor.project.model import AUDIO_TRACK, NoteClip
 
 
+class _Schedule:
+    """The flattened notes and the audible-track set, as one immutable pair.
+
+    One object so a refresh is a single atomic rebind rather than two, which
+    is what makes the audio callback's read of it coherent without a lock.
+    """
+
+    __slots__ = ("notes", "audible")
+
+    def __init__(self, notes, audible):
+        self.notes = notes
+        self.audible = audible
+
+
 class ScheduledNote:
     """One note, flattened out of its clip onto the project timeline."""
 
@@ -81,43 +95,52 @@ class ProjectPlayer:
         self.project = project
         self.engine = engine
         self.transport = transport
-        self.notes = flatten(project)
-        self.audible = audible_tracks(project)
+        self.schedule = _Schedule(flatten(project), audible_tracks(project))
         self.notes_started = 0
 
-    def refresh(self):
-        """Re-read the project after an edit. Cheap enough to call on save or
-        on a mute change; not called per block."""
-        self.notes = flatten(self.project)
-        self.audible = audible_tracks(self.project)
+    @property
+    def notes(self):
+        return self.schedule.notes
+
+    @property
+    def audible(self):
+        return self.schedule.audible
+
+    def refresh(self, project=None):
+        """Re-read the project after an edit.
+
+        Builds the new notes and audible-set locally and swaps them in with a
+        **single** attribute assignment. Two assignments -- which this used to
+        do -- leave a window in which the audio callback can see new notes
+        against an old mute state; harmless (one block, ~10ms) but the whole
+        seam is built on atomic snapshots, and one rebind costs nothing.
+
+        `project=` swaps the project itself in the same single assignment,
+        which is what File->Open needs: setting `.project` and then calling
+        `refresh()` left the callback able to see a new tempo map against the
+        old project's notes.
+        """
+        if project is not None:
+            self.project = project
+        self.schedule = _Schedule(flatten(self.project),
+                                  audible_tracks(self.project))
 
     def on_block(self, frames):
-        """The audio callback's per-block entry point."""
-        start_beat, end_beat = self.transport.process_block(frames)
-        if end_beat == start_beat:
-            return                              # stopped
-        if end_beat > start_beat:
+        """The audio callback's per-block entry point.
+
+        The transport hands back every beat window the block covered -- more
+        than one when it crossed the loop point, however many times. Firing
+        them all is what keeps a short loop from dropping whole passes.
+        """
+        for start_beat, end_beat in self.transport.process_block(frames):
             self._fire(start_beat, end_beat)
-        else:
-            # The loop wrapped inside this block: the window is two pieces,
-            # tail then head. Firing only one of them would drop notes at the
-            # loop seam, which is exactly where a listener notices.
-            self._fire(start_beat, self._loop_end())
-            self._fire(self._loop_start(), end_beat)
-
-    def _loop_start(self):
-        return self.transport.snapshot().loop_start_beat
-
-    def _loop_end(self):
-        return self.transport.snapshot().loop_end_beat
 
     def _fire(self, start_beat, end_beat):
-        # Capture both collections once. The GUI thread replaces them wholesale
-        # in `refresh()`, so reading `self.audible` per note could apply
-        # pre-edit and post-edit mute state to different notes of the *same*
-        # block. Harmless in practice -- one block is ~10ms -- but the whole
-        # seam is built on atomic snapshots, and this costs nothing.
-        notes, audible = self.notes, self.audible
+        # One read of one attribute: `refresh()` swaps notes and the audible
+        # set together as a single object, so a block can never see new notes
+        # against an old mute state.
+        schedule = self.schedule
+        notes, audible = schedule.notes, schedule.audible
         tempo = self.project.tempo_map
         for note in notes:
             if note.start_beat >= end_beat:

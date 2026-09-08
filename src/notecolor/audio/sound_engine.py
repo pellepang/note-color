@@ -400,6 +400,13 @@ class SoundEngine:
         self.set_effects(effects)
         self._stream = None
         self._frame_clock = 0
+        self._block_listener = None
+        #: Exceptions swallowed from the block listener. Surfaced in the
+        #: transport bar beside xruns: a scheduler bug would otherwise show up
+        #: only as "notes stopped happening", with no signal anywhere that
+        #: something is wrong -- worse than the honest "no audio" path the
+        #: rest of the app takes.
+        self.block_listener_error_count = 0
         self._pending_offs = {}
         self._pending_lock = threading.Lock()
         self.callback_status_count = 0
@@ -546,13 +553,12 @@ class SoundEngine:
     def _callback(self, outdata, frames, time_info, status):
         if status:
             self.callback_status_count += 1
-        listener = getattr(self, "_block_listener", None)
+        listener = self._block_listener
         if listener is not None:
             try:
                 listener(frames)
             except Exception:
-                self.block_listener_error_count = (
-                    getattr(self, "block_listener_error_count", 0) + 1)
+                self.block_listener_error_count += 1
         self._frame_clock += frames
         self._resolve_due_offs(self._frame_clock)
         mix = np.zeros(frames, dtype=np.float32)

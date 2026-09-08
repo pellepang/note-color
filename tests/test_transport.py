@@ -57,12 +57,15 @@ def test_a_stopped_transport_does_not_move():
 
 
 def test_process_block_returns_the_half_open_beat_window():
-    """A window, not a point: a scheduler has to be able to ask what fell due
-    *between* two blocks, and a point would let notes slip through the gap."""
+    """Windows, not a point: a scheduler has to be able to ask what fell due
+    *between* two blocks, and a point would let notes slip through the gap.
+    A list, because a block can cross a loop point more than once."""
     t = _transport(bpm=120.0)
     t.play()
     t.process_block(BLOCK)                     # the block that starts playback
-    start, end = t.process_block(BLOCK)
+    segments = t.process_block(BLOCK)
+    assert len(segments) == 1
+    start, end = segments[0]
     assert start == pytest.approx(BLOCK / RATE * 2)
     assert end == pytest.approx(2 * BLOCK / RATE * 2)
     assert end > start
@@ -74,7 +77,7 @@ def test_consecutive_windows_are_contiguous():
     t.process_block(BLOCK)
     previous_end = None
     for _ in range(20):
-        start, end = t.process_block(BLOCK)
+        (start, end), = t.process_block(BLOCK)
         if previous_end is not None:
             assert start == pytest.approx(previous_end)
         previous_end = end
@@ -233,3 +236,23 @@ def test_block_count_increments_even_while_stopped():
         t.process_block(BLOCK)
     assert t.snapshot().block_count == 4
     assert t.snapshot().state == tp.STOPPED
+
+
+def test_a_stopped_transport_reports_no_window_at_all():
+    """An empty list rather than a zero-width window, so a scheduler has
+    nothing to special-case."""
+    assert _transport().process_block(BLOCK) == []
+
+
+def test_a_block_crossing_a_short_loop_reports_every_pass():
+    """The transport wrapped correctly but reported one window, so a scheduler
+    saw the first and last fragments and none of the complete passes between.
+    Measured before the fix: a note fired 20 times where it should have fired
+    320."""
+    t = tp.Transport(TempoMap([TempoAnchor(0.0, 6000.0)]), sample_rate=RATE)
+    t.set_loop(0.0, 0.1, enabled=True)
+    t.play()
+    segments = t.process_block(BLOCK)
+    assert len(segments) > 5
+    for start, end in segments:
+        assert end > start
