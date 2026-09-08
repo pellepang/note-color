@@ -103,12 +103,20 @@ convert = [
 synth = [
     "scipy>=1.10",    # synth_engine.py only -- the SVF filter and pink-noise filter (ticket #113)
 ]
+# VisualNote Studio, the windowed front-end (map #145). PySide6-Essentials
+# rather than the full PySide6: the extras (WebEngine, 3D, Charts, Multimedia)
+# are a large download this app has no use for. LGPL-3, which #139 permits --
+# note PyQt6 is GPL-3-or-commercial and is refused for that reason.
+gui = [
+    "PySide6-Essentials>=6.6",
+]
+
 # Everything. Note this now pulls the converter stack, which is ~1.1 GB
 # of CPU torch (#126, measured) -- much larger than the rest of this
 # project combined. `[batch,synth,sf2]` remains the light "all the
 # tools, none of the neural weights" combination.
 all = [
-    "note-color[batch,synth,sf2,convert]",
+    "note-color[batch,synth,sf2,convert,gui]",
 ]
 
 [tool.setuptools.package-data]
