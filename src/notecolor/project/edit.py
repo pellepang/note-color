@@ -23,6 +23,29 @@ keeps Qt out of it.
 from notecolor.project.model import NoteClip, Track
 
 
+def remove_exact(items, target):
+    """Remove `target` from `items` **by identity**, and return its index.
+
+    `list.remove()` matches by `==`, and `Track`/`NoteClip`/`AudioClip` are
+    plain dataclasses with generated value equality -- so two clips that merely
+    look alike are interchangeable to it. That is not theoretical: `AddTrack`
+    creates every new track with an identical `NoteClip(name="empty",
+    length_beats=4.0)`, so two fresh tracks already hold value-equal clips.
+    Moving one of them then removed the *other* (whichever came first in the
+    list) and left the moved clip present in both tracks -- one clip silently
+    deleted, another aliased across two tracks, so editing it in one place
+    edited it in the other.
+
+    Identity is the only correct answer here: these objects are things, not
+    values.
+    """
+    for index, item in enumerate(items):
+        if item is target:
+            del items[index]
+            return index
+    raise ValueError("object is not in the list")
+
+
 class Command:
     """One undoable edit.
 
@@ -105,10 +128,13 @@ class MoveClip(Command):
         self.to_beat = max(0.0, float(beat))
 
     def _move(self, source, target, beat):
-        self.clip.start_beat = beat
+        # Remove *before* mutating the clip: `remove_exact` is identity-based
+        # so order no longer matters for correctness, but a half-moved clip is
+        # never observable this way either.
         if source != target:
-            self.project.tracks[source].clips.remove(self.clip)
+            remove_exact(self.project.tracks[source].clips, self.clip)
             self.project.tracks[target].clips.append(self.clip)
+        self.clip.start_beat = beat
 
     def do(self):
         self._move(self.from_track, self.to_track, self.to_beat)
@@ -129,7 +155,7 @@ class AddTrack(Command):
         self.project.tracks.append(self.track)
 
     def undo(self):
-        self.project.tracks.remove(self.track)
+        remove_exact(self.project.tracks, self.track)
 
 
 class RemoveTrack(Command):
@@ -141,7 +167,7 @@ class RemoveTrack(Command):
         self.track = project.tracks[index]
 
     def do(self):
-        self.project.tracks.remove(self.track)
+        remove_exact(self.project.tracks, self.track)
 
     def undo(self):
         # Back where it was, not on the end -- a track that reappears in a

@@ -19,7 +19,10 @@ from notecolor.analysis.color_map import (
 )
 from notecolor.gui import theme
 from notecolor.project import edit
-from notecolor.project.bundle import bundle_path, default_projects_dir, save_project
+from notecolor.project.bundle import (
+    BUNDLE_SUFFIX, bundle_path, default_projects_dir, save_project,
+)
+from notecolor.gui.recent import recent_paths, remember_path
 from notecolor.project.model import AUDIO_TRACK, NoteClip
 
 LANE_H, HEADER_W, RULER_H = 54, 196, 22
@@ -392,6 +395,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.player = player
         self.audio_error = audio_error
         self.path = path
+        self._shown = False
         self.edits = edit.EditStack()
         self.saved_revision = 0
         self._status = ""
@@ -427,7 +431,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.view = QtWidgets.QGraphicsView(self.scene)
         self.view.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.view.setBackgroundBrush(QtGui.QBrush(theme.CANVAS))
-        self.view.setStyleSheet("background: transparent; border: 0;")
+        self.view.setStyleSheet(theme.CANVAS_STYLESHEET)
         self.view.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         self.view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
@@ -440,6 +444,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.view.horizontalScrollBar().valueChanged.connect(self._sync_ruler)
         self.view.verticalScrollBar().valueChanged.connect(self._sync_headers)
         self.view.viewport().installEventFilter(self)
+        self.view.setDragMode(QtWidgets.QGraphicsView.NoDrag)
 
         corner = QtWidgets.QWidget()
         corner.setFixedSize(HEADER_W, RULER_H)
@@ -461,7 +466,159 @@ class StudioWindow(QtWidgets.QMainWindow):
             dock.setWidget(body)
             self.addDockWidget(area, dock)
 
+        self._build_menus()
         self.setStyleSheet(theme.main_stylesheet())
+        self._retitle()
+
+    # -- menus and titles --------------------------------------------------
+
+    def _build_menus(self):
+        """A menu bar, because a window with no way to open a file is not an
+        application -- it is a viewer for whatever the terminal handed it."""
+        bar = self.menuBar()
+        file_menu = bar.addMenu("&File")
+        self._add(file_menu, "&Open…", "Ctrl+O", self.open_dialog)
+        self.recent_menu = file_menu.addMenu("Open &Recent")
+        self._rebuild_recent()
+        file_menu.addSeparator()
+        self._add(file_menu, "&Save", "Ctrl+S", self.save)
+        self._add(file_menu, "Save &As…", "Ctrl+Shift+S", self.save_as)
+        file_menu.addSeparator()
+        self._add(file_menu, "&Quit", "Ctrl+Q", self.close)
+
+        edit_menu = bar.addMenu("&Edit")
+        self.undo_action = self._add(edit_menu, "&Undo", "Ctrl+Z", self.undo)
+        self.redo_action = self._add(edit_menu, "&Redo", "Ctrl+Shift+Z", self.redo)
+
+        view_menu = bar.addMenu("&View")
+        self._add(view_menu, "Zoom &In", "Ctrl++", lambda: self.zoom(self.ZOOM_STEP))
+        self._add(view_menu, "Zoom &Out", "Ctrl+-", lambda: self.zoom(1 / self.ZOOM_STEP))
+        self._add(view_menu, "Zoom to &Fit", "Ctrl+0", self.zoom_to_fit)
+
+        transport_menu = bar.addMenu("&Transport")
+        self._add(transport_menu, "&Play/Stop", "Space",
+                  lambda: self._transport_action(
+                      "stop" if self._playing() else "play"))
+        self._add(transport_menu, "&Rewind", "Home",
+                  lambda: self._transport_action("rewind"))
+        self._add(transport_menu, "Toggle &Loop", "L", self._toggle_loop)
+
+    def _add(self, menu, text, shortcut, slot):
+        action = QtGui.QAction(text, self)
+        if shortcut:
+            action.setShortcut(QtGui.QKeySequence(shortcut))
+        action.triggered.connect(lambda _checked=False: slot())
+        menu.addAction(action)
+        return action
+
+    def _playing(self):
+        return bool(self.transport and self.transport.snapshot().playing)
+
+    def _retitle(self):
+        """The title says what is open and whether it is saved.
+
+        `dirty` was tracked from the start and never displayed, which meant the
+        one place a user looks to answer "did that save?" could not answer it.
+        """
+        mark = "• " if self.dirty else ""
+        where = os.path.basename(self.path) if self.path else "unsaved"
+        self.setWindowTitle(f"{mark}visualnote studio — {self.project.name} [{where}]")
+        if hasattr(self, "undo_action"):
+            self.undo_action.setText(f"&Undo {self.edits.undo_name() or ''}".rstrip())
+            self.undo_action.setEnabled(self.edits.can_undo)
+            self.redo_action.setText(f"&Redo {self.edits.redo_name() or ''}".rstrip())
+            self.redo_action.setEnabled(self.edits.can_redo)
+
+    def _rebuild_recent(self):
+        self.recent_menu.clear()
+        entries = recent_paths()
+        if not entries:
+            action = self.recent_menu.addAction("(nothing yet)")
+            action.setEnabled(False)
+            return
+        for entry in entries:
+            self._add(self.recent_menu, os.path.basename(entry), None,
+                      lambda e=entry: self.open_path(e))
+
+    # -- opening -----------------------------------------------------------
+
+    def open_dialog(self):
+        chosen, _f = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Open", default_projects_dir(),
+            "Projects and scores (*.ncproj *.musicxml *.xml);;All files (*)")
+        if chosen:
+            self.open_path(chosen)
+
+    def open_path(self, path):
+        """Load another project into this window.
+
+        Replaces the project in place rather than spawning a second window: the
+        audio engine and its output device are process-wide and opened once
+        (the convention `SessionState` set for the terminal app), so a second
+        window would mean a second device or a shared one nobody owns.
+        """
+        from notecolor.gui.app import load_project
+
+        if self.dirty and not self._confirm_discard():
+            return False
+        try:
+            project = load_project(path)
+        except Exception as exc:                    # noqa: BLE001
+            self.say(f"cannot open: {exc}")
+            return False
+        self.project = project
+        self.path = path if str(path).endswith(BUNDLE_SUFFIX) else None
+        self.edits = edit.EditStack()
+        self.saved_revision = self.edits.revision
+        self.scene.project = project
+        self.scene.rebuild()
+        self.headers.project = project
+        self.headers.selected_index = 0
+        self.transport_bar.project = project
+        if self.transport is not None:
+            self.transport.set_tempo_map(project.tempo_map)
+            self.transport.stop()
+            self.transport.locate(0.0)
+        if self.player is not None:
+            self.player.project = project
+            self.player.refresh()
+        remember_path(path)
+        self._rebuild_recent()
+        self._retitle()
+        self.say(f"opened {os.path.basename(str(path))}")
+        return True
+
+    def _confirm_discard(self):
+        choice = QtWidgets.QMessageBox.question(
+            self, "Unsaved changes",
+            f"{self.project.name} has unsaved changes.",
+            QtWidgets.QMessageBox.Save | QtWidgets.QMessageBox.Discard
+            | QtWidgets.QMessageBox.Cancel)
+        if choice == QtWidgets.QMessageBox.Save:
+            return self.save()
+        return choice == QtWidgets.QMessageBox.Discard
+
+    def zoom_to_fit(self):
+        """Fit the whole project across the viewport."""
+        beats = max(1.0, self.project.end_beat or self.scene.total_beats)
+        width = max(200, self.view.viewport().width() - 20)
+        self.zoom((width / beats) / self.scene.px_per_beat, 0.0)
+        self.view.horizontalScrollBar().setValue(0)
+
+    def showEvent(self, event):
+        """Start at bar 1.
+
+        A `QGraphicsView` whose scene is wider than its viewport opens
+        **scrolled to the middle**, and the scrollbar has no range until after
+        the first show -- so setting it during construction silently does
+        nothing. Found by a test asserting where a canvas click lands: the app
+        was opening halfway through the timeline, past the music.
+        """
+        super().showEvent(event)
+        if not self._shown:
+            self._shown = True
+            self.view.horizontalScrollBar().setValue(0)
+            self.view.verticalScrollBar().setValue(0)
 
     def _sync_ruler(self, value):
         self.ruler.offset = value
@@ -544,6 +701,7 @@ class StudioWindow(QtWidgets.QMainWindow):
             self.player.refresh()
         self.headers.update()
         self.scene.rebuild()
+        self._retitle()
         self.say(name)
 
     def undo(self):
@@ -581,6 +739,15 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.say(f"zoom {after:.0f} px/beat")
 
     def eventFilter(self, watched, event):
+        # Clicking anywhere in the track area moves the playhead. Every DAW
+        # does this; restricting it to the ruler strip makes the largest
+        # target on screen inert.
+        if (watched is self.view.viewport()
+                and event.type() == QtCore.QEvent.MouseButtonPress
+                and event.button() == QtCore.Qt.LeftButton):
+            scene_x = self.view.mapToScene(event.position().toPoint()).x()
+            self._locate(max(0.0, scene_x / self.scene.px_per_beat))
+            return True
         if (watched is self.view.viewport()
                 and event.type() == QtCore.QEvent.Wheel
                 and event.modifiers() & QtCore.Qt.ControlModifier):
@@ -607,6 +774,10 @@ class StudioWindow(QtWidgets.QMainWindow):
             self.say(f"save failed: {exc}")
             return False
         self.saved_revision = self.edits.revision
+        remember_path(self.path)
+        if hasattr(self, "recent_menu"):
+            self._rebuild_recent()
+        self._retitle()
         self.say(f"saved {os.path.basename(self.path)}")
         return True
 

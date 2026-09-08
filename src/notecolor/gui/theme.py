@@ -106,6 +106,13 @@ def rgba(colour):
     return f"rgba({colour.red()},{colour.green()},{colour.blue()},{colour.alpha() / 255:.3f})"
 
 
+#: The arrange view's own viewport. Separate from `main_stylesheet()` because
+#: it is applied to one widget rather than the window, but it lives here for
+#: the same reason everything else does: chrome styling is decided in this
+#: module, not scattered through the widgets.
+CANVAS_STYLESHEET = "background: transparent; border: 0;"
+
+
 def main_stylesheet():
     """Chrome Qt draws for us -- docks, splitters, scrollbars, labels.
 

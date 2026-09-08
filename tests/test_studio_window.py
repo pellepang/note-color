@@ -226,3 +226,132 @@ def test_a_failed_save_reports_and_stays_dirty(window, tmp_path, monkeypatch):
     assert window.save(tmp_path / "p") is False
     assert window.dirty is True
     assert "save failed" in window._status
+
+
+# --- regressions found by review (round 2) ---------------------------------
+
+
+def test_locating_onto_a_note_always_includes_it(app):
+    """The rounding bug: `Locate` stored `round(beat -> frame)`, and converting
+    that frame back to a beat landed *above* the target about half the time
+    (1502 of 3000 measured triples). `ProjectPlayer` fires on
+    `start_beat >= window_start`, so a note exactly on the located beat fell
+    outside the first window and never sounded. Locating onto a note and
+    hearing it was a coin flip -- on the operation a DAW is judged on.
+    """
+    import random
+
+    from notecolor.audio.transport import Transport as T
+
+    random.seed(11)
+    for _ in range(400):
+        bpm = random.uniform(40, 300)
+        rate = random.choice([44100, 48000, 96000])
+        beat = float(random.randint(0, 400))
+        transport = T(TempoMap([TempoAnchor(0.0, bpm)]), sample_rate=rate)
+        transport.locate(beat)
+        transport._apply(transport.commands.drain())
+        assert transport.beat <= beat + 1e-9, (bpm, rate, beat, transport.beat)
+
+
+def test_a_note_on_the_located_beat_actually_fires(app):
+    from notecolor.audio.player import ProjectPlayer
+    from notecolor.audio.transport import Transport as T
+
+    class Fake:
+        def __init__(self):
+            self.started = []
+
+        def note_on(self, event, velocity=1.0, channel=0, patch=None):
+            self.started.append(event.pitch)
+            return 1
+
+        def schedule_note_off(self, voice_id, delay_seconds):
+            pass
+
+    project = Project(tempo_map=TempoMap([TempoAnchor(0.0, 291.0)]),
+                      tracks=[Track(clips=[NoteClip(length_beats=200, notes=[
+                          Note(80.0, 1.0, 60)])])])
+    engine, transport = Fake(), T(project.tempo_map, sample_rate=48000)
+    player = ProjectPlayer(project, engine, transport)
+    transport.locate(80.0)
+    transport.play()
+    for _ in range(20):
+        player.on_block(512)
+    assert engine.started == [60]
+
+
+def test_a_loop_shorter_than_one_block_still_loops(app):
+    """The wrap was a single `if`, so a block spanning several loop lengths
+    wrapped once and then ran away past the loop end for good."""
+    from notecolor.audio.transport import Transport as T
+
+    transport = T(TempoMap([TempoAnchor(0.0, 300.0)]), sample_rate=48000)
+    transport.set_loop(0.0, 0.5, enabled=True)
+    transport.play()
+    for _ in range(200):
+        transport.process_block(512)
+    assert 0.0 <= transport.beat < 0.5
+
+
+def test_the_title_shows_the_project_and_whether_it_is_saved(window, tmp_path):
+    assert "•" not in window.windowTitle()
+    window._toggle_track(0, "m")
+    assert window.windowTitle().startswith("•")
+    window.save(tmp_path / "p")
+    assert "•" not in window.windowTitle()
+    assert "p.ncproj" in window.windowTitle()
+
+
+def test_clicking_the_canvas_moves_the_playhead(window):
+    """The track area is the largest target on screen; restricting seeking to
+    the ruler strip makes it inert."""
+    window.resize(900, 500)
+    window.show()
+    point = QtCore.QPointF(window.scene.px_per_beat * 6 + 2, 40)
+    event = QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, point,
+                              QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
+                              QtCore.Qt.NoModifier)
+    assert window.eventFilter(window.view.viewport(), event) is True
+    _pump(window)
+    assert window.transport.snapshot().beat == pytest.approx(6.0, abs=0.6)
+
+
+def test_the_file_menu_can_open_and_undo_is_labelled(window):
+    titles = [m.title() for m in window.menuBar().findChildren(QtWidgets.QMenu)]
+    assert "&File" in titles and "&Edit" in titles
+    window._toggle_track(0, "m")
+    assert "Mute" in window.undo_action.text()
+    assert window.undo_action.isEnabled()
+
+
+def test_opening_replaces_the_project_in_place(window, tmp_path):
+    """One window, one audio device -- the convention SessionState set."""
+    from notecolor.project.bundle import save_project as save
+    other = Project(name="Other", tracks=[Track(name="z")])
+    path = save(other, tmp_path / "other")
+
+    assert window.open_path(path) is True
+    assert window.project.name == "Other"
+    assert [t.name for t in window.project.tracks] == ["z"]
+    assert window.scene.project is window.project
+    assert window.headers.project is window.project
+    assert not window.dirty
+
+
+def test_opening_something_unreadable_reports_and_keeps_the_project(window, tmp_path):
+    bad = tmp_path / "bad.ncproj"
+    bad.mkdir()
+    before = window.project
+    assert window.open_path(bad) is False
+    assert window.project is before
+    assert "cannot open" in window._status
+
+
+def test_the_view_opens_at_bar_one_not_the_middle(window):
+    """A QGraphicsView wider than its viewport opens scrolled to the centre,
+    and its scrollbar has no range until after the first show -- so the app
+    was opening halfway down the timeline, past the music."""
+    window.resize(900, 500)
+    window.show()
+    assert window.view.horizontalScrollBar().value() == 0

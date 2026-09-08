@@ -112,11 +112,17 @@ class ProjectPlayer:
         return self.transport.snapshot().loop_end_beat
 
     def _fire(self, start_beat, end_beat):
+        # Capture both collections once. The GUI thread replaces them wholesale
+        # in `refresh()`, so reading `self.audible` per note could apply
+        # pre-edit and post-edit mute state to different notes of the *same*
+        # block. Harmless in practice -- one block is ~10ms -- but the whole
+        # seam is built on atomic snapshots, and this costs nothing.
+        notes, audible = self.notes, self.audible
         tempo = self.project.tempo_map
-        for note in self.notes:
+        for note in notes:
             if note.start_beat >= end_beat:
                 break                           # sorted, so nothing later is due
-            if note.start_beat < start_beat or note.track_index not in self.audible:
+            if note.start_beat < start_beat or note.track_index not in audible:
                 continue
             voice = self.engine.note_on(
                 _note_on_event(note), velocity=note.velocity,
