@@ -510,3 +510,17 @@ def test_the_block_listener_error_counter_starts_at_zero_and_counts(monkeypatch)
     out = np.zeros((64, 1), dtype=np.float32)
     engine._callback(out, 64, None, None)
     assert engine.block_listener_error_count == 1
+
+
+def test_notes_paint_above_their_clip_body(window):
+    """Making clips draggable required giving the body a z-value so it could
+    be hit-tested -- which put it on top of its own notes, and the notes are
+    the only colour on screen and the whole point of the app. Caught by
+    looking at a render, not by a test, so here is the test."""
+    scene = window.scene
+    bodies = [i for i in scene.items() if i.data(1) is not None]
+    notes = [i for i in scene.items()
+             if isinstance(i, QtWidgets.QGraphicsRectItem)
+             and i.data(1) is None and i.zValue() == scene.Z_NOTE]
+    assert bodies and notes
+    assert max(b.zValue() for b in bodies) < min(n.zValue() for n in notes)

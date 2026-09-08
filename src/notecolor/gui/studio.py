@@ -41,6 +41,13 @@ def pitch_colour(pitch_class, lightness=0.66, alpha=255):
 
 
 class ArrangeScene(QtWidgets.QGraphicsScene):
+    #: Explicit stacking, because the order items are *added* stopped deciding
+    #: it the moment clips became draggable: giving the clip body a z-value so
+    #: `clip_at()` could find it put the body on top of its own notes, and the
+    #: notes -- the only colour on screen and the entire point of the app --
+    #: silently vanished under it.
+    Z_LANE, Z_CLIP, Z_CLIP_HEAD, Z_NOTE, Z_PLAYHEAD = 0, 1, 2, 3, 100
+
     def __init__(self, project, px_per_beat=DEFAULT_PX_PER_BEAT):
         super().__init__()
         self.project = project
@@ -88,7 +95,7 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
                 self._clip(row, track, clip)
 
         self.playhead = self.addLine(0, 0, 0, height, self._pen(theme.PLAYHEAD))
-        self.playhead.setZValue(100)
+        self.playhead.setZValue(self.Z_PLAYHEAD)
 
     def _clip(self, row, track, clip):
         x = clip.start_beat * self.px_per_beat
@@ -102,13 +109,15 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
         # tested from the start with nothing able to drive it from the mouse.
         body.setData(0, row)
         body.setData(1, clip)
-        body.setZValue(1)
+        body.setZValue(self.Z_CLIP)
         self.addItem(body)
         head = QtWidgets.QGraphicsRectItem(x, y, w, 12)
         head.setBrush(QtGui.QBrush(theme.CLIP_HEAD))
         head.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+        head.setZValue(self.Z_CLIP_HEAD)
         self.addItem(head)
         label = self.addText(clip.name or track.name.lower(), theme.font(7))
+        label.setZValue(self.Z_CLIP_HEAD)
         label.setDefaultTextColor(theme.TEXT_DIM)
         label.setPos(x + 2, y - 3)
 
@@ -125,6 +134,7 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
             item = QtWidgets.QGraphicsRectItem(nx, ny, nw, 3)
             item.setBrush(QtGui.QBrush(pitch_colour(note.pitch_class)))
             item.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+            item.setZValue(self.Z_NOTE)
             self.addItem(item)
 
     def clip_at(self, scene_point):
