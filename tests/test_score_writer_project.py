@@ -9,8 +9,9 @@ import json
 import numpy as np
 import pytest
 
-from notecolor.convert.convert import ConversionResult, Track
+from notecolor.convert.convert import ConversionResult, Part
 from notecolor.notation.score_writer import (
+    PROJECT_MANIFEST_VERSION,
     BEAT_SUBDIVISIONS,
     PROJECT_MANIFEST_KEY,
     _beat_positions,
@@ -92,9 +93,9 @@ def test_snap_to_grid_covers_binary_and_ternary_subdivision():
 
 
 def test_writes_one_part_per_track(tmp_path):
-    result = _result(tracks=[
-        Track(name="bass", notes=[_note(0.0, 1.0, 40)]),
-        Track(name="vocals", notes=[_note(0.0, 1.0, 67)]),
+    result = _result(parts=[
+        Part(name="bass", notes=[_note(0.0, 1.0, 40)]),
+        Part(name="vocals", notes=[_note(0.0, 1.0, 67)]),
     ])
     path = tmp_path / "p.musicxml"
     write_project(result, path)
@@ -106,9 +107,9 @@ def test_writes_one_part_per_track(tmp_path):
 def test_duplicate_track_names_are_made_unique(tmp_path):
     """#128 measured <part-name> is the only track identity that survives a
     round trip, so a duplicate would silently merge two tracks' provenance."""
-    result = _result(tracks=[
-        Track(name="other", notes=[_note(0.0, 1.0, 60)]),
-        Track(name="other", notes=[_note(0.0, 1.0, 64)]),
+    result = _result(parts=[
+        Part(name="other", notes=[_note(0.0, 1.0, 60)]),
+        Part(name="other", notes=[_note(0.0, 1.0, 64)]),
     ])
     path = tmp_path / "dup.musicxml"
     write_project(result, path)
@@ -121,32 +122,32 @@ def test_manifest_round_trips(tmp_path):
     """#131 recorded this as unverified. It works -- but getCustom()
     returns a TUPLE of Text objects, not a string, which is the detail a
     naive reader gets wrong."""
-    result = _result(tracks=[
-        Track(name="bass", notes=[_note(0.0, 1.0, 40)], source_stem="bass",
+    result = _result(parts=[
+        Part(name="bass", notes=[_note(0.0, 1.0, 40)], source_stem="bass",
               model="BasicPitchTranscriber", low_confidence=True),
     ])
     path = tmp_path / "m.musicxml"
     write_project(result, path)
 
     manifest = read_project_manifest(path)
-    assert manifest["version"] == 1
-    track = manifest["tracks"][0]
-    assert track["name"] == "bass"
-    assert track["source_stem"] == "bass"
-    assert track["model"] == "BasicPitchTranscriber"
-    assert track["low_confidence"] is True
-    assert track["note_count"] == 1
+    assert manifest["version"] == PROJECT_MANIFEST_VERSION
+    part = manifest["parts"][0]
+    assert part["name"] == "bass"
+    assert part["source_stem"] == "bass"
+    assert part["model"] == "BasicPitchTranscriber"
+    assert part["low_confidence"] is True
+    assert part["note_count"] == 1
 
 
 def test_manifest_records_whether_the_meter_was_inferred(tmp_path):
     """#130's 'correctable guess' made concrete: 4/4 is written either way,
     but the file has to say whether anyone actually inferred it."""
-    guessed = _result(tracks=[Track(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=None)
+    guessed = _result(parts=[Part(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=None)
     path = tmp_path / "g.musicxml"
     write_project(guessed, path)
     assert read_project_manifest(path)["meter_inferred"] is False
 
-    inferred = _result(tracks=[Track(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=3)
+    inferred = _result(parts=[Part(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=3)
     path2 = tmp_path / "i.musicxml"
     write_project(inferred, path2)
     assert read_project_manifest(path2)["meter_inferred"] is True
@@ -163,7 +164,7 @@ def test_reading_a_manifest_from_a_file_without_one_returns_none(tmp_path):
 
 
 def test_inferred_meter_becomes_the_time_signature(tmp_path):
-    result = _result(tracks=[Track(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=3)
+    result = _result(parts=[Part(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=3)
     path = tmp_path / "ts.musicxml"
     write_project(result, path)
 
@@ -175,7 +176,7 @@ def test_inferred_meter_becomes_the_time_signature(tmp_path):
 def test_compound_meter_gets_an_eight_denominator(tmp_path):
     """#130: the denominator is a convention, not an inference -- 4, or 8
     when the numerator is a compound-meter value."""
-    result = _result(tracks=[Track(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=6)
+    result = _result(parts=[Part(name="a", notes=[_note(0, 1, 60)])], beats_per_bar=6)
     path = tmp_path / "68.musicxml"
     write_project(result, path)
 
@@ -188,7 +189,7 @@ def test_chord_spans_are_written_as_harmony_on_the_melody_part(tmp_path):
     """#131 put chord symbols in MusicXML <harmony> and recorded the round
     trip as unverified. Verified here: figure and offset both survive."""
     result = _result(
-        tracks=[Track(name="vocals", notes=[_note(0.0, 1.0, 67)])],
+        parts=[Part(name="vocals", notes=[_note(0.0, 1.0, 67)])],
         chords=[ChordSpan(0.0, 2.0, "C"), ChordSpan(2.0, 4.0, "G7")],
         beats=BeatGrid(tuple(i * 0.5 for i in range(9)), (0.0, 2.0)),
     )
@@ -204,7 +205,7 @@ def test_an_unparseable_chord_figure_is_skipped_not_fatal(tmp_path):
     """This repo's jazz spelling is not always a figure music21 parses.
     Blank rather than a guess, and never a crashed write."""
     result = _result(
-        tracks=[Track(name="a", notes=[_note(0.0, 1.0, 60)])],
+        parts=[Part(name="a", notes=[_note(0.0, 1.0, 60)])],
         chords=[ChordSpan(0.0, 1.0, "C"), ChordSpan(1.0, 2.0, "!!not a chord!!")],
     )
     path = tmp_path / "bad.musicxml"
@@ -218,7 +219,7 @@ def test_an_unparseable_chord_figure_is_skipped_not_fatal(tmp_path):
 def test_a_chords_only_conversion_still_writes_a_readable_file(tmp_path):
     """`convert --no-notes` has no tracks at all; it must still produce a
     file rather than an empty score."""
-    result = _result(tracks=[], chords=[ChordSpan(0.0, 2.0, "C")])
+    result = _result(parts=[], chords=[ChordSpan(0.0, 2.0, "C")])
     path = tmp_path / "c.musicxml"
     write_project(result, path)
 
@@ -236,8 +237,8 @@ def test_per_note_confidence_reaches_the_file_via_the_manifest(tmp_path):
     `editorial` dict is not exported to MusicXML** (measured: a note
     carrying editorial.confidence writes a file with no trace of it), and
     MusicXML has no per-note certainty field of its own."""
-    result = _result(tracks=[
-        Track(name="a", notes=[
+    result = _result(parts=[
+        Part(name="a", notes=[
             _note(0.0, 1.0, 60, confidence=0.42),
             _note(1.0, 2.0, 64, confidence=0.91),
         ]),
@@ -245,17 +246,17 @@ def test_per_note_confidence_reaches_the_file_via_the_manifest(tmp_path):
     path = tmp_path / "conf.musicxml"
     write_project(result, path)
 
-    triples = read_project_manifest(path)["tracks"][0]["note_confidence"]
+    triples = read_project_manifest(path)["parts"][0]["note_confidence"]
     assert [t[1] for t in triples] == [60, 64]
     assert [t[2] for t in triples] == [0.42, 0.91]
 
 
 def test_no_confidence_reported_means_an_empty_list_not_zeros(tmp_path):
     """A missing confidence and a confidence of zero are different claims."""
-    result = _result(tracks=[Track(name="a", notes=[_note(0.0, 1.0, 60)])])
+    result = _result(parts=[Part(name="a", notes=[_note(0.0, 1.0, 60)])])
     path = tmp_path / "noconf.musicxml"
     write_project(result, path)
-    assert read_project_manifest(path)["tracks"][0]["note_confidence"] == []
+    assert read_project_manifest(path)["parts"][0]["note_confidence"] == []
 
 
 def test_music21_editorial_is_not_exported_to_musicxml(tmp_path):
@@ -280,7 +281,7 @@ def test_a_chord_held_past_the_last_note_survives(tmp_path):
     ChordSymbol beyond it is silently dropped. A lead sheet routinely ends
     on a chord held past the final melody note, so the part is padded."""
     result = _result(
-        tracks=[Track(name="a", notes=[_note(0.0, 1.0, 60)])],
+        parts=[Part(name="a", notes=[_note(0.0, 1.0, 60)])],
         chords=[ChordSpan(0.0, 1.0, "C"), ChordSpan(3.0, 4.0, "G7")],
         duration_seconds=4.0,
     )
@@ -296,7 +297,7 @@ def test_notes_land_on_beat_positions_not_seconds(tmp_path):
     """The core of #130: with a 0.5s beat, a note at 1.0s is at beat 2,
     which is quarterLength offset 2.0 -- not 1.0."""
     result = _result(
-        tracks=[Track(name="a", notes=[_note(1.0, 1.5, 60)])],
+        parts=[Part(name="a", notes=[_note(1.0, 1.5, 60)])],
         beats=BeatGrid(tuple(i * 0.5 for i in range(9)), (0.0, 2.0)),
     )
     path = tmp_path / "grid.musicxml"
@@ -317,7 +318,41 @@ def test_writing_survives_unquantized_onsets(tmp_path):
         _note(float(t), float(t) + 0.137, 60 + i % 5)
         for i, t in enumerate(np.sort(rng.random(25) * 8.0))
     ]
-    result = _result(tracks=[Track(name="a", notes=notes)], duration_seconds=8.0)
+    result = _result(parts=[Part(name="a", notes=notes)], duration_seconds=8.0)
     path = tmp_path / "ugly.musicxml"
     write_project(result, path)  # must not raise
     assert path.exists() and path.stat().st_size > 0
+
+
+# --- the version 1 -> 2 key rename (ticket #150) ----------------------------
+
+
+def test_a_version_1_manifest_still_reads(tmp_path, monkeypatch):
+    """Version 1 spelled the key `tracks`, before map #145 reserved that word
+    for a DAW timeline lane. A project written by an earlier build must still
+    open -- the same degrade-rather-than-fail posture `config_store` and
+    `patch_format` take, and cheap enough that there is no reason not to."""
+    import json
+
+    from notecolor.notation import score_writer
+
+    result = _result(parts=[Part(name="bass", notes=[_note(0.0, 1.0, 40)])])
+    path = tmp_path / "v1.musicxml"
+
+    real_dumps = json.dumps
+
+    def dumps_as_version_1(obj, *args, **kwargs):
+        if isinstance(obj, dict) and "parts" in obj:
+            obj = dict(obj)
+            obj["version"] = 1
+            obj["tracks"] = obj.pop("parts")
+        return real_dumps(obj, *args, **kwargs)
+
+    monkeypatch.setattr(json, "dumps", dumps_as_version_1)
+    score_writer.write_project(result, path)
+    monkeypatch.undo()
+
+    manifest = read_project_manifest(path)
+    assert manifest["version"] == 1
+    assert "tracks" not in manifest
+    assert [p["name"] for p in manifest["parts"]] == ["bass"]

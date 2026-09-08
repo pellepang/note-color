@@ -14,7 +14,7 @@ from notecolor.convert.convert import (
     DEFAULT_BEATS_PER_BAR,
     STEM_DRUMS,
     ConversionResult,
-    Track,
+    Part,
     infer_beats_per_bar,
 )
 from notecolor.convert.transcribe_backends import BeatGrid, ChordSpan, ConversionUnavailable, TranscribedNote
@@ -86,7 +86,7 @@ def test_chords_fall_back_to_the_template_tier_rather_than_refusing():
 
 def test_wanting_neither_notes_nor_chords_needs_no_backend_at_all():
     result = convert.convert(_audio(), SAMPLE_RATE, want_notes=False, want_chords=False)
-    assert result.tracks == [] and result.chords == []
+    assert result.parts == [] and result.chords == []
 
 
 # --- Pass ordering and routing --------------------------------------------
@@ -98,8 +98,8 @@ def test_without_a_separator_the_mix_is_one_track():
     result = convert.convert(
         _audio(), SAMPLE_RATE, note_transcriber=FakeTranscriber(), want_chords=False
     )
-    assert [t.name for t in result.tracks] == ["mix"]
-    assert result.tracks[0].source_stem is None
+    assert [t.name for t in result.parts] == ["mix"]
+    assert result.parts[0].source_stem is None
     assert result.note_count == 1
 
 
@@ -114,8 +114,8 @@ def test_with_a_separator_each_non_drum_stem_becomes_a_track():
         note_transcriber=FakeTranscriber(),
         want_chords=False,
     )
-    assert [t.name for t in result.tracks] == ["bass", "other", "vocals"]
-    assert all(t.source_stem == t.name for t in result.tracks)
+    assert [t.name for t in result.parts] == ["bass", "other", "vocals"]
+    assert all(t.source_stem == t.name for t in result.parts)
 
 
 def test_no_notated_drum_part_is_written():
@@ -130,7 +130,7 @@ def test_no_notated_drum_part_is_written():
         note_transcriber=FakeTranscriber(),
         want_chords=False,
     )
-    assert STEM_DRUMS not in [t.name for t in result.tracks]
+    assert STEM_DRUMS not in [t.name for t in result.parts]
 
 
 def test_the_drum_stem_is_handed_to_the_beat_tracker_as_the_timing_oracle():
@@ -266,9 +266,9 @@ def test_track_can_be_marked_low_confidence():
     """#129: a stem no model covers well is still transcribed and marked,
     never dropped -- the output is editable, so an approximate track a
     human corrects beats a missing one."""
-    track = Track(name="other", low_confidence=True)
-    assert track.low_confidence is True
-    assert Track(name="bass").low_confidence is False
+    part = Part(name="other", low_confidence=True)
+    assert part.low_confidence is True
+    assert Part(name="bass").low_confidence is False
 
 
 # --- run_convert mode routing (map #123, #129) ----------------------------

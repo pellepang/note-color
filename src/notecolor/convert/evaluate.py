@@ -182,7 +182,7 @@ def editor_operations(reference, estimate, onset_tolerance=0.05):
 
 
 def truth_notes(track):
-    """A `synth_corpus.SynthTrack`'s notes as
+    """A `synth_corpus.SynthArrangement`'s notes as
     `(onset_seconds, offset_seconds, pitch_midi)` -- the reference side."""
     seconds_per_beat = 60.0 / track.tempo_bpm
     notes = []

@@ -2274,8 +2274,8 @@ def run_convert(path, mode="band", want_notes=True, want_chords=True, out_path=N
         return 1
 
     print(f"convert: {result.duration_seconds:.1f}s of audio")
-    if result.tracks:
-        for track in result.tracks:
+    if result.parts:
+        for part in result.parts:
             marker = "  (low confidence)" if track.low_confidence else ""
             print(f"  track {track.name!r}: {len(track.notes)} notes{marker}")
     if result.chords:

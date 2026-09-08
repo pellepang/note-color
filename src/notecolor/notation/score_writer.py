@@ -298,7 +298,12 @@ def write_score(result, path, time_signature=config.DEFAULT_TIME_SIGNATURE):
 #: `<part-name>` is the only stable track identity and this manifest is
 #: keyed by it.
 PROJECT_MANIFEST_KEY = "note-color.project"
-PROJECT_MANIFEST_VERSION = 1
+#: Bumped to 2 by ticket #150, which renamed the manifest's `tracks` key to
+#: `parts`. Under map #145's glossary a **Track** is a DAW timeline lane and a
+#: **Part** is one instrument's notated music -- MusicXML's own word for it
+#: (`<score-part>`, `<part-name>`), which is what this key always held.
+#: `read_project_manifest()` still accepts a version 1 file.
+PROJECT_MANIFEST_VERSION = 2
 
 
 def _beat_positions(times, beat_seconds):
@@ -375,12 +380,12 @@ def snap_to_grid(positions, subdivisions=BEAT_SUBDIVISIONS):
     return np.round(np.asarray(positions, dtype=float) * subdivisions) / float(subdivisions)
 
 
-def _confidence_triples(track, to_beats):
-    """[[beat, midi, confidence], ...] for the notes of `track` that have
+def _confidence_triples(part, to_beats):
+    """[[beat, midi, confidence], ...] for the notes of `part` that have
     one. Empty when the model reported none, rather than fabricating a
     default -- a missing confidence and a confidence of zero are not the
     same claim."""
-    scored = [n for n in track.notes if n.confidence is not None]
+    scored = [n for n in part.notes if n.confidence is not None]
     if not scored:
         return []
     positions = to_beats([n.onset_seconds for n in scored])
@@ -412,7 +417,7 @@ def _pad_to(part, result, to_beats):
         part.insert(current, filler)
 
 
-def write_project(result, path, key_fifths=0, melody_track=None, title=None):
+def write_project(result, path, key_fifths=0, melody_part=None, title=None):
     """Write a `convert.ConversionResult` as a **multi-track MusicXML
     project** (issue #131).
 
@@ -454,13 +459,13 @@ def write_project(result, path, key_fifths=0, melody_track=None, title=None):
     md.title = title or "Converted score"
     manifest = {
         "version": PROJECT_MANIFEST_VERSION,
-        "tracks": [
+        "parts": [
             {
-                "name": track.name,
-                "source_stem": track.source_stem,
-                "model": track.model,
-                "low_confidence": bool(track.low_confidence),
-                "note_count": len(track.notes),
+                "name": part.name,
+                "source_stem": part.source_stem,
+                "model": part.model,
+                "low_confidence": bool(part.low_confidence),
+                "note_count": len(part.notes),
                 # Per-note confidence lives HERE, not on the notes
                 # themselves: MusicXML has no per-note certainty field and
                 # music21's `editorial` dict is **not exported** --
@@ -470,9 +475,9 @@ def write_project(result, path, key_fifths=0, melody_track=None, title=None):
                 # position and pitch. #143 established the signal is free
                 # and useful; dropping it because the format has no slot
                 # would be the wrong trade.
-                "note_confidence": _confidence_triples(track, to_beats),
+                "note_confidence": _confidence_triples(part, to_beats),
             }
-            for track in result.tracks
+            for part in result.parts
         ],
         "meter_inferred": result.beats_per_bar is not None,
         "beat_count": len(beat_seconds),
@@ -480,18 +485,22 @@ def write_project(result, path, key_fifths=0, melody_track=None, title=None):
     md.setCustom(PROJECT_MANIFEST_KEY, json.dumps(manifest))
     score.insert(0, md)
 
-    melody_name = melody_track or (result.tracks[0].name if result.tracks else None)
+    melody_name = melody_part or (result.parts[0].name if result.parts else None)
     used_names = set()
 
-    for index, track in enumerate(result.tracks):
+    for index, source in enumerate(result.parts):
+        # `source` is this project's own Part (the data); `part` is
+        # music21's stream.Part (the notation object being built). Keeping
+        # the two names apart matters -- they are both "a part" and a single
+        # shared name silently reads the wrong one.
         part = stream.Part()
         # Unique part names are load-bearing: #128 found this is the only
-        # track identity that survives, so a duplicate would silently
-        # merge two tracks' provenance on read.
-        name = track.name
+        # part identity that survives, so a duplicate would silently
+        # merge two parts' provenance on read.
+        name = source.name
         suffix = 2
         while name in used_names:
-            name = f"{track.name} {suffix}"
+            name = f"{source.name} {suffix}"
             suffix += 1
         used_names.add(name)
         part.partName = name
@@ -502,10 +511,10 @@ def write_project(result, path, key_fifths=0, melody_track=None, title=None):
             # discarded by music21 (#128), so it goes on the first part.
             part.insert(0, m21tempo.MetronomeMark(number=round(bpm, 2)))
 
-        if track.notes:
-            onsets = to_beats([n.onset_seconds for n in track.notes])
-            offsets = to_beats([n.offset_seconds for n in track.notes])
-            for transcribed, start, end in zip(track.notes, onsets, offsets):
+        if source.notes:
+            onsets = to_beats([n.onset_seconds for n in source.notes])
+            offsets = to_beats([n.offset_seconds for n in source.notes])
+            for transcribed, start, end in zip(source.notes, onsets, offsets):
                 # A note quantized to zero length would be dropped by
                 # music21 rather than written; give it the shortest value
                 # the grid can express instead of silently losing it.
@@ -533,7 +542,7 @@ def write_project(result, path, key_fifths=0, melody_track=None, title=None):
         _pad_to(part, result, to_beats)
         score.insert(0, part)
 
-    if not result.tracks:
+    if not result.parts:
         # A chords-only conversion still has to produce a readable file.
         part = stream.Part()
         part.partName = "chords"
@@ -551,7 +560,7 @@ def write_project(result, path, key_fifths=0, melody_track=None, title=None):
 
 
 def read_project_manifest(path):
-    """The JSON track manifest from a project file, or `None`.
+    """The JSON part manifest from a project file, or `None`.
 
     `music21.metadata.Metadata.getCustom()` returns a **tuple** of `Text`
     objects rather than a string (measured, not assumed), which is the
@@ -569,6 +578,13 @@ def read_project_manifest(path):
         return None
     raw = custom[0] if isinstance(custom, (tuple, list)) else custom
     try:
-        return json.loads(str(raw))
+        manifest = json.loads(str(raw))
     except (ValueError, TypeError):
         return None
+    # Version 1 spelled this key `tracks`, before map #145 reserved that word
+    # for a DAW timeline lane. Normalise on read so a project written by an
+    # earlier build still opens -- the same additive, degrade-rather-than-fail
+    # posture `config_store` and `patch_format` take.
+    if isinstance(manifest, dict) and "parts" not in manifest and "tracks" in manifest:
+        manifest["parts"] = manifest.pop("tracks")
+    return manifest

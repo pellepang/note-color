@@ -88,7 +88,7 @@ class Part:
 
 
 @dataclass
-class SynthTrack:
+class SynthArrangement:
     """A generated arrangement and everything known about it."""
 
     parts: list
@@ -242,7 +242,7 @@ def make_track(
     ]
     drums = drum_pattern(len(chart), beats_per_bar, swing) if with_drums else []
 
-    return SynthTrack(
+    return SynthArrangement(
         parts=built, drums=drums, chords=chords, tempo_bpm=tempo_bpm,
         beats_per_bar=beats_per_bar, beat_unit=beat_unit, swing=swing, seed=seed,
         name=name or f"{progression}-{int(tempo_bpm)}bpm-{'swing' if swing else 'straight'}",
@@ -250,7 +250,7 @@ def make_track(
 
 
 def render_audio(track, sample_rate=None, drum_level=0.5):
-    """Render a `SynthTrack` to one mono float32 buffer.
+    """Render a `SynthArrangement` to one mono float32 buffer.
 
     Pitched parts go through `playback.render_offline()` -- this repo's
     own oscillator+ADSR instrument -- and drums are mixed in from

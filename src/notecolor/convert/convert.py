@@ -21,7 +21,7 @@ beat grid beats independent snapping) and H3 (ensembling earns its cost).
 The stages are ordered so each can be switched off and measured, which is
 what makes them testable rather than assumed. Separation survives H1's
 rejection regardless: #127's drum-stem downbeat gain is measured, and a
-multi-track deliverable structurally needs per-instrument audio.
+multi-part deliverable structurally needs per-instrument audio.
 
 Refuses rather than degrades (#129): a missing stage raises
 `ConversionUnavailable` carrying its install line, never a silent
@@ -61,9 +61,9 @@ DEFAULT_MELODY_STEM = STEM_VOCALS
 
 
 @dataclass
-class Track:
-    """One track of the multi-track project (#131). `name` becomes the
-    MusicXML `<part-name>`, which #128 measured is the only stable track
+class Part:
+    """One part of the multi-part project (#131). `name` becomes the
+    MusicXML `<part-name>`, which #128 measured is the only stable part
     identity across a music21 round trip."""
 
     name: str
@@ -71,8 +71,8 @@ class Track:
     source_stem: Optional[str] = None
     model: Optional[str] = None
     #: #129: a stem no model covers well is still transcribed and its
-    #: track marked, never dropped -- the output is editable, so an
-    #: approximate track a human corrects beats a missing one.
+    #: part marked, never dropped -- the output is editable, so an
+    #: approximate part a human corrects beats a missing one.
     low_confidence: bool = False
 
 
@@ -83,7 +83,7 @@ class ConversionResult:
     #132's harness scores this shape directly without a round trip
     through disk."""
 
-    tracks: list = field(default_factory=list)
+    parts: list = field(default_factory=list)
     chords: list = field(default_factory=list)
     beats: BeatGrid = field(default_factory=BeatGrid)
     #: Meter numerator, inferred; None when the confidence gate did not
@@ -94,7 +94,7 @@ class ConversionResult:
 
     @property
     def note_count(self) -> int:
-        return sum(len(track.notes) for track in self.tracks)
+        return sum(len(part.notes) for part in self.parts)
 
 
 #: #130's meter candidate set. Small on purpose: this is how the field
@@ -159,7 +159,7 @@ def convert(
     actually be enforced.
 
     With no `separator`, the mix is transcribed directly as a single
-    track. That is not a fallback -- it is H1's control arm, the "without
+    part. That is not a fallback -- it is H1's control arm, the "without
     separation" half of the A/B #126 says nobody has ever run."""
     audio = np.asarray(audio, dtype=np.float64)
     duration_seconds = audio.size / float(sample_rate) if sample_rate else 0.0
@@ -186,7 +186,7 @@ def convert(
         # material. A tracker that cannot use it ignores it.
         beats = beat_tracker.track(audio, sample_rate, drum_stem=stems.get(STEM_DRUMS))
 
-    tracks = []
+    parts = []
     if want_notes:
         model_name = type(note_transcriber).__name__
         if stems:
@@ -197,8 +197,8 @@ def convert(
                 # Drums -- which graduates to its own effort.
                 if stem_name == STEM_DRUMS:
                     continue
-                tracks.append(
-                    Track(
+                parts.append(
+                    Part(
                         name=stem_name,
                         notes=note_transcriber.transcribe(stem_audio, sample_rate),
                         source_stem=stem_name,
@@ -206,8 +206,8 @@ def convert(
                     )
                 )
         else:
-            tracks.append(
-                Track(
+            parts.append(
+                Part(
                     name="mix",
                     notes=note_transcriber.transcribe(audio, sample_rate),
                     source_stem=None,
@@ -229,7 +229,7 @@ def convert(
 
     beats_per_bar, committed = infer_beats_per_bar(beats)
     return ConversionResult(
-        tracks=tracks,
+        parts=parts,
         chords=chords,
         beats=beats,
         beats_per_bar=beats_per_bar if committed else None,
