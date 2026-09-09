@@ -150,6 +150,52 @@ class TimeSignature:
         return self.numerator * 4.0 / self.denominator
 
 
+#: A relative-major/minor pair sharing the same `key_fifths` accidentals is
+#: ambiguous about its tonic (fifths=0 is equally C major or A minor) --
+#: `Project.key_mode` disambiguates it. The relative minor's tonic sits a
+#: minor third below its relative major's, hence the `- 3` in
+#: `key_tonic_pitch_class()` below.
+KEY_MODES = ("major", "minor")
+
+#: Sharp-spelled chromatic note names, used when `key_fifths >= 0`.
+_SHARP_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+#: Flat-spelled chromatic note names, used when `key_fifths < 0`. A separate
+#: fixed table from `analysis.color_map.NOTE_NAMES_FIFTHS` (which is a single
+#: always-flat convention for pitch-class coloring) -- this one flips with
+#: the sign of the *project's own* key signature instead.
+_FLAT_NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+
+
+def key_tonic_pitch_class(key_fifths, key_mode):
+    """The tonic's MIDI pitch class (0-11) for a `key_fifths`/`key_mode` pair.
+
+    Circle-of-fifths arithmetic: each fifths step moves the major tonic up a
+    perfect fifth (7 semitones); the relative minor's tonic sits 3 semitones
+    below that."""
+    if key_mode == "minor":
+        return (7 * key_fifths - 3) % 12
+    return (7 * key_fifths) % 12
+
+
+def chromatic_note_names(key_fifths):
+    """12 note names, indexed by pitch class 0-11, spelled with sharps
+    (`key_fifths >= 0`) or flats (`key_fifths < 0`).
+
+    A deliberate simplification of full diatonic key-signature spelling
+    (which varies the accidental by scale degree -- see
+    `analysis.staff_map.key_signature_accidental()`) down to a single
+    sharps-vs-flats convention: good enough to label a piano-roll's 12
+    chromatic rows, not a substitute for that more precise notation-only
+    logic."""
+    return list(_SHARP_NOTE_NAMES if key_fifths >= 0 else _FLAT_NOTE_NAMES)
+
+
+def key_label(key_fifths, key_mode):
+    """Human-readable key label, e.g. `"F major"` or `"D minor"`."""
+    tonic_name = chromatic_note_names(key_fifths)[key_tonic_pitch_class(key_fifths, key_mode)]
+    return f"{tonic_name} {key_mode}"
+
+
 # --------------------------------------------------------------------------
 # Content
 # --------------------------------------------------------------------------
@@ -244,6 +290,7 @@ class Project:
     tempo_map: TempoMap = field(default_factory=TempoMap)
     time_signature: TimeSignature = field(default_factory=TimeSignature)
     key_fifths: int = 0
+    key_mode: str = "major"
     sample_rate: int = 48000
     tracks: List[Track] = field(default_factory=list)
     chords: List[ChordSpan] = field(default_factory=list)

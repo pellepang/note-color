@@ -111,6 +111,7 @@ def project_to_dict(project):
         "time_signature": [project.time_signature.numerator,
                            project.time_signature.denominator],
         "key_fifths": project.key_fifths,
+        "key_mode": project.key_mode,
         "tempo_map": project.tempo_map.to_dict(),
         "tracks": [
             {
@@ -210,6 +211,7 @@ def project_from_dict(data):
         tempo_map=TempoMap.from_dict(data.get("tempo_map")),
         time_signature=TimeSignature(int(signature[0]), int(signature[1])),
         key_fifths=int(data.get("key_fifths", 0)),
+        key_mode=str(data.get("key_mode", "major")),
         sample_rate=int(data.get("sample_rate", 48000)),
         tracks=tracks,
         chords=chords,

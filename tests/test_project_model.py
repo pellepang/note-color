@@ -20,6 +20,9 @@ from notecolor.project.model import (
     TempoMap,
     TimeSignature,
     Track,
+    chromatic_note_names,
+    key_label,
+    key_tonic_pitch_class,
 )
 
 
@@ -152,3 +155,44 @@ def test_clips_know_their_own_kind():
 def test_a_corrected_chord_span_is_not_derived():
     assert ChordSpan(0, 4, "C").derived is True
     assert ChordSpan(0, 4, "Cm", derived=False).derived is False
+
+
+# --- key signature -----------------------------------------------------
+
+
+@pytest.mark.parametrize("fifths, mode, pitch_class", [
+    (0, "major", 0),    # C major
+    (0, "minor", 9),    # A minor
+    (1, "major", 7),    # G major
+    (1, "minor", 4),    # E minor
+    (-1, "major", 5),   # F major
+    (-3, "major", 3),   # Eb major
+    (7, "major", 1),    # C#/Db major
+    (-5, "major", 1),   # Db major
+])
+def test_key_tonic_pitch_class(fifths, mode, pitch_class):
+    assert key_tonic_pitch_class(fifths, mode) == pitch_class
+
+
+def test_chromatic_note_names_are_sharp_spelled_at_zero_and_positive_fifths():
+    names = chromatic_note_names(0)
+    assert (names[1], names[6], names[10]) == ("C#", "F#", "A#")
+    assert chromatic_note_names(3)[1] == "C#"
+
+
+def test_chromatic_note_names_are_flat_spelled_at_negative_fifths():
+    names = chromatic_note_names(-2)
+    assert (names[1], names[6], names[10]) == ("Db", "Gb", "Bb")
+
+
+def test_chromatic_note_names_agree_on_naturals_either_way():
+    naturals = {0: "C", 2: "D", 4: "E", 5: "F", 7: "G", 9: "A", 11: "B"}
+    for fifths in (-4, 0, 4):
+        names = chromatic_note_names(fifths)
+        for pitch_class, letter in naturals.items():
+            assert names[pitch_class] == letter
+
+
+def test_key_label():
+    assert key_label(-1, "major") == "F major"
+    assert key_label(0, "minor") == "A minor"

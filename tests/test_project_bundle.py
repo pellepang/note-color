@@ -33,6 +33,7 @@ def _project():
         tempo_map=TempoMap([TempoAnchor(0.0, 96.0), TempoAnchor(8.0, 132.0)]),
         time_signature=TimeSignature(3, 4),
         key_fifths=-2,
+        key_mode="minor",
         sample_rate=44100,
         tracks=[
             Track(name="Bass", color_pitch_class=0, gain_db=-3.0, pan=-0.25,
@@ -69,7 +70,8 @@ def test_everything_survives_a_round_trip(tmp_path):
     path = bundle.save_project(_project(), tmp_path / "Demo")
     loaded = bundle.load_project(path)
 
-    assert (loaded.name, loaded.key_fifths, loaded.sample_rate) == ("Demo", -2, 44100)
+    assert (loaded.name, loaded.key_fifths, loaded.key_mode, loaded.sample_rate) == \
+           ("Demo", -2, "minor", 44100)
     assert (loaded.time_signature.numerator, loaded.time_signature.denominator) == (3, 4)
     assert [(a.beat, a.bpm) for a in loaded.tempo_map.anchors] == [(0.0, 96.0), (8.0, 132.0)]
 
@@ -87,6 +89,18 @@ def test_everything_survives_a_round_trip(tmp_path):
     assert clip.fade_in_beats == 0.25
 
     assert [(c.name, c.derived) for c in loaded.chords] == [("Cm7", True), ("F7", False)]
+
+
+def test_a_manifest_with_no_key_mode_defaults_to_major(tmp_path):
+    """Older manifests predate `key_mode` -- they should still load, as C
+    major's ambiguous relative-minor-free default."""
+    path = bundle.save_project(_project(), tmp_path / "Demo")
+    manifest = os.path.join(path, "project.json")
+    data = json.loads(open(manifest).read())
+    del data["key_mode"]
+    open(manifest, "w").write(json.dumps(data))
+
+    assert bundle.load_project(path).key_mode == "major"
 
 
 def test_a_missing_confidence_stays_missing_rather_than_becoming_zero(tmp_path):
