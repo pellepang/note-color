@@ -371,6 +371,23 @@ def test_space_at_an_empty_cursor_position_adds_a_note(window):
     added = clip.notes[-1]
     assert (added.start_beat, added.pitch) == (5.0, 71)
     assert window.edits.undo_name() == "Add Note"
+    # Stays in cursor mode with the cursor untouched, so Space can be
+    # pressed repeatedly to lay down a run of notes (#155 hands-on fix).
+    assert scene.selected_note is None
+    assert scene.cursor == (5.0, 71)
+
+
+def test_space_in_note_select_mode_is_a_no_op(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, note)
+    before = len(clip.notes)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Space))
+    assert len(clip.notes) == before
+    assert scene.selected_note == (clip, note)
 
 
 def test_space_on_an_existing_note_removes_it(window):
@@ -392,41 +409,27 @@ def test_space_outside_any_clip_says_so_rather_than_crashing(window):
     assert "no clip here" in window._status
 
 
-# --- note mode: arrow-key nudging ---------------------------------------
+# --- note mode: Shift+arrow nudging --------------------------------------
 
 
-def test_arrow_keys_nudge_the_selected_note_in_pitch_and_time(window):
+def test_shift_arrow_nudges_the_selected_note_in_pitch_and_time(window):
     panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
     panel.view.scene().selected_note = (clip, note)
 
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up, QtCore.Qt.ShiftModifier))
     assert note.pitch == 61
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Down))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Down, QtCore.Qt.ShiftModifier))
     assert note.pitch == 60
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right, QtCore.Qt.ShiftModifier))
     assert note.start_beat == 1.0
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left, QtCore.Qt.ShiftModifier))
     assert note.start_beat == 0.0
 
     assert window.edits.undo_name() == "Move Note"
     window.undo()
     assert note.start_beat == 1.0
-
-
-def test_shift_arrow_nudges_by_octave_and_bar(window):
-    panel = _open(window)
-    clip = window.project.tracks[0].clips[0]
-    note = clip.notes[0]
-    scene = panel.view.scene()
-    scene.bounds = (0, 127)  # wide enough that the octave jump can't clamp
-    scene.selected_note = (clip, note)
-
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up, QtCore.Qt.ShiftModifier))
-    assert note.pitch == 72
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right, QtCore.Qt.ShiftModifier))
-    assert note.start_beat == 4.0
 
 
 def test_nudge_clamps_pitch_to_the_panels_own_bounds(window):
@@ -438,20 +441,94 @@ def test_nudge_clamps_pitch_to_the_panels_own_bounds(window):
     _, high = scene.bounds
     note.pitch = high
 
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up, QtCore.Qt.ShiftModifier))
     assert note.pitch == high
 
 
-def test_left_arrow_does_not_move_a_note_before_the_start_of_time(window):
+def test_shift_left_arrow_does_not_move_a_note_before_the_start_of_time(window):
     panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
     assert note.start_beat == 0.0
     panel.view.scene().selected_note = (clip, note)
 
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left, QtCore.Qt.ShiftModifier))
     assert note.start_beat == 0.0
     assert window.edits.undo_name() is None
+
+
+# --- note mode: plain-arrow note-to-note navigation ----------------------
+
+
+def test_left_right_arrows_step_between_notes_in_time(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    first, second = clip.notes[0], clip.notes[1]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, first)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right))
+    assert scene.selected_note == (clip, second)
+    # A plain arrow only re-selects -- it never edits the model.
+    assert first.start_beat == 0.0 and second.start_beat == 2.0
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left))
+    assert scene.selected_note == (clip, first)
+
+
+def test_right_arrow_at_the_last_note_says_so(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    last = clip.notes[1]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, last)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right))
+    assert scene.selected_note == (clip, last)
+    assert "no more notes" in window._status
+
+
+def test_up_down_arrows_step_between_notes_in_pitch(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    lower, higher = clip.notes[0], clip.notes[1]
+    assert lower.pitch < higher.pitch
+    scene = panel.view.scene()
+    scene.selected_note = (clip, lower)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    assert scene.selected_note == (clip, higher)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Down))
+    assert scene.selected_note == (clip, lower)
+
+
+def test_up_arrow_with_no_higher_note_says_so(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    highest = clip.notes[1]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, highest)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    assert scene.selected_note == (clip, highest)
+    assert "no note there" in window._status
+
+
+def test_note_navigation_crosses_clip_boundaries(window):
+    """Left/Right/Up/Down look across every clip in the open track, not just
+    the selected note's own clip."""
+    panel = _open(window)
+    track = window.project.tracks[0]
+    far_clip = NoteClip(start_beat=20, length_beats=4,
+                        notes=[Note(0.0, 1.0, 90)])
+    track.clips.append(far_clip)
+    clip = track.clips[0]
+    second = clip.notes[1]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, second)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right))
+    assert scene.selected_note == (far_clip, far_clip.notes[0])
 
 
 # --- mode switching: keyboard (Enter) and toolbar button ----------------
@@ -468,9 +545,9 @@ def test_enter_switches_from_cursor_mode_to_note_mode_and_back(window):
     assert scene.selected_note == (clip, note)
     assert panel.view.in_note_mode()
 
-    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up, QtCore.Qt.ShiftModifier))
     assert note.pitch == 61
-    # Note-mode nudges the note, not the parked cursor -- it only catches up
+    # Note-mode moves the note, not the parked cursor -- it only catches up
     # once Enter hands control back to it.
     assert scene.cursor == (note.start_beat, note.pitch - 1)
 

@@ -136,6 +136,13 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
                 return clip, note
         return None, None
 
+    def all_notes(self):
+        """Every `(clip, note)` in the open track, across all clips -- used
+        for note-to-note keyboard navigation in note-select mode, which
+        steps by time or pitch order regardless of which clip a note is in."""
+        return [(clip, note) for clip in self.track.clips
+               if isinstance(clip, NoteClip) for note in clip.notes]
+
     # -- scene-position lookups (mouse hit-testing) ------------------------
 
     def note_at(self, scene_point):
@@ -294,18 +301,26 @@ class PianoRollView(QtWidgets.QGraphicsView):
     def _snap(self, beat):
         return round(beat)
 
-    def _add_note(self, clip, beat, pitch):
+    def _add_note(self, clip, beat, pitch, select=True):
         note = Note(max(0.0, self._snap(beat) - clip.start_beat), 1.0, pitch)
         self._apply(edit.AddNote(clip, note))
-        self.scene().selected_note = (clip, note)
+        if select:
+            self.scene().selected_note = (clip, note)
+            self.scene().rebuild()
 
     def toggle_note_at_cursor(self):
         """Space: add a note at the ghost cursor, or delete the one already
         there -- the keyboard equivalent of Ctrl+click-to-add and
         click-then-Delete, in one key, since the cursor (unlike a mouse
-        click) is always already positioned somewhere sensible."""
+        click) is always already positioned somewhere sensible. Only meant
+        for cursor mode: a no-op while a note is selected, since Space has
+        no cursor position to add at there. Deliberately does not select the
+        note it adds (unlike a mouse Ctrl+click) -- staying in cursor mode
+        with the cursor untouched is what lets Space be pressed repeatedly
+        to lay down a run of notes, per hands-on feedback on the original
+        63b0c04 scheme, which switched into note-select mode on every add."""
         scene = self.scene()
-        if scene.track is None:
+        if scene.track is None or scene.selected_note is not None:
             return
         beat, pitch = scene.cursor
         clip, note = scene.note_at_cursor(beat, pitch)
@@ -315,7 +330,7 @@ class PianoRollView(QtWidgets.QGraphicsView):
         clip = scene.clip_at_beat(beat)
         if clip is None:
             return self._say("no clip here")
-        self._add_note(clip, beat, pitch)
+        self._add_note(clip, beat, pitch, select=False)
 
     def delete_selected(self):
         scene = self.scene()
@@ -327,7 +342,8 @@ class PianoRollView(QtWidgets.QGraphicsView):
 
     def toggle_mode(self):
         """Enter, or the mode button: switch between free ghost-cursor
-        movement and clamped note-nudging -- explicitly, rather than
+        movement and note-select mode (note-to-note navigation, or
+        Shift+arrow to move the selected note) -- explicitly, rather than
         inferring which is meant from the cursor's position on every arrow
         press (a UX call made with the user, not guessed)."""
         scene = self.scene()
@@ -365,26 +381,69 @@ class PianoRollView(QtWidgets.QGraphicsView):
         self.ensureVisible(beat * scene.px_per_beat, scene.pitch_to_y(pitch),
                           1.0, 1.0, 40, 40)
 
-    def _nudge_selected_note(self, key, shift):
-        """Keyboard alternative to dragging a note -- one key press, one undo
-        entry, exact grid/semitone steps where a drag only gets you close.
-        Pitch is clamped to the panel's own bounds, the same range a mouse
-        drag's `y_to_pitch()` already clamps to."""
+    def _nudge_selected_note(self, key):
+        """Shift+arrow in note-select mode: move the selected note by one
+        grid step -- one key press, one undo entry, an exact semitone/beat
+        step where a drag only gets you close. Pitch is clamped to the
+        panel's own bounds, the same range a mouse drag's `y_to_pitch()`
+        already clamps to. Plain (un-shifted) arrows instead navigate
+        between existing notes -- see `_select_adjacent_note` -- so Shift is
+        now the "move it" modifier rather than a big-step modifier."""
         scene = self.scene()
         clip, note = scene.selected_note
         low, high = scene.bounds
         if key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
-            delta = (12 if shift else 1) * (1 if key == QtCore.Qt.Key_Up else -1)
+            delta = 1 if key == QtCore.Qt.Key_Up else -1
             pitch = max(low, min(high, note.pitch + delta))
             if pitch != note.pitch:
                 self._apply(edit.MoveNote(clip, note, note.start_beat, pitch=pitch))
         else:
-            step = 4.0 if shift else 1.0
-            delta = step if key == QtCore.Qt.Key_Right else -step
+            delta = 1.0 if key == QtCore.Qt.Key_Right else -1.0
             beat = max(0.0, note.start_beat + delta)
             if beat != note.start_beat:
                 self._apply(edit.MoveNote(clip, note, beat))
         scene.selected_note = (clip, note)
+
+    def _select_adjacent_note(self, key):
+        """Plain arrow in note-select mode: step the *selection* to another
+        existing note rather than moving anything -- Left/Right to the
+        nearest note later/earlier in time (any pitch, any clip in the open
+        track), Up/Down to the nearest note higher/lower in pitch (any
+        time). Arrows never land on empty space here; Shift+arrow is what
+        moves the note itself (`_nudge_selected_note`). Replaces free
+        nudging as the plain-arrow behaviour per hands-on feedback on the
+        original 63b0c04 scheme."""
+        scene = self.scene()
+        clip, note = scene.selected_note
+        abs_beat = clip.start_beat + note.start_beat
+        others = [(c, n) for c, n in scene.all_notes() if n is not note]
+
+        if key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+            if key == QtCore.Qt.Key_Right:
+                candidates = [(c, n) for c, n in others
+                             if c.start_beat + n.start_beat > abs_beat]
+            else:
+                candidates = [(c, n) for c, n in others
+                             if c.start_beat + n.start_beat < abs_beat]
+            if not candidates:
+                return self._say("no more notes")
+            candidates.sort(key=lambda cn: (
+                abs(cn[0].start_beat + cn[1].start_beat - abs_beat),
+                abs(cn[1].pitch - note.pitch), cn[1].pitch))
+        else:
+            if key == QtCore.Qt.Key_Up:
+                candidates = [(c, n) for c, n in others if n.pitch > note.pitch]
+            else:
+                candidates = [(c, n) for c, n in others if n.pitch < note.pitch]
+            if not candidates:
+                return self._say("no note there")
+            candidates.sort(key=lambda cn: (
+                abs(cn[1].pitch - note.pitch),
+                abs(cn[0].start_beat + cn[1].start_beat - abs_beat)))
+
+        scene.selected_note = candidates[0]
+        scene.rebuild()
+        self.edited.emit()
 
     # -- mouse: click-to-select, Ctrl+click-to-add, drag-to-move/resize -----
 
@@ -476,7 +535,10 @@ class PianoRollView(QtWidgets.QGraphicsView):
         shift = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
         if key in _ARROWS:
             if scene.selected_note is not None:
-                self._nudge_selected_note(key, shift)
+                if shift:
+                    self._nudge_selected_note(key)
+                else:
+                    self._select_adjacent_note(key)
             else:
                 self._move_cursor(key, shift)
         elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
