@@ -121,7 +121,8 @@ def main_stylesheet():
     hex value is how a palette quietly stops being a palette.
     """
     return f"""
-        QMainWindow, QWidget {{ background: transparent; }}
+        QMainWindow, QWidget {{ background: transparent; color: {rgba(TEXT)};
+                                font-family: "{FONT_FAMILY}"; }}
         QLabel {{ color: {rgba(TEXT_DIM)}; background: {rgba(PANEL)}; padding: 8px; }}
         QDockWidget {{ color: {rgba(TEXT_DIM)}; font-family: "{FONT_FAMILY}";
                        font-size: 10px; }}
@@ -133,4 +134,12 @@ def main_stylesheet():
         QScrollBar::handle:horizontal {{ background: {rgba(RULE_STRONG)};
                                          min-width: 40px; }}
         QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+        QPushButton {{ color: {rgba(TEXT)}; background: {rgba(CHROME_DEEP)};
+                      border: 1px solid {rgba(RULE_STRONG)}; padding: 3px 8px;
+                      font-family: "{FONT_FAMILY}"; font-size: 9px; }}
+        QPushButton:hover {{ border-color: {rgba(FOCUS)}; }}
+        QPushButton:pressed {{ background: {rgba(CHROME)}; }}
+        QPushButton:disabled {{ color: {rgba(TEXT_FAINT)}; border-color: {rgba(RULE)}; }}
+        QToolTip {{ color: {rgba(TEXT)}; background: {rgba(CHROME_DEEP)};
+                   border: 1px solid {rgba(RULE_STRONG)}; }}
     """
