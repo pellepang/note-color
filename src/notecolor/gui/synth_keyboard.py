@@ -375,6 +375,12 @@ class SynthKeyboardBand(QtWidgets.QWidget):
     #: plan (it also avoids this widget needing to remember what it sent
     #: on the matching key-down after the assignment has since changed).
     noteReleased = QtCore.Signal(object)
+    #: Fires whenever `layout_state.layout` actually changes -- via `Tab`
+    #: (`keyPressEvent`) or a direct jump (`set_layout()`) -- so external UI
+    #: (the layout-tabs bar in `synth_view.py`) can keep its highlighted tab
+    #: in sync. Not fired by `_toggle_kind()`/`_toggle_split()`, which also
+    #: call `_rebuild_structure()` but never change `.layout` itself.
+    layoutChanged = QtCore.Signal(str)
 
     def __init__(self, synth_names=None, kit_zone_names=None, base_octave=None, parent=None):
         super().__init__(parent)
@@ -429,9 +435,32 @@ class SynthKeyboardBand(QtWidgets.QWidget):
 
         self._refresh_boxes()
 
+    def _row_chip_label(self, base_row):
+        layout = self.layout_state.layout
+        if layout == LAYOUT_DUAL:
+            return "Synth B" if base_row == "upper" else "Synth A"
+        if layout == LAYOUT_HYBRID:
+            return "Synth" if base_row == "upper" else "Pads"
+        if layout == LAYOUT_ALLPADS:
+            return "Pads Hi" if base_row == "upper" else "Pads Lo"
+        # LAYOUT_CUSTOM
+        base_label = "Upper" if base_row == "upper" else "Lower"
+        if self.layout_state.split.get(base_row, False):
+            return f"{base_label} lo"
+        return base_label
+
     def _build_base_row(self, base_row):
         row_box = QtWidgets.QHBoxLayout()
         row_box.setSpacing(6)
+
+        chip_label = QtWidgets.QLabel(self._row_chip_label(base_row).upper(), self)
+        chip_label.setFont(theme.font(7))
+        chip_label.setStyleSheet(
+            f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};"
+        )
+        chip_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+        chip_label.setMinimumWidth(52)
+        row_box.addWidget(chip_label)
 
         if self.layout_state.layout == LAYOUT_CUSTOM:
             kind_button = QtWidgets.QToolButton(self)
@@ -459,9 +488,11 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             half_box = QtWidgets.QVBoxLayout()
             half_box.setSpacing(2)
             pill = AssignmentPill(self)
+            pill.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
             pill.stepRequested.connect(lambda direction, rk=row_key: self._cycle_row(rk, direction))
             key_box_row = KeyBoxRow(self)
             half_box.addWidget(pill)
+            half_box.setAlignment(pill, QtCore.Qt.AlignLeft)
             half_box.addWidget(key_box_row)
             row_box.addLayout(half_box)
             self._row_widgets[row_key] = (pill, key_box_row)
@@ -507,6 +538,19 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             boxes.append({"letter": letter, "label": label, "color": colour})
         return boxes
 
+    # -- layout switching ---------------------------------------------------
+
+    def set_layout(self, layout):
+        """Jump straight to `layout` (one of `LAYOUT_ORDER`), as opposed to
+        `Tab`'s relative `cycle()` -- what a clicked layout-tab calls."""
+        if layout not in LAYOUT_ORDER:
+            raise ValueError(f"unknown layout: {layout!r}")
+        if layout == self.layout_state.layout:
+            return
+        self.layout_state.layout = layout
+        self._rebuild_structure()
+        self.layoutChanged.emit(self.layout_state.layout)
+
     # -- row assignment / custom controls ---------------------------------
 
     def _cycle_row(self, row_key, direction):
@@ -551,6 +595,7 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             if not event.isAutoRepeat():
                 self.layout_state.cycle()
                 self._rebuild_structure()
+                self.layoutChanged.emit(self.layout_state.layout)
             event.accept()
             return
 
@@ -617,15 +662,33 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         does not explicitly accept a `ShortcutOverride` loses the key to a
         `QAction` shortcut outright, regardless of its own `keyPressEvent`).
 
-        Currently belt-and-braces rather than load-bearing: as of this
-        writing `studio.py` registers no plain-`Tab` (or plain-letter)
-        `QAction` shortcut, so nothing actually collides yet. Implemented
-        anyway per the plan, since a future menu action easily could.
+        The `ShortcutOverride` branch is belt-and-braces rather than
+        load-bearing: as of this writing `studio.py` registers no plain-
+        `Tab` (or plain-letter) `QAction` shortcut, so nothing actually
+        collides yet. Implemented anyway per the plan, since a future menu
+        action easily could.
+
+        The `KeyPress` branch below IS load-bearing: this widget has
+        `QtCore.Qt.StrongFocus` and contains focusable child `QToolButton`s
+        (the chevrons in `AssignmentPill`, plus the kind/split buttons), so
+        Qt's default `QWidget.event()` intercepts a plain `Key_Tab` and
+        calls `focusNextPrevChild(true)` *before* `keyPressEvent()` is ever
+        reached -- since a focusable child exists, that call succeeds and
+        `keyPressEvent()`'s Tab-cycles-layout logic never fires. Routing
+        plain Tab straight to `keyPressEvent()` here is what makes Tab
+        cycle the keyboard layout instead of moving focus to a chevron
+        button. Shift+Tab is left alone: it isn't given any meaning by
+        `keyPressEvent()`, so ordinary backwards focus traversal is fine.
         """
         if event.type() == QtCore.QEvent.ShortcutOverride:
             key = event.key()
             if key == QtCore.Qt.Key_Tab or key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down) \
                     or key in _PIANO_KEYS:
                 event.accept()
+                return True
+        if event.type() == QtCore.QEvent.KeyPress:
+            key_event = event
+            if key_event.key() == QtCore.Qt.Key_Tab and key_event.modifiers() == QtCore.Qt.NoModifier:
+                self.keyPressEvent(key_event)
                 return True
         return super().event(event)

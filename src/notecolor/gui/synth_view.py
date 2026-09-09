@@ -28,6 +28,7 @@ with `StudioWindow` none the wiser about a second engine existing.
 from __future__ import annotations
 
 import functools
+import html
 import math
 import os
 
@@ -37,7 +38,7 @@ from notecolor.gui import theme
 from notecolor.gui.synth_workspace import (
     Canvas, Drawer, ModuleWindow, SYNTH_CORE_MODULES, CLAP_TYPE_KEY,
 )
-from notecolor.gui.synth_keyboard import SynthKeyboardBand
+from notecolor.gui.synth_keyboard import SynthKeyboardBand, LAYOUT_ORDER, LAYOUT_DUAL
 from notecolor.settings import config, patch_format
 from notecolor.tui import synth_params
 from notecolor.tui.synth_layout import slugify, PAD_CHANNEL
@@ -61,6 +62,15 @@ SECTION_TITLE_FOR_TYPE = {
     "filter_env": "FILTER ENV",
     "lfo": "LFO",
     "voice": "VOICE",
+}
+
+#: Tab labels for the layout-switcher bar (`.layout-tabs` in the accepted
+#: prototype), keyed by `synth_keyboard.LAYOUT_ORDER` entry.
+LAYOUT_TAB_LABELS = {
+    "dual": "1 DUAL SYNTH",
+    "hybrid": "2 SYNTH+PADS",
+    "allpads": "3 ALL PADS",
+    "custom": "4 CUSTOM",
 }
 
 #: Display titles for the three always-open modules (drawer rows already
@@ -125,6 +135,41 @@ EFFECT_DEFAULTS = {
 #: `synth_workspace._effect_drawer_entries()`'s own labels dict (module-
 #: private there, so duplicated rather than reached into).
 EFFECT_TITLES = {"delay": "Delay", "chorus": "Chorus"}
+
+#: Short descriptive tag shown small/dim next to a module window's title,
+#: per the accepted prototype's mock data -- covers every synth-core type
+#: key plus every key actually present in `effects_audio.EFFECT_TYPES`.
+TAG_FOR_TYPE = {
+    "osc1": "saw",
+    "osc2": "off",
+    "noise": "white",
+    "filter": "lp",
+    "amp_env": "ADSR",
+    "filter_env": "ADSR",
+    "lfo": "sine→pitch",
+    "voice": "poly 16",
+    "delay": "1/8 dot",
+    "chorus": "detune",
+}
+
+#: Title-bar dot accent color per module type -- per the accepted
+#: prototype's mock data (`--amber`/`--teal`/etc), mapped onto this
+#: codebase's `theme` constants. `chorus` has no prototype entry (the
+#: prototype only mocked eq/reverb/compressor/saturator, none of which
+#: exist here); TEAL_PALE is reused for it as a similarly "spacious/
+#: modulation" accent, matching the prototype's own reverb choice.
+DOT_COLOR_FOR_TYPE = {
+    "osc1": theme.AMBER,
+    "osc2": theme.TEAL_PALE,
+    "noise": theme.EMBER,
+    "filter": theme.TEAL,
+    "amp_env": theme.CORAL,
+    "filter_env": theme.CLAY_RED,
+    "lfo": theme.AMBER,
+    "voice": theme.LINEN_DIM,
+    "delay": theme.AMBER,
+    "chorus": theme.TEAL_PALE,
+}
 
 ENGINE_PILLS = ("synth", "sampler", "sf2")
 
@@ -225,9 +270,12 @@ class SynthView(QtWidgets.QMainWindow):
         row.addWidget(self.canvas, 1)
         outer.addWidget(main_row, 1)
 
+        outer.addWidget(self._build_layout_tabs())
+
         self.keyboard_band = SynthKeyboardBand(parent=central)
         self.keyboard_band.notePreviewRequested.connect(self._on_note_preview)
         self.keyboard_band.noteReleased.connect(self._on_note_released)
+        self.keyboard_band.layoutChanged.connect(self._on_layout_changed)
         outer.addWidget(self.keyboard_band)
 
         outer.addWidget(self._build_status_bar())
@@ -244,6 +292,7 @@ class SynthView(QtWidgets.QMainWindow):
 
         self._patch_name_label = QtWidgets.QLabel("", bar)
         self._patch_name_label.setFont(theme.font(9, bold=True))
+        self._patch_name_label.setTextFormat(QtCore.Qt.RichText)
         self._patch_name_label.setStyleSheet("background: transparent;")
         layout.addWidget(self._patch_name_label)
 
@@ -260,8 +309,6 @@ class SynthView(QtWidgets.QMainWindow):
         clap_pill.setStyleSheet(f"color: {theme.rgba(theme.TEXT_FAINT)}; background: {theme.rgba(theme.PANEL)};")
         layout.addWidget(clap_pill)
 
-        layout.addStretch(1)
-
         load_button = QtWidgets.QPushButton("Load", bar)
         load_button.clicked.connect(self._open_load_dialog)
         layout.addWidget(load_button)
@@ -270,11 +317,16 @@ class SynthView(QtWidgets.QMainWindow):
         save_button.clicked.connect(self._open_save_dialog)
         layout.addWidget(save_button)
 
-        tidy_button = QtWidgets.QPushButton("Tidy", bar)
+        tidy_button = QtWidgets.QPushButton("⊞ Tidy", bar)
+        tidy_button.setStyleSheet(
+            f"border: 1px solid {theme.rgba(theme.ink(theme.COPPER))}; "
+            f"color: {theme.rgba(theme.ink(theme.COPPER_LIGHT))};")
         tidy_button.clicked.connect(self._tidy)
         layout.addWidget(tidy_button)
 
-        self._rec_button = QtWidgets.QPushButton("Rec", bar)
+        layout.addStretch(1)
+
+        self._rec_button = QtWidgets.QPushButton("● Rec ⇧S → new track", bar)
         self._rec_button.setCheckable(True)
         self._rec_button.clicked.connect(self._on_rec_clicked)
         layout.addWidget(self._rec_button)
@@ -283,11 +335,69 @@ class SynthView(QtWidgets.QMainWindow):
         self._play_button.clicked.connect(self._on_play_clicked)
         layout.addWidget(self._play_button)
 
-        panic_button = QtWidgets.QPushButton("Panic", bar)
+        panic_button = QtWidgets.QPushButton("Panic ⇧M", bar)
         panic_button.clicked.connect(self._on_panic_clicked)
         layout.addWidget(panic_button)
 
         return bar
+
+    def _build_layout_tabs(self):
+        """The layout-switcher row (`.layout-tabs` in the accepted
+        prototype) that sits between the module canvas and the key-box
+        band: one clickable tab per `LAYOUT_ORDER` entry, the active one
+        highlighted amber, plus a right-aligned hint about `Tab`. Clicking
+        a tab jumps `self.keyboard_band` straight to that layout via
+        `set_layout()`; `_on_layout_changed()` keeps the highlight in sync
+        whenever the band's layout changes some other way (Tab, or a
+        workspace restore)."""
+        bar = QtWidgets.QWidget(self)
+        bar.setStyleSheet(
+            f"background: {theme.rgba(theme.ink(theme.INK_0))}; "
+            f"border-top: 1px solid {theme.rgba(theme.RULE)};")
+        layout = QtWidgets.QHBoxLayout(bar)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._layout_tab_buttons = {}
+        for layout_name in LAYOUT_ORDER:
+            button = QtWidgets.QToolButton(bar)
+            button.setAutoRaise(True)
+            button.setText(LAYOUT_TAB_LABELS[layout_name])
+            button.setFont(theme.font(8, bold=True))
+            button.clicked.connect(
+                functools.partial(self._on_layout_tab_clicked, layout_name))
+            layout.addWidget(button)
+            self._layout_tab_buttons[layout_name] = button
+
+        layout.addStretch(1)
+
+        hint = QtWidgets.QLabel("Tab cycles, as in the terminal synth", bar)
+        hint.setFont(theme.font(7))
+        hint.setContentsMargins(0, 5, 12, 5)
+        hint.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};")
+        layout.addWidget(hint)
+
+        self._refresh_layout_tabs(LAYOUT_DUAL)
+        return bar
+
+    def _on_layout_tab_clicked(self, layout_name):
+        self.keyboard_band.set_layout(layout_name)
+
+    def _on_layout_changed(self, layout_name):
+        self._refresh_layout_tabs(layout_name)
+
+    def _refresh_layout_tabs(self, current_layout):
+        for layout_name, button in self._layout_tab_buttons.items():
+            if layout_name == current_layout:
+                button.setStyleSheet(
+                    f"padding: 5px 12px; color: {theme.rgba(theme.ink(theme.INK_0))}; "
+                    f"background: {theme.rgba(theme.ink(theme.AMBER))}; font-weight: 700; "
+                    f"border-right: 1px solid {theme.rgba(theme.RULE)};")
+            else:
+                button.setStyleSheet(
+                    f"padding: 5px 12px; color: {theme.rgba(theme.TEXT_FAINT)}; "
+                    f"background: transparent; "
+                    f"border-right: 1px solid {theme.rgba(theme.RULE)};")
 
     def _build_status_bar(self):
         bar = QtWidgets.QWidget(self)
@@ -305,7 +415,7 @@ class SynthView(QtWidgets.QMainWindow):
             layout.addWidget(label)
 
         layout.addStretch(1)
-        hint = QtWidgets.QLabel("wheel to sweep a knob · shift+wheel = coarse", bar)
+        hint = QtWidgets.QLabel("drag a title bar to move · × to close · ⊞ Tidy to snap to a grid", bar)
         hint.setFont(theme.font(7))
         hint.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};")
         layout.addWidget(hint)
@@ -351,7 +461,8 @@ class SynthView(QtWidgets.QMainWindow):
             (spec.label, synth_params.format_value(spec, synth_params.read(self.current_patch, spec)), None)
             for spec in specs
         ]
-        window = ModuleWindow(type_key, title, tag="", dot_color=theme.COPPER, knob_specs=knob_specs)
+        window = ModuleWindow(type_key, title, tag=TAG_FOR_TYPE.get(type_key, ""),
+                               dot_color=DOT_COLOR_FOR_TYPE.get(type_key, theme.COPPER), knob_specs=knob_specs)
         for knob, spec in zip(window.knobs(), specs):
             knob.wheelStepped.connect(functools.partial(self._on_synth_knob_wheel, spec, knob))
         return window
@@ -371,7 +482,8 @@ class SynthView(QtWidgets.QMainWindow):
             for spec in specs
         ]
         title = EFFECT_TITLES.get(type_key, type_key.title())
-        window = ModuleWindow(type_key, title, tag="FX", dot_color=theme.TEAL, knob_specs=knob_specs)
+        window = ModuleWindow(type_key, title, tag=TAG_FOR_TYPE.get(type_key, "FX"),
+                               dot_color=DOT_COLOR_FOR_TYPE.get(type_key, theme.TEAL), knob_specs=knob_specs)
         for knob, spec in zip(window.knobs(), specs):
             knob.wheelStepped.connect(functools.partial(self._on_effect_knob_wheel, effect_spec, spec, knob))
         window.closed.connect(functools.partial(self._on_effect_module_closed, effect_spec))
@@ -485,6 +597,7 @@ class SynthView(QtWidgets.QMainWindow):
         kb.assignments._index = dict(keyboard["index"])
         kb.base_octave = keyboard["base_octave"]
         kb._rebuild_structure()
+        self._refresh_layout_tabs(kb.layout_state.layout)
 
     def _apply_patch(self, patch):
         if self.current_patch is not None and self.current_patch is not patch:
@@ -501,12 +614,23 @@ class SynthView(QtWidgets.QMainWindow):
         self._refresh_patchbar()
 
     def _refresh_patchbar(self):
-        self._patch_name_label.setText(self.current_patch.name)
+        name = html.escape(self.current_patch.name)
+        self._patch_name_label.setText(
+            f'<span style="color:{theme.rgba(theme.ink(theme.COPPER))};">♪ </span>{name}')
+        self.setWindowTitle(f"VisualNote Studio — Synth View — {self.current_patch.name}")
         for engine, pill in self._engine_pills.items():
             active = engine == self.current_patch.engine
-            colour = theme.ink(theme.COPPER) if active else theme.TEXT_FAINT
-            background = theme.PANEL if not active else theme.CHROME_DEEP
-            pill.setStyleSheet(f"color: {theme.rgba(colour)}; background: {theme.rgba(background)};")
+            if active:
+                pill.setStyleSheet(
+                    f"color: {theme.rgba(theme.ink(theme.INK_0))}; "
+                    f"background: {theme.rgba(theme.ink(theme.TEAL_PALE))}; "
+                    f"border: 1px solid {theme.rgba(theme.ink(theme.TEAL_PALE))}; "
+                    f"font-weight: 600;")
+            else:
+                pill.setStyleSheet(
+                    f"color: {theme.rgba(theme.TEXT_FAINT)}; "
+                    f"background: transparent; "
+                    f"border: 1px solid {theme.rgba(theme.RULE_STRONG)};")
 
     # -- keyboard band wiring -------------------------------------------------
 

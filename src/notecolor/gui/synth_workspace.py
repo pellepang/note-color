@@ -91,7 +91,7 @@ class Knob(QtWidgets.QWidget):
         #: semantics at all.
         self.last_shift = False
         self.setFixedSize(KNOB_SIZE, KNOB_SIZE + 24)
-        self.setToolTip(label)
+        self.setToolTip(f"{label} — wheel to sweep, shift+wheel = coarse")
 
     def set_display(self, value_text, rotation_degrees):
         self._value_text = value_text
@@ -100,7 +100,7 @@ class Knob(QtWidgets.QWidget):
 
     def set_label(self, label):
         self._label = label
-        self.setToolTip(label)
+        self.setToolTip(f"{label} — wheel to sweep, shift+wheel = coarse")
         self.update()
 
     def wheelEvent(self, event):
@@ -123,7 +123,7 @@ class Knob(QtWidgets.QWidget):
         angle_rad = math.radians(self._rotation - 90)
         hand_end = QtCore.QPointF(centre.x() + radius * 0.8 * math.cos(angle_rad),
                                   centre.y() + radius * 0.8 * math.sin(angle_rad))
-        p.setPen(QtGui.QPen(theme.COPPER, 2))
+        p.setPen(QtGui.QPen(theme.ink(theme.COPPER), 2))
         p.drawLine(centre, hand_end)
 
         p.setPen(theme.TEXT_DIM)
@@ -150,6 +150,11 @@ class ModuleWindow(QtWidgets.QWidget):
     #: state the owner may want to snapshot (see the plan's note); this
     #: keeps that possible without this widget knowing about persistence.
     moved = QtCore.Signal(str)
+    #: Fires whenever this window should become the focused one -- on a
+    #: title-bar press or a click anywhere in the window's body. `Canvas`
+    #: is the one that actually arbitrates focus (only it knows about
+    #: sibling windows), so this just requests it.
+    focusRequested = QtCore.Signal(object)
 
     TITLE_H = 26
 
@@ -157,8 +162,13 @@ class ModuleWindow(QtWidgets.QWidget):
         super().__init__(parent)
         self.type_key = type_key
         self._drag = None
+        self._focused = False
         self.setFixedWidth(TIDY_SLOT_W - TIDY_GAP)
         self.setAutoFillBackground(False)
+        # Required for a plain QWidget subclass to actually paint the
+        # border/background set via setStyleSheet() below.
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self._apply_border_style()
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -198,9 +208,33 @@ class ModuleWindow(QtWidgets.QWidget):
     def knobs(self):
         return list(self._knobs)
 
+    # -- focus state ----------------------------------------------------
+
+    def _apply_border_style(self):
+        border_colour = theme.COPPER if self._focused else theme.RULE_2
+        self.setStyleSheet(
+            f"background: {theme.rgba(theme.CHROME)}; "
+            f"border: 1px solid {theme.rgba(theme.ink(border_colour))};"
+        )
+
+    def set_focused(self, focused):
+        """Called by `Canvas` to make this the (un)focused window -- only
+        the border colour changes, matching the prototype's `.win.focused`
+        rule; the background stays whatever `.win` already uses."""
+        self._focused = focused
+        self._apply_border_style()
+
+    def mousePressEvent(self, event):
+        # Covers clicks on the knob body area -- title-bar presses already
+        # request focus via `_title_press()`, called from
+        # `_TitleBar.mousePressEvent()`.
+        self.focusRequested.emit(self)
+        super().mousePressEvent(event)
+
     # -- drag-to-move, following piano_roll_panel.py's `_drag` idiom --------
 
     def _title_press(self, pos):
+        self.focusRequested.emit(self)
         self._drag = {"grab": pos, "from": self.pos()}
 
     def _title_move(self, global_pos):
@@ -418,8 +452,15 @@ class Drawer(QtWidgets.QWidget):
         outer.setSpacing(0)
 
         self._toggle_button = QtWidgets.QToolButton(self)
-        self._toggle_button.setText("‹")
-        self._toggle_button.setFixedHeight(18)
+        self._toggle_button.setText("☰")
+        self._toggle_button.setFixedHeight(28)
+        self._toggle_button.setFixedWidth(20)
+        self._toggle_button.setStyleSheet(
+            f"QToolButton {{ background: {theme.rgba(theme.ink(theme.INK_2))};"
+            f" border: 1px solid {theme.rgba(theme.RULE)}; color: {theme.rgba(theme.TEXT_FAINT)}; }}"
+            f" QToolButton:hover {{ color: {theme.rgba(theme.ink(theme.COPPER))};"
+            f" border-color: {theme.rgba(theme.ink(theme.COPPER))}; }}"
+        )
         self._toggle_button.clicked.connect(self.toggle)
         outer.addWidget(self._toggle_button)
         outer.addWidget(self._content, 1)
@@ -436,7 +477,6 @@ class Drawer(QtWidgets.QWidget):
     def set_expanded(self, expanded):
         self._expanded = expanded
         self._content.setVisible(expanded)
-        self._toggle_button.setText("‹" if expanded else "›")
         self.setFixedWidth(self.WIDTH if expanded else 18)
         self.toggled.emit(expanded)
 
@@ -489,6 +529,7 @@ class Canvas(QtWidgets.QWidget):
         self.setAcceptDrops(True)
         self.setStyleSheet(f"background: {theme.rgba(theme.CANVAS)};")
         self._windows = []
+        self._drop_hover = False
 
     # -- window bookkeeping ---------------------------------------------
 
@@ -496,12 +537,20 @@ class Canvas(QtWidgets.QWidget):
         window.setParent(self)
         window.show()
         window.closed.connect(lambda _key, w=window: self._on_window_closed(w))
+        window.focusRequested.connect(self._focus_window)
         self._windows.append(window)
         return window
 
     def _on_window_closed(self, window):
         if window in self._windows:
             self._windows.remove(window)
+
+    def _focus_window(self, window):
+        """Exactly one window is ever focused at a time -- the newly
+        clicked one, raised above its (overlapping) siblings."""
+        for w in self._windows:
+            w.set_focused(w is window)
+        window.raise_()
 
     def windows(self):
         return list(self._windows)
@@ -514,12 +563,22 @@ class Canvas(QtWidgets.QWidget):
     def dragEnterEvent(self, event):
         if event.mimeData().hasText():
             event.acceptProposedAction()
+            self._drop_hover = True
+            self.update()
 
     def dragMoveEvent(self, event):
         if event.mimeData().hasText():
             event.acceptProposedAction()
+            self._drop_hover = True
+            self.update()
+
+    def dragLeaveEvent(self, event):
+        self._drop_hover = False
+        self.update()
 
     def dropEvent(self, event):
+        self._drop_hover = False
+        self.update()
         type_key = event.mimeData().text()
         pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
         self.spawn_module(type_key, pos)
@@ -536,6 +595,7 @@ class Canvas(QtWidgets.QWidget):
             return None
         self.add_window(window)
         window.move(clamped)
+        self._focus_window(window)
         return window
 
     # -- background grid ----------------------------------------------------
@@ -553,6 +613,16 @@ class Canvas(QtWidgets.QWidget):
                 p.drawPoint(QtCore.QPointF(x, y))
                 x += spacing
             y += spacing
+
+        if self._drop_hover:
+            p.setRenderHint(QtGui.QPainter.Antialiasing, True)
+            inset_rect = self.rect().adjusted(8, 8, -8, -8)
+            p.fillRect(inset_rect, theme.ink(theme.COPPER, alpha=15))
+            p.setPen(QtGui.QPen(theme.ink(theme.COPPER), 1, QtCore.Qt.DashLine))
+            p.drawRect(inset_rect)
+            p.setPen(QtGui.QPen(theme.ink(theme.COPPER), 1))
+            p.setFont(theme.font(11))
+            p.drawText(inset_rect, QtCore.Qt.AlignCenter, "Drop to add module")
 
     # -- Tidy: ported 1:1 from the prototype's JS tidy() --------------------
 
