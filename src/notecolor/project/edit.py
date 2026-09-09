@@ -116,6 +116,46 @@ class SetTempo(Command):
         self.project.tempo_map = self.previous
 
 
+class SetTimeSignature(Command):
+    name = "Set Time Signature"
+
+    def __init__(self, project, numerator, denominator):
+        from notecolor.project.model import TimeSignature
+
+        self.project = project
+        self.previous = project.time_signature
+        self.time_signature = TimeSignature(int(numerator), int(denominator))
+
+    def do(self):
+        self.project.time_signature = self.time_signature
+
+    def undo(self):
+        self.project.time_signature = self.previous
+
+
+class SetKey(Command):
+    """Sets `key_fifths` and `key_mode` together as one undo step -- a key
+    change is one musical fact, not two independent field edits, so undo
+    should not be able to leave fifths and mode from different keys."""
+
+    name = "Set Key"
+
+    def __init__(self, project, key_fifths, key_mode):
+        self.project = project
+        self.previous_fifths = project.key_fifths
+        self.previous_mode = project.key_mode
+        self.key_fifths = int(key_fifths)
+        self.key_mode = key_mode
+
+    def do(self):
+        self.project.key_fifths = self.key_fifths
+        self.project.key_mode = self.key_mode
+
+    def undo(self):
+        self.project.key_fifths = self.previous_fifths
+        self.project.key_mode = self.previous_mode
+
+
 class MoveClip(Command):
     name = "Move Clip"
 

@@ -419,6 +419,54 @@ def test_removing_the_last_track_says_so_rather_than_raising(window):
     assert "no tracks" in window._status
 
 
+def test_readout_rects_cover_tempo_sig_and_key_but_not_position(window):
+    """Position is a live playhead readout with nothing to set; the other
+    three each open an edit dialog, so only they get a hit rect."""
+    window.transport_bar.snapshot = window.transport.snapshot()
+    window.transport_bar.paintEvent(None)
+    assert set(window.transport_bar._readout_rects) == {"tempo", "sig", "key"}
+    for name, rect in window.transport_bar._readout_rects.items():
+        assert window.transport_bar._at(rect.center()) == name
+
+
+def test_clicking_the_tempo_sig_and_key_readouts_opens_their_dialogs(window, monkeypatch):
+    calls = []
+    monkeypatch.setattr(window, "set_tempo", lambda: calls.append("tempo"))
+    monkeypatch.setattr(window, "set_time_signature", lambda: calls.append("sig"))
+    monkeypatch.setattr(window, "set_key", lambda: calls.append("key"))
+    window._transport_action("tempo")
+    window._transport_action("sig")
+    window._transport_action("key")
+    assert calls == ["tempo", "sig", "key"]
+
+
+def test_setting_the_time_signature_is_undoable(window, monkeypatch):
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog, "getInt", lambda *a, **k: (3, True))
+    monkeypatch.setattr(
+        QtWidgets.QInputDialog, "getItem", lambda *a, **k: ("8", True))
+    window.set_time_signature()
+    assert (window.project.time_signature.numerator,
+            window.project.time_signature.denominator) == (3, 8)
+    window.undo()
+    assert (window.project.time_signature.numerator,
+            window.project.time_signature.denominator) == (4, 4)
+
+
+def test_setting_the_key_is_undoable(window, monkeypatch):
+    monkeypatch.setattr(
+        QtWidgets.QDialog, "exec", lambda self: QtWidgets.QDialog.Accepted)
+    monkeypatch.setattr(
+        QtWidgets.QComboBox, "currentIndex", lambda self: 1)  # C# / D minor
+    monkeypatch.setattr(
+        QtWidgets.QComboBox, "currentText", lambda self: "minor")
+    window.set_key()
+    assert window.project.key_mode == "minor"
+    assert -7 <= window.project.key_fifths <= 7
+    window.undo()
+    assert (window.project.key_fifths, window.project.key_mode) == (0, "major")
+
+
 def test_changing_the_tempo_reaches_the_transport(window):
     """The transport holds its own tempo map reference; without an explicit
     handoff it keeps converting beats at the old tempo and the playhead drifts

@@ -25,6 +25,7 @@ from notecolor.project.bundle import (
 from notecolor.gui.piano_roll_panel import PianoRollPanel
 from notecolor.gui.recent import recent_paths, remember_path
 from notecolor.project.model import AUDIO_TRACK, NoteClip
+from notecolor.project import model
 
 LANE_H, HEADER_W, RULER_H = 54, 196, 22
 DEFAULT_PX_PER_BEAT = 34
@@ -395,6 +396,11 @@ class TransportBar(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
         self._hover = None
+        #: Readout hit rects, recomputed each paint (mirrors `_button_rects()`
+        #: below) -- `paintEvent()` is the only place that knows each
+        #: readout's actual x position, since that position depends on the
+        #: previous readout's rendered value width.
+        self._readout_rects = {}
 
     def _button_rects(self):
         return {name: QtCore.QRect(10 + i * 30, 8, 26, 22)
@@ -402,6 +408,9 @@ class TransportBar(QtWidgets.QWidget):
 
     def _at(self, point):
         for name, rect in self._button_rects().items():
+            if rect.contains(point):
+                return name
+        for name, rect in self._readout_rects.items():
             if rect.contains(point):
                 return name
         return None
@@ -451,9 +460,17 @@ class TransportBar(QtWidgets.QWidget):
         signature = self.project.time_signature
         readouts = [("position", f"{bar:03d}.{in_bar}.{tick:03d}"),
                     ("tempo", f"{self.project.tempo_map.bpm_at(beat):.2f}"),
-                    ("sig", f"{signature.numerator}/{signature.denominator}")]
+                    ("sig", f"{signature.numerator}/{signature.denominator}"),
+                    ("key", model.key_label(self.project.key_fifths,
+                                            self.project.key_mode))]
+        #: Everything but "position" is clickable -- position is a live
+        #: playhead readout with nothing to set, the other three each open
+        #: their own edit dialog (see `StudioWindow._transport_action()`).
+        clickable = {"tempo", "sig", "key"}
+        self._readout_rects = {}
         x = 146
         for label, value in readouts:
+            start_x = x
             p.setPen(theme.TEXT_FAINT)
             p.setFont(theme.font(6))
             p.drawText(x, 15, label.upper())
@@ -461,6 +478,9 @@ class TransportBar(QtWidgets.QWidget):
             p.setFont(theme.font(11, bold=True))
             p.drawText(x, 30, value)
             x += max(76, len(value) * 9 + 22)
+            if label in clickable:
+                self._readout_rects[label] = QtCore.QRect(
+                    start_x - 4, 2, x - start_x - 10, 34)
             p.setPen(theme.RULE)
             p.drawLine(x - 14, 8, x - 14, 30)
 
@@ -571,7 +591,8 @@ class StudioWindow(QtWidgets.QMainWindow):
         # a track's row height in place on the main canvas -- a `QSplitter`
         # rather than a `QDockWidget` because the user wants it anchored at
         # the bottom and drag-resizable, not floatable/undockable.
-        self.piano_panel = PianoRollPanel(self.run, self.say, pitch_colour)
+        self.piano_panel = PianoRollPanel(self.run, self.say, pitch_colour,
+                                          lambda: self.project.key_fifths)
         self.piano_panel.changed.connect(self._on_panel_changed)
         self.piano_panel.closed.connect(self._on_panel_closed)
 
@@ -622,6 +643,8 @@ class StudioWindow(QtWidgets.QMainWindow):
         self._add(edit_menu, "&Remove Track", "Ctrl+Shift+T", self.remove_track)
         self._add(edit_menu, "Re&name Track…", "F2", self.rename_track)
         self._add(edit_menu, "Set Te&mpo…", None, self.set_tempo)
+        self._add(edit_menu, "Set &Time Signature…", None, self.set_time_signature)
+        self._add(edit_menu, "Set &Key…", None, self.set_key)
 
         view_menu = bar.addMenu("&View")
         self._add(view_menu, "Zoom &In", "Ctrl++", lambda: self.zoom(self.ZOOM_STEP))
@@ -685,6 +708,56 @@ class StudioWindow(QtWidgets.QMainWindow):
             # converting beats at the old tempo and the playhead drifts from
             # the grid it is drawn on.
             self.transport.set_tempo_map(self.project.tempo_map)
+
+    def set_time_signature(self):
+        signature = self.project.time_signature
+        numerator, ok = QtWidgets.QInputDialog.getInt(
+            self, "Time Signature", "Beats per bar:",
+            signature.numerator, 1, 32)
+        if not ok:
+            return
+        denominator, ok = QtWidgets.QInputDialog.getItem(
+            self, "Time Signature", "Beat unit:",
+            ["1", "2", "4", "8", "16", "32"],
+            ["1", "2", "4", "8", "16", "32"].index(str(signature.denominator))
+            if str(signature.denominator) in ["1", "2", "4", "8", "16", "32"] else 2,
+            editable=False)
+        if not ok:
+            return
+        self.run(edit.SetTimeSignature(self.project, numerator, int(denominator)))
+
+    def set_key(self):
+        tonic_names = ["C", "C#", "D", "D#", "E", "F",
+                       "F#", "G", "G#", "A", "A#", "B"]
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Set Key")
+        layout = QtWidgets.QFormLayout(dialog)
+        tonic_box = QtWidgets.QComboBox()
+        tonic_box.addItems(tonic_names)
+        tonic_box.setCurrentIndex(model.key_tonic_pitch_class(
+            self.project.key_fifths, self.project.key_mode))
+        mode_box = QtWidgets.QComboBox()
+        mode_box.addItems(["major", "minor"])
+        mode_box.setCurrentIndex(0 if self.project.key_mode == "major" else 1)
+        layout.addRow("Tonic:", tonic_box)
+        layout.addRow("Mode:", mode_box)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+        tonic_pc = tonic_box.currentIndex()
+        mode = mode_box.currentText()
+        # Inverts `key_tonic_pitch_class()` -- picks the conventional,
+        # lower-accidental-count enharmonic spelling automatically (e.g.
+        # tonic C#/Db + major lands on Db major, 5 flats, rather than the
+        # equivalent but rarer C# major, 7 sharps).
+        combined_pc = tonic_pc if mode == "major" else (tonic_pc + 3) % 12
+        x = (7 * combined_pc) % 12
+        key_fifths = x - 12 if x > 6 else x
+        self.run(edit.SetKey(self.project, key_fifths, mode))
 
     def _retitle(self):
         """The title says what is open and whether it is saved.
@@ -823,6 +896,12 @@ class StudioWindow(QtWidgets.QMainWindow):
             self._toggle_loop()
         elif name == "record":
             self.say("record is not implemented yet")
+        elif name == "tempo":
+            self.set_tempo()
+        elif name == "sig":
+            self.set_time_signature()
+        elif name == "key":
+            self.set_key()
 
     def _locate(self, beat):
         if self.transport is not None:

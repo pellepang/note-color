@@ -90,6 +90,24 @@ def test_tempo_edits_replace_the_whole_map_reversibly():
     assert project.tempo_map.bpm_at(0) == 120.0
 
 
+def test_time_signature_edits_round_trip():
+    project = _project()
+    stack = edit.EditStack()
+    stack.run(edit.SetTimeSignature(project, 3, 8))
+    assert (project.time_signature.numerator, project.time_signature.denominator) == (3, 8)
+    stack.undo()
+    assert (project.time_signature.numerator, project.time_signature.denominator) == (4, 4)
+
+
+def test_key_edits_change_fifths_and_mode_together_and_undo_together():
+    project = _project()
+    stack = edit.EditStack()
+    stack.run(edit.SetKey(project, -3, "minor"))
+    assert (project.key_fifths, project.key_mode) == (-3, "minor")
+    stack.undo()
+    assert (project.key_fifths, project.key_mode) == (0, "major")
+
+
 def test_the_stack_is_bounded():
     project = _project()
     stack = edit.EditStack(depth=3)
