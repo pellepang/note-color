@@ -19,9 +19,12 @@ S, L, ...) fall through to `StudioWindow`'s own handler unchanged.
 from PySide6 import QtCore, QtGui, QtWidgets
 
 from notecolor.gui import theme
+from notecolor.notation.score_audition import (PIANO_LOWER_ROW, PIANO_UPPER_ROW,
+                                                clamp_base_octave, pitch_for_key)
 from notecolor.project import edit
 from notecolor.project.model import (Note, NoteClip, chromatic_note_names,
                                      diatonic_pitch_classes)
+from notecolor.settings import config
 
 #: Default pixel-per-semitone scale, same value the inline piano roll used --
 #: now a `PianoRollScene` instance attribute (`px_per_semitone`) rather than
@@ -61,6 +64,23 @@ _CLAIMED_KEYS = _ARROWS + (QtCore.Qt.Key_Space, QtCore.Qt.Key_Return,
                            QtCore.Qt.Key_Enter, QtCore.Qt.Key_Delete,
                            QtCore.Qt.Key_Backspace)
 
+#: Note-entry mode (issue #158, decision below): `I` (Insert) is always
+#: claimed while a track is open, so it can enter the mode from cursor mode
+#: no matter what else is going on. `Escape` is claimed only while note-entry
+#: is actually active (`PianoRollScene.note_entry`) -- outside it, Esc must
+#: keep falling through to `StudioWindow`'s own Q/Esc-closes-the-window
+#: binding unchanged, exactly as before this ticket.
+_ENTER_NOTE_ENTRY_KEY = QtCore.Qt.Key_I
+
+#: Qt key code -> layout char, built from `score_audition`'s own two-octave
+#: keyboard map (`PIANO_LOWER_ROW`/`PIANO_UPPER_ROW`) rather than a second,
+#: hand-copied table -- see the module docstring on why those stay the one
+#: source of truth. Qt's letter/digit key codes equal the ASCII code of the
+#: *uppercase* character (`Qt.Key_A == ord('A')`, `Qt.Key_2 == ord('2')`),
+#: which is what makes this derivable instead of another literal mapping.
+_PIANO_ENTRY_KEYS = {QtCore.Qt.Key(ord(_c.upper())): _c
+                     for _c in PIANO_LOWER_ROW + PIANO_UPPER_ROW}
+
 
 class PianoRollScene(QtWidgets.QGraphicsScene):
     """One track's notes, at a fixed pitch scale, over the panel's own
@@ -87,6 +107,26 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
         #: live only while a track is open and no note is selected, mutually
         #: exclusive with `selected_note` so arrows never mean two things.
         self.cursor = None
+        #: Note-entry mode (issue #158): a third mode, toggled explicitly
+        #: (`I` in / Esc always out), disjoint from both cursor mode and
+        #: note-select mode -- entering it does not disturb `selected_note`
+        #: (entry is only reachable from cursor mode, where it is already
+        #: `None`) or the ghost `cursor` (kept around so leaving restores it).
+        self.note_entry = False
+        #: The column (absolute beat) note-entry places its next chord on.
+        #: Arrows move it; a commit auto-advances it by one beat.
+        self.entry_beat = 0.0
+        #: The lower row's leftmost key's octave -- Up/Down inside note-entry
+        #: shift this, exactly the same knob `score_audition.PianoEntry`'s
+        #: terminal counterpart calls `base_octave`. Not reset by
+        #: open_track()/close() -- it is a keyboard-feel preference, not
+        #: per-track state.
+        self.entry_base_octave = clamp_base_octave(config.EDITOR_PIANO_BASE_OCTAVE)
+        #: `{layout_char: midi_pitch}` for every piano key currently held
+        #: down in note-entry mode -- rendering-only state (the ghost
+        #: outlines); `PianoRollView` owns the matching sound-engine voice
+        #: ids, since this scene knows nothing about audio.
+        self.entry_ghosts = {}
 
     # -- open / close --------------------------------------------------
 
@@ -102,6 +142,9 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
         self.bounds = (low, high)
         self.selected_note = None
         self.cursor = (0.0, pitches[0] if pitches else (low + high) // 2)
+        self.note_entry = False
+        self.entry_beat = 0.0
+        self.entry_ghosts = {}
         self.rebuild()
 
     def close(self):
@@ -109,6 +152,9 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
         self.bounds = None
         self.selected_note = None
         self.cursor = None
+        self.note_entry = False
+        self.entry_beat = 0.0
+        self.entry_ghosts = {}
         self.clear()
 
     @property
@@ -214,7 +260,9 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
                 self._clip_band(clip, height)
                 self._notes(clip)
 
-        if self.cursor is not None and self.selected_note is None:
+        if self.note_entry:
+            self._draw_entry_column()
+        elif self.cursor is not None and self.selected_note is None:
             self._draw_cursor()
 
     def _clip_band(self, clip, height):
@@ -267,6 +315,35 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
         item.setZValue(self.Z_NOTE)
         self.addItem(item)
 
+    def _draw_entry_column(self):
+        """Note-entry mode's own column marker (issue #158): a translucent
+        full-height band at `entry_beat`, plus one dashed ghost outline per
+        piano key still physically held down. There is no single pitch to
+        highlight the way `_draw_cursor()` does -- pitch comes from whichever
+        keys are down, not from a cursor -- so the band marks *where* a
+        chord will land and the per-key ghosts show *what* it will be."""
+        low, high = self.bounds
+        height = (high - low + 1) * self.px_per_semitone + 2 * PIANO_ROLL_PAD
+        x = self.entry_beat * self.px_per_beat
+        w = max(RESIZE_HANDLE_PX * 1.5, 1.0 * self.px_per_beat - 1)
+        band = QtWidgets.QGraphicsRectItem(x, 0, w, height)
+        band.setBrush(QtGui.QBrush(theme.SELECTION))
+        band.setOpacity(0.15)
+        band.setPen(QtGui.QPen(QtCore.Qt.NoPen))
+        band.setZValue(self.Z_NOTE)
+        self.addItem(band)
+
+        note_h = max(2.0, self.px_per_semitone - 1)
+        for pitch in self.entry_ghosts.values():
+            ny = self.pitch_to_y(pitch)
+            item = QtWidgets.QGraphicsRectItem(x, ny, w, note_h)
+            pen = QtGui.QPen(theme.SELECTION, 2, QtCore.Qt.DashLine)
+            pen.setCosmetic(True)
+            item.setPen(pen)
+            item.setBrush(QtGui.QBrush(QtCore.Qt.NoBrush))
+            item.setZValue(self.Z_NOTE)
+            self.addItem(item)
+
 
 class PianoRollView(QtWidgets.QGraphicsView):
     """Mouse and keyboard editing over a `PianoRollScene`.
@@ -288,7 +365,7 @@ class PianoRollView(QtWidgets.QGraphicsView):
     #: shares this view's `px_per_semitone`/row geometry) still has to redraw.
     zoomed = QtCore.Signal()
 
-    def __init__(self, run_command, say, pitch_colour):
+    def __init__(self, run_command, say, pitch_colour, sound_engine_provider=None):
         # Held in `self._piano_scene` too: passing the scene straight through
         # to `QGraphicsView.__init__()` with no other Python reference lets
         # PySide/Shiboken garbage-collect it immediately after construction
@@ -300,6 +377,26 @@ class PianoRollView(QtWidgets.QGraphicsView):
         self._run = run_command
         self._say = say
         self._drag = None
+        # Issue #158's live preview: a zero-argument callable returning the
+        # process's `sound_engine.SoundEngine`, or `None` when there is no
+        # audio device -- the same lazy-provider shape as
+        # `SessionState.ensure_sound_engine()` (decision #105), passed in by
+        # the host rather than looked up here, since VisualNote Studio (this
+        # widget's only host) has no `SessionState` at all: it owns one
+        # `SoundEngine` directly (`gui/app.py`'s `start_audio()`) and hands
+        # it to `ProjectPlayer`, so the provider this ticket wires up is
+        # `lambda: self.player.engine if self.player else None`.
+        self._sound_engine_provider = sound_engine_provider
+        #: `{layout_char: {"pitch": midi_pitch, "voice_id": ...}}` for every
+        #: piano key currently held down in note-entry mode -- the sounding
+        #: side of `PianoRollScene.entry_ghosts` (the rendering side).
+        self._entry_held = {}
+        #: Every distinct MIDI pitch that has been part of the chord
+        #: currently being built, accumulated across the whole held-group's
+        #: lifetime (not just whatever is still down at the moment the last
+        #: key comes up) -- release order must not drop an early note from
+        #: the eventual chord. Already deduplicated by construction (a set).
+        self._entry_group_pitches = set()
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.setFrameShape(QtWidgets.QFrame.NoFrame)
         self.setBackgroundBrush(QtGui.QBrush(theme.CANVAS))
@@ -314,6 +411,7 @@ class PianoRollView(QtWidgets.QGraphicsView):
         self.scene().open_track(track)
 
     def close_track(self):
+        self._discard_entry_chord()
         self.scene().close()
 
     def rebuild(self):
@@ -394,7 +492,7 @@ class PianoRollView(QtWidgets.QGraphicsView):
         to lay down a run of notes, per hands-on feedback on the original
         63b0c04 scheme, which switched into note-select mode on every add."""
         scene = self.scene()
-        if scene.track is None or scene.selected_note is not None:
+        if scene.track is None or scene.selected_note is not None or scene.note_entry:
             return
         beat, pitch = scene.cursor
         clip, note = scene.note_at_cursor(beat, pitch)
@@ -408,7 +506,7 @@ class PianoRollView(QtWidgets.QGraphicsView):
 
     def delete_selected(self):
         scene = self.scene()
-        if scene.selected_note is None:
+        if scene.note_entry or scene.selected_note is None:
             return self._say("no note selected")
         clip, note = scene.selected_note
         scene.selected_note = None
@@ -421,7 +519,7 @@ class PianoRollView(QtWidgets.QGraphicsView):
         inferring which is meant from the cursor's position on every arrow
         press (a UX call made with the user, not guessed)."""
         scene = self.scene()
-        if scene.track is None:
+        if scene.track is None or scene.note_entry:
             return
         if scene.selected_note is not None:
             clip, note = scene.selected_note
@@ -438,6 +536,9 @@ class PianoRollView(QtWidgets.QGraphicsView):
 
     def in_note_mode(self):
         return self.scene().selected_note is not None
+
+    def in_note_entry_mode(self):
+        return self.scene().note_entry
 
     def _move_cursor(self, key, shift):
         scene = self.scene()
@@ -518,6 +619,182 @@ class PianoRollView(QtWidgets.QGraphicsView):
         scene.selected_note = candidates[0]
         scene.rebuild()
         self.edited.emit()
+
+    # -- note-entry mode: held piano keys -> a chord (issue #158) ----------
+    #
+    # A third mode, entered from cursor mode via `I` and always left via
+    # Esc (`keyPressEvent()` below wires both, plus the note-select-mode
+    # fallthrough). While active, `PIANO_LOWER_ROW`/`PIANO_UPPER_ROW` keys
+    # (imported unchanged from `notation/score_audition.py` -- see the
+    # module docstring) are pitches rather than editor commands: each
+    # key-down sounds a live preview note and stages a ghost outline in the
+    # same column (`scene.entry_beat`); the chord commits -- one
+    # `edit.AddNote` per unique pitch -- only once every held key has come
+    # back up, and the column then auto-advances by one beat. Left/Right and
+    # Up/Down are repurposed (column and base-octave, respectively) since
+    # pitch no longer comes from a cursor; Space/Delete/Backspace/Enter stay
+    # unclaimed no-ops, per the ticket's "nothing overloaded" rule.
+
+    def enter_note_entry(self):
+        """`I`, only from cursor mode -- mirrors the terminal score editor's
+        own "a key enters piano mode" rule (#108), scoped here to cursor
+        mode specifically since note-select mode has its own fallthrough
+        (`_enter_note_entry_from_note_select()`, called by `keyPressEvent()`
+        instead of this whenever a piano key -- not `I` -- arrives with a
+        note selected)."""
+        scene = self.scene()
+        if scene.track is None or scene.note_entry or scene.selected_note is not None:
+            return
+        scene.note_entry = True
+        scene.entry_beat = self._snap(scene.cursor[0]) if scene.cursor else 0.0
+        scene.entry_ghosts = {}
+        self._entry_held = {}
+        self._entry_group_pitches = set()
+        scene.rebuild()
+        self.edited.emit()
+
+    def leave_note_entry(self):
+        """Esc: always leaves, discarding any chord still mid-hold -- an
+        escape hatch, not an alternate commit path (per the ticket's own
+        wording). Cuts every currently-sounding preview voice and restores
+        the ghost cursor at the column note-entry was sitting on."""
+        scene = self.scene()
+        if not scene.note_entry:
+            return
+        self._discard_entry_chord()
+        scene.note_entry = False
+        pitch = scene.cursor[1] if scene.cursor else (scene.bounds[0] + scene.bounds[1]) // 2
+        scene.cursor = (scene.entry_beat, pitch)
+        scene.rebuild()
+        self.edited.emit()
+
+    def _discard_entry_chord(self):
+        """Releases every sounding preview voice and forgets the pending
+        (uncommitted) chord -- called by Esc and by `close_track()`, so a
+        chord can never keep ringing or land as notes after either."""
+        for info in self._entry_held.values():
+            self._release_preview(info.get("voice_id"))
+        self._entry_held = {}
+        self._entry_group_pitches = set()
+        self.scene().entry_ghosts = {}
+
+    def _entry_key_down(self, char):
+        """One piano key going down inside note-entry mode: sounds it (live
+        preview) and stages its ghost. OS key-repeat sends this repeatedly
+        for one physical hold -- `keyPressEvent()` filters that with
+        `event.isAutoRepeat()` before ever calling this, and the `char in
+        self._entry_held` guard here is the second line of defence."""
+        if char in self._entry_held:
+            return
+        scene = self.scene()
+        pitch_class, octave = pitch_for_key(char, scene.entry_base_octave)
+        from notecolor.audio.sound_engine import midi_pitch
+
+        pitch = midi_pitch(pitch_class, octave)
+        voice_id = self._sound_preview_on(pitch)
+        self._entry_held[char] = {"pitch": pitch, "voice_id": voice_id}
+        self._entry_group_pitches.add(pitch)
+        scene.entry_ghosts[char] = pitch
+        scene.rebuild()
+
+    def _entry_key_up(self, char):
+        """One piano key coming back up. A release for a key that was never
+        (or no longer) held is a no-op -- in particular "releasing with zero
+        keys ever held" never advances the column, exactly as the ticket
+        specifies. Once this empties `_entry_held`, the whole group commits."""
+        if char not in self._entry_held:
+            return
+        info = self._entry_held.pop(char)
+        self._release_preview(info.get("voice_id"))
+        self.scene().entry_ghosts.pop(char, None)
+        if not self._entry_held:
+            self._commit_entry_chord()
+        else:
+            self.scene().rebuild()
+
+    def _commit_entry_chord(self):
+        """Every held key has come up: turn the accumulated, deduplicated
+        pitch set into one `edit.AddNote` each, then auto-advance the
+        column. "Commit" strictly means a chord happened, so this is only
+        ever called from `_entry_key_up()` at the moment the last key
+        releases -- never on a release that found nothing held."""
+        scene = self.scene()
+        pitches = sorted(self._entry_group_pitches)
+        self._entry_group_pitches = set()
+        clip = scene.clip_at_beat(scene.entry_beat)
+        if clip is None:
+            self._say("no clip here")
+        else:
+            for pitch in pitches:
+                note = Note(max(0.0, scene.entry_beat - clip.start_beat), 1.0, pitch)
+                self._apply(edit.AddNote(clip, note))
+            scene.entry_beat += 1.0
+        scene.entry_ghosts = {}
+        scene.rebuild()
+
+    def _move_entry_column(self, key, shift):
+        """Left/Right inside note-entry mode: manually move the column --
+        the only way to advance without playing a chord, including
+        deliberately skipping a rest column (the ticket's own example)."""
+        scene = self.scene()
+        step = 4.0 if shift else 1.0
+        delta = step if key == QtCore.Qt.Key_Right else -step
+        scene.entry_beat = max(0.0, scene.entry_beat + delta)
+        scene.rebuild()
+        self.ensureVisible(scene.entry_beat * scene.px_per_beat, PIANO_ROLL_PAD,
+                          1.0, 1.0, 40, 40)
+
+    def _shift_entry_octave(self, key):
+        """Up/Down inside note-entry mode: shifts the QWERTY rows' base
+        octave rather than a pitch cursor, since pitch now comes from
+        whichever keys are held. Clamped the same way the terminal score
+        editor's own two-octave layout is (`clamp_base_octave()`)."""
+        scene = self.scene()
+        delta = 1 if key == QtCore.Qt.Key_Up else -1
+        scene.entry_base_octave = clamp_base_octave(scene.entry_base_octave + delta)
+
+    def _enter_note_entry_from_note_select(self, char):
+        """Note-select mode, typing a piano key (never a silent no-op, per
+        the ticket): switches to cursor mode at the selected note's own
+        position first, then immediately enters note-entry there and treats
+        this same keystroke as the chord's first key-down -- "applies the
+        normal insert behaviour" once cursor mode is reached."""
+        scene = self.scene()
+        clip, note = scene.selected_note
+        scene.selected_note = None
+        scene.cursor = (clip.start_beat + note.start_beat, note.pitch)
+        scene.note_entry = True
+        scene.entry_beat = self._snap(scene.cursor[0])
+        scene.entry_ghosts = {}
+        self._entry_held = {}
+        self._entry_group_pitches = set()
+        self._entry_key_down(char)
+        self.edited.emit()
+
+    # -- the sound-engine edge: live preview only, never scheduled --------
+
+    def _sound_preview_on(self, pitch):
+        """Sounds `pitch` immediately with no scheduled note-off -- the
+        release comes from the key coming back up (`_release_preview()`),
+        unlike every other audition path in this codebase, which knows its
+        note's length up front and uses `schedule_note_off()`. Returns the
+        voice id, or `None` when there is no sound engine (no audio device,
+        or `[synth]` not installed) -- the same silent-but-usable
+        degradation every other audio call site in this app already takes."""
+        engine = self._sound_engine_provider() if self._sound_engine_provider else None
+        if engine is None:
+            return None
+        from notecolor.audio.sound_engine import NoteOn
+
+        patch_name = self.scene().track.patch_name
+        return engine.note_on(NoteOn(pitch, patch=patch_name))
+
+    def _release_preview(self, voice_id):
+        if voice_id is None:
+            return
+        engine = self._sound_engine_provider() if self._sound_engine_provider else None
+        if engine is not None:
+            engine.release_voice(voice_id)
 
     # -- mouse: click-to-select, Ctrl+click-to-add, drag-to-move/resize -----
 
@@ -607,6 +884,44 @@ class PianoRollView(QtWidgets.QGraphicsView):
             return super().keyPressEvent(event)
         key = event.key()
         shift = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+
+        if scene.note_entry:
+            if key == QtCore.Qt.Key_Escape:
+                self.leave_note_entry()
+            elif key in _ARROWS:
+                if key in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+                    self._move_entry_column(key, shift)
+                else:
+                    self._shift_entry_octave(key)
+            elif key in _PIANO_ENTRY_KEYS:
+                if not event.isAutoRepeat():
+                    self._entry_key_down(_PIANO_ENTRY_KEYS[key])
+                # else: OS key-repeat for an already-held key -- swallowed,
+                # not retriggered (`_entry_key_down()` itself also guards
+                # this, so this branch is belt-and-braces).
+            elif key in (QtCore.Qt.Key_Space, QtCore.Qt.Key_Delete,
+                        QtCore.Qt.Key_Backspace, QtCore.Qt.Key_Return,
+                        QtCore.Qt.Key_Enter):
+                pass    # explicit no-ops: not claimed by note-entry's own
+                        # vocabulary (piano keys + arrows + Esc), per the
+                        # ticket -- but still swallowed here, not bubbled,
+                        # so e.g. Enter can't leak out to `toggle_mode()`.
+            else:
+                return super().keyPressEvent(event)
+            event.accept()
+            return
+
+        if key == _ENTER_NOTE_ENTRY_KEY:
+            self.enter_note_entry()
+            event.accept()
+            return
+
+        if (key in _PIANO_ENTRY_KEYS and scene.selected_note is not None
+                and not event.isAutoRepeat()):
+            self._enter_note_entry_from_note_select(_PIANO_ENTRY_KEYS[key])
+            event.accept()
+            return
+
         if key in _ARROWS:
             if scene.selected_note is not None:
                 if shift:
@@ -625,6 +940,17 @@ class PianoRollView(QtWidgets.QGraphicsView):
             return super().keyPressEvent(event)
         event.accept()
 
+    def keyReleaseEvent(self, event):
+        scene = self.scene()
+        if scene.track is None or not scene.note_entry:
+            return super().keyReleaseEvent(event)
+        key = event.key()
+        if key in _PIANO_ENTRY_KEYS and not event.isAutoRepeat():
+            self._entry_key_up(_PIANO_ENTRY_KEYS[key])
+            event.accept()
+            return
+        super().keyReleaseEvent(event)
+
     def event(self, event):
         """Claim the panel's keys *before* Qt's shortcut map gets to them.
 
@@ -637,12 +963,27 @@ class PianoRollView(QtWidgets.QGraphicsView):
         have done with it. This is the actual mechanism behind the
         collisions the inline approach had: the fix is not "handle the key",
         it's "tell Qt not to treat it as a shortcut" first.
+
+        Note-entry's own keys (issue #158) are claimed conditionally rather
+        than added to the static `_CLAIMED_KEYS` tuple: `I` only while a
+        track is open at all (so it can always enter the mode from cursor
+        mode); the piano-key letters/digits only while note-entry is
+        actually active, or a note is selected (the note-select-mode
+        fallthrough) -- otherwise e.g. `S` must keep reaching
+        `StudioWindow`'s solo shortcut, and `Escape` only while note-entry
+        is active -- otherwise it must keep reaching `StudioWindow`'s own
+        Q/Esc-closes-the-window binding, unchanged from before this ticket.
         """
-        if (event.type() == QtCore.QEvent.ShortcutOverride
-                and self.scene().track is not None
-                and event.key() in _CLAIMED_KEYS):
-            event.accept()
-            return True
+        if event.type() == QtCore.QEvent.ShortcutOverride and self.scene().track is not None:
+            scene = self.scene()
+            key = event.key()
+            claimed = (key in _CLAIMED_KEYS or key == _ENTER_NOTE_ENTRY_KEY
+                      or (scene.note_entry and key == QtCore.Qt.Key_Escape)
+                      or (key in _PIANO_ENTRY_KEYS
+                          and (scene.note_entry or scene.selected_note is not None)))
+            if claimed:
+                event.accept()
+                return True
         return super().event(event)
 
 
@@ -722,7 +1063,8 @@ class PianoRollPanel(QtWidgets.QWidget):
     #: here (clear the header's "piano roll open" marker), not just refresh.
     closed = QtCore.Signal()
 
-    def __init__(self, run_command, say, pitch_colour, key_signature):
+    def __init__(self, run_command, say, pitch_colour, key_signature,
+                sound_engine_provider=None):
         super().__init__()
         self._say_host = say
         self.track_index = None
@@ -776,7 +1118,8 @@ class PianoRollPanel(QtWidgets.QWidget):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
 
-        self.view = PianoRollView(run_command, self._say, pitch_colour)
+        self.view = PianoRollView(run_command, self._say, pitch_colour,
+                                  sound_engine_provider)
         self.view.edited.connect(self._on_edited)
         self.view.zoomed.connect(self._on_zoomed)
 
@@ -825,8 +1168,13 @@ class PianoRollPanel(QtWidgets.QWidget):
 
     def _refresh_toolbar(self):
         note_mode = self.view.in_note_mode()
-        self.mode_button.setText(
-            "note mode (enter)" if note_mode else "cursor mode (enter)")
+        if self.view.in_note_entry_mode():
+            text = "note-entry mode (esc)"
+        elif note_mode:
+            text = "note mode (enter)"
+        else:
+            text = "cursor mode (enter/i)"
+        self.mode_button.setText(text)
         self.delete_button.setEnabled(note_mode)
 
     def _on_mode_clicked(self):

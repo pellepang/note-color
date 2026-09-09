@@ -24,6 +24,8 @@ from notecolor.project.bundle import (
 )
 from notecolor.gui.piano_roll_panel import PianoRollPanel
 from notecolor.gui.recent import recent_paths, remember_path
+from notecolor.gui import synth_recording
+from notecolor.audio import synth_bounce
 from notecolor.project.model import AUDIO_TRACK, NoteClip
 from notecolor.project import model
 
@@ -391,7 +393,7 @@ class TransportBar(QtWidgets.QWidget):
     BUTTONS = (("rewind", "|◀", "return to start (home)"),
                ("stop", "■", "stop (space)"),
                ("play", "▶", "play (space)"),
-               ("record", "●", "record — not implemented yet"),
+               ("record", "●", "record a Synth-view take, bounced to a new track"),
                ("loop", "⟲", "toggle loop (l)"))
 
     clicked = QtCore.Signal(str)
@@ -401,6 +403,10 @@ class TransportBar(QtWidgets.QWidget):
         self.project = project
         self.snapshot = None
         self.message = ""
+        #: True while a Synth-view take (#159) is being captured -- lights
+        #: the record button the same way `playing`/`loop_enabled` light
+        #: their own, independent of transport play/stop state.
+        self.recording = False
         self.setFixedHeight(38)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
@@ -449,7 +455,8 @@ class TransportBar(QtWidgets.QWidget):
 
         playing = bool(self.snapshot and self.snapshot.playing)
         looping = bool(self.snapshot and self.snapshot.loop_enabled)
-        lit = {"stop": not playing, "play": playing, "loop": looping}
+        lit = {"stop": not playing, "play": playing, "loop": looping,
+               "record": self.recording}
         rects = self._button_rects()
         p.setFont(theme.font(10))
         for name, glyph, _tip in self.BUTTONS:
@@ -530,6 +537,13 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.edits = edit.EditStack()
         self.saved_revision = 0
         self._status = ""
+        #: The in-flight Synth-view take (#159), or None between takes.
+        #: `_bounce_thread`/`_bounce_worker` are held here only so Qt does
+        #: not garbage-collect a still-running `QThread` out from under
+        #: itself -- see `gui/synth_recording.start_bounce()`.
+        self._synth_take = None
+        self._bounce_thread = None
+        self._bounce_worker = None
         self.setWindowTitle(f"visualnote studio — {project.name}")
         self.setAcceptDrops(True)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
@@ -600,8 +614,20 @@ class StudioWindow(QtWidgets.QMainWindow):
         # a track's row height in place on the main canvas -- a `QSplitter`
         # rather than a `QDockWidget` because the user wants it anchored at
         # the bottom and drag-resizable, not floatable/undockable.
-        self.piano_panel = PianoRollPanel(self.run, self.say, pitch_colour,
-                                          lambda: (self.project.key_fifths, self.project.key_mode))
+        # Issue #158's live preview: a lazy accessor for this window's own
+        # `SoundEngine`, the same shape `SessionState.ensure_sound_engine()`
+        # gives the terminal app (decision #105) -- but this window has no
+        # `SessionState` to call that on, since `gui/app.py`'s `start_audio()`
+        # already constructed one `SoundEngine` and handed it straight to
+        # `self.player` (a `ProjectPlayer`), not through a session. Reading
+        # `self.player.engine` lazily on every call (rather than capturing it
+        # once) is what lets this keep working across a `self.player` swap
+        # (File->Open) and stay `None`-safe when there is no audio device at
+        # all (`self.player is None`).
+        self.piano_panel = PianoRollPanel(
+            self.run, self.say, pitch_colour,
+            lambda: (self.project.key_fifths, self.project.key_mode),
+            sound_engine_provider=lambda: self.player.engine if self.player else None)
         self.piano_panel.changed.connect(self._on_panel_changed)
         self.piano_panel.closed.connect(self._on_panel_closed)
 
@@ -904,13 +930,69 @@ class StudioWindow(QtWidgets.QMainWindow):
         elif name == "loop":
             self._toggle_loop()
         elif name == "record":
-            self.say("record is not implemented yet")
+            self._toggle_synth_recording()
         elif name == "tempo":
             self.set_tempo()
         elif name == "sig":
             self.set_time_signature()
         elif name == "key":
             self.set_key()
+
+    # -- Synth-view recording, bounced to a new track (ticket #159) -------
+
+    def _toggle_synth_recording(self):
+        if self._synth_take is not None:
+            self._stop_synth_recording()
+        else:
+            self._start_synth_recording()
+
+    def _start_synth_recording(self):
+        """Arms a take. Needs a live sound engine (to know the take's own
+        patch) and a saved bundle path (`import_audio()`'s target) --
+        missing either degrades to a status message rather than a crash,
+        the same posture every other audio-optional path in this app
+        takes."""
+        if self._synth_take is not None:
+            return
+        if self.player is None:
+            return self.say("no audio device -- can't record")
+        if not self.path:
+            return self.say("save the project before recording")
+        synth = getattr(self.player.engine, "engine", None)
+        patch_for = getattr(synth, "patch_for", None)
+        patch = patch_for(None) if patch_for is not None else None
+        if patch is None:
+            return self.say("no synth patch available to record with")
+        start_beat = self._playhead_beat()
+        self._synth_take = synth_bounce.SynthTakeRecorder()
+        self._synth_take.start(patch, start_beat)
+        self.transport_bar.recording = True
+        self.transport_bar.update()
+        self.say("recording (synth view)")
+
+    def _stop_synth_recording(self):
+        take, self._synth_take = self._synth_take, None
+        self.transport_bar.recording = False
+        self.transport_bar.update()
+        if take is None:
+            return
+        events = take.stop()
+        if not events:
+            return self.say("nothing recorded")
+        self.say("bouncing take…")
+        self._bounce_thread, self._bounce_worker = synth_recording.start_bounce(
+            self, self.path, self.project, events, take.patch,
+            self.player.engine.sample_rate, take.start_beat,
+            on_done=self._on_synth_take_bounced, on_error=self._on_synth_take_bounce_failed)
+
+    def _on_synth_take_bounced(self, command):
+        self._bounce_thread = self._bounce_worker = None
+        self.run(command)
+        self.say(f"recorded: {command.track.name}")
+
+    def _on_synth_take_bounce_failed(self, message):
+        self._bounce_thread = self._bounce_worker = None
+        self.say(f"recording failed: {message}")
 
     def _locate(self, beat):
         if self.transport is not None:

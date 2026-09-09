@@ -65,8 +65,31 @@ def _pump(window, blocks=4):
         window.transport.process_block(512)
 
 
-def _key(qt_key, modifiers=QtCore.Qt.NoModifier):
-    return QtGui.QKeyEvent(QtCore.QEvent.KeyPress, qt_key, modifiers)
+def _key(qt_key, modifiers=QtCore.Qt.NoModifier, autorep=False):
+    return QtGui.QKeyEvent(QtCore.QEvent.KeyPress, qt_key, modifiers, "", autorep)
+
+
+def _key_up(qt_key, modifiers=QtCore.Qt.NoModifier, autorep=False):
+    return QtGui.QKeyEvent(QtCore.QEvent.KeyRelease, qt_key, modifiers, "", autorep)
+
+
+class _FakeSoundEngine:
+    """Records `note_on`/`release_voice` calls -- stands in for
+    `sound_engine.SoundEngine` so note-entry's live-preview path (issue
+    #158) can be asserted without an audio device."""
+
+    def __init__(self):
+        self.on_calls = []           # [(pitch, patch_name)]
+        self.released = []
+        self._next_id = 0
+
+    def note_on(self, event):
+        self._next_id += 1
+        self.on_calls.append((event.pitch, event.patch))
+        return self._next_id
+
+    def release_voice(self, voice_id):
+        self.released.append(voice_id)
 
 
 def _press(scene_x, scene_y, modifiers=QtCore.Qt.NoModifier):
@@ -858,3 +881,231 @@ def test_ctrl_wheel_over_the_open_panel_zooms_it_not_the_main_canvas(window):
 
     assert window.scene.px_per_beat == main_before
     assert panel.view.scene().px_per_beat != panel_before
+
+
+# --- note-entry mode: chord step-entry from held piano keys (issue #158) --
+
+
+def test_i_enters_note_entry_mode_from_cursor_mode(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    scene = panel.view.scene()
+    scene.cursor = (clip.notes[0].start_beat, clip.notes[0].pitch)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+
+    assert scene.note_entry
+    assert scene.entry_beat == clip.notes[0].start_beat
+    assert "note-entry mode" in panel.mode_button.text()
+
+
+def test_esc_always_leaves_note_entry_mode(window):
+    panel = _open(window)
+    scene = panel.view.scene()
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+    assert scene.note_entry
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Escape))
+
+    assert not scene.note_entry
+    assert scene.selected_note is None
+
+
+def test_holding_a_key_sounds_a_live_preview_and_stages_a_ghost(window):
+    panel = _open(window)
+    engine = _FakeSoundEngine()
+    panel.view._sound_engine_provider = lambda: engine
+    scene = panel.view.scene()
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z))
+
+    assert len(engine.on_calls) == 1
+    assert len(scene.entry_ghosts) == 1
+    # No note lands in the model until the whole chord commits.
+    clip = window.project.tracks[0].clips[0]
+    assert len(clip.notes) == 2
+
+
+def test_esc_discards_an_uncommitted_chord_and_cuts_preview_sound(window):
+    panel = _open(window)
+    engine = _FakeSoundEngine()
+    panel.view._sound_engine_provider = lambda: engine
+    clip = window.project.tracks[0].clips[0]
+    before = len(clip.notes)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z))
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Escape))
+
+    assert engine.released == [1]
+    assert len(clip.notes) == before
+    assert panel.view.scene().entry_ghosts == {}
+
+
+def test_holding_multiple_keys_commits_one_chord_on_full_release(window):
+    panel = _open(window)
+    engine = _FakeSoundEngine()
+    panel.view._sound_engine_provider = lambda: engine
+    clip = window.project.tracks[0].clips[0]
+    before = len(clip.notes)
+    scene = panel.view.scene()
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+    entry_beat = scene.entry_beat
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z))    # first pitch, held
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_X))    # second pitch, held
+    assert len(scene.entry_ghosts) == 2
+
+    # Releasing only one of the two held keys must not commit yet.
+    panel.view.keyReleaseEvent(_key_up(QtCore.Qt.Key_Z))
+    assert len(clip.notes) == before
+    assert len(scene.entry_ghosts) == 1
+
+    # The last key releasing commits the whole chord as one column.
+    panel.view.keyReleaseEvent(_key_up(QtCore.Qt.Key_X))
+    assert len(clip.notes) == before + 2
+    assert scene.entry_ghosts == {}
+    added = clip.notes[-2:]
+    # Two distinct pitches ('z' and 'x'), one AddNote each -- both in the
+    # same column, since they were held together as one chord.
+    assert len({n.pitch for n in added}) == 2
+    assert all(n.start_beat == pytest.approx(entry_beat) for n in added)
+    # ... and the column auto-advanced for the *next* chord.
+    assert scene.entry_beat == pytest.approx(entry_beat + 1.0)
+
+
+def test_os_key_repeat_does_not_duplicate_the_note(window):
+    panel = _open(window)
+    engine = _FakeSoundEngine()
+    panel.view._sound_engine_provider = lambda: engine
+    clip = window.project.tracks[0].clips[0]
+    before = len(clip.notes)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z, autorep=True))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z, autorep=True))
+
+    assert len(engine.on_calls) == 1     # not retriggered by key-repeat
+
+    panel.view.keyReleaseEvent(_key_up(QtCore.Qt.Key_Z))
+
+    assert len(clip.notes) == before + 1
+
+
+def test_releasing_with_nothing_ever_held_is_a_no_op(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    before = len(clip.notes)
+    scene = panel.view.scene()
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+    entry_beat = scene.entry_beat
+
+    panel.view.keyReleaseEvent(_key_up(QtCore.Qt.Key_Z))
+
+    assert len(clip.notes) == before
+    assert scene.entry_beat == entry_beat
+
+
+def test_left_right_move_the_entry_column_without_sounding_anything(window):
+    panel = _open(window)
+    engine = _FakeSoundEngine()
+    panel.view._sound_engine_provider = lambda: engine
+    scene = panel.view.scene()
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+    start = scene.entry_beat
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right))
+    assert scene.entry_beat == start + 1.0
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left, QtCore.Qt.ShiftModifier))
+    assert scene.entry_beat == max(0.0, start + 1.0 - 4.0)
+    assert engine.on_calls == []
+
+
+def test_up_down_shift_the_base_octave_not_a_pitch_cursor(window):
+    from notecolor.notation.score_audition import clamp_base_octave
+
+    panel = _open(window)
+    scene = panel.view.scene()
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+    before = scene.entry_base_octave
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    assert scene.entry_base_octave == clamp_base_octave(before + 1)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Down))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Down))
+    assert scene.entry_base_octave == clamp_base_octave(before - 1)
+
+
+def test_space_delete_backspace_enter_are_no_ops_in_note_entry_mode(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    before = len(clip.notes)
+    scene = panel.view.scene()
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+
+    for qt_key in (QtCore.Qt.Key_Space, QtCore.Qt.Key_Delete,
+                  QtCore.Qt.Key_Backspace, QtCore.Qt.Key_Return):
+        panel.view.keyPressEvent(_key(qt_key))
+
+    assert len(clip.notes) == before
+    assert scene.note_entry     # still in note-entry -- none of these left it
+
+
+def test_typing_a_piano_key_in_note_select_mode_switches_and_enters_note_entry(window):
+    panel = _open(window)
+    engine = _FakeSoundEngine()
+    panel.view._sound_engine_provider = lambda: engine
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, note)
+    before = len(clip.notes)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z))
+
+    assert scene.selected_note is None
+    assert scene.note_entry
+    assert scene.entry_beat == note.start_beat
+    assert len(engine.on_calls) == 1          # the 'z' keydown already sounded
+    assert len(clip.notes) == before          # not committed yet -- 'z' still held
+
+    panel.view.keyReleaseEvent(_key_up(QtCore.Qt.Key_Z))
+
+    assert len(clip.notes) == before + 1
+    assert engine.released == [1]
+
+
+def test_closing_the_track_discards_a_pending_chord_and_cuts_sound(window):
+    panel = _open(window)
+    engine = _FakeSoundEngine()
+    panel.view._sound_engine_provider = lambda: engine
+    clip = window.project.tracks[0].clips[0]
+    before = len(clip.notes)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Z))
+
+    panel.close_track()
+
+    assert engine.released == [1]
+    assert len(clip.notes) == before
+
+
+def test_note_entry_is_scoped_to_cursor_mode_typing_i_in_note_select_is_a_no_op(window):
+    """`I` is only a cursor-mode-> note-entry transition (per the ticket);
+    with a note already selected, typing a piano key has its own dedicated
+    fallthrough (tested above) -- `I` itself is not a piano key, so it stays
+    unclaimed here and simply does nothing."""
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, note)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_I))
+
+    assert not scene.note_entry
+    assert scene.selected_note == (clip, note)
