@@ -10,7 +10,7 @@ up state that moved underneath it.
 import pytest
 
 from notecolor.project import edit
-from notecolor.project.model import NoteClip, Project, Track
+from notecolor.project.model import Note, NoteClip, Project, Track
 
 
 def _project():
@@ -116,3 +116,113 @@ def test_revision_moves_on_every_change_so_dirty_needs_no_diff():
 def test_undo_on_an_empty_stack_is_a_no_op_not_an_error():
     stack = edit.EditStack()
     assert stack.undo() is None and stack.redo() is None
+
+
+def _clip():
+    return NoteClip(name="melody", notes=[Note(start_beat=0.0, duration_beats=1.0, pitch=60)])
+
+
+def test_add_note_round_trips():
+    clip = _clip()
+    note = Note(start_beat=2.0, duration_beats=0.5, pitch=64)
+    stack = edit.EditStack()
+    stack.run(edit.AddNote(clip, note))
+    assert note in clip.notes and len(clip.notes) == 2
+    stack.undo()
+    assert note not in clip.notes and len(clip.notes) == 1
+    stack.redo()
+    assert note in clip.notes and len(clip.notes) == 2
+
+
+def test_add_note_undo_removes_the_right_instance_among_value_equal_notes():
+    """Two freshly-added default notes are value-equal; undo must remove the
+    one that was actually added, by identity, not whichever `==` matches
+    first (the bug `remove_exact` exists to prevent -- see its docstring)."""
+    clip = NoteClip(name="melody")
+    first = Note(start_beat=0.0, duration_beats=1.0, pitch=60)
+    second = Note(start_beat=0.0, duration_beats=1.0, pitch=60)
+    assert first == second and first is not second
+    stack = edit.EditStack()
+    stack.run(edit.AddNote(clip, first))
+    stack.run(edit.AddNote(clip, second))
+    stack.undo()
+    assert clip.notes == [first]
+    assert clip.notes[0] is first
+
+
+def test_delete_note_round_trips_back_to_its_index():
+    clip = _clip()
+    extra = Note(start_beat=1.0, duration_beats=1.0, pitch=62)
+    clip.notes.append(extra)
+    target = clip.notes[0]
+    stack = edit.EditStack()
+    stack.run(edit.DeleteNote(clip, target))
+    assert target not in clip.notes and clip.notes == [extra]
+    stack.undo()
+    assert clip.notes[0] is target and clip.notes[1] is extra
+    stack.redo()
+    assert clip.notes == [extra]
+
+
+def test_delete_note_identity_safety_among_value_equal_notes():
+    clip = NoteClip(name="melody")
+    first = Note(start_beat=0.0, duration_beats=1.0, pitch=60)
+    second = Note(start_beat=0.0, duration_beats=1.0, pitch=60)
+    clip.notes = [first, second]
+    stack = edit.EditStack()
+    stack.run(edit.DeleteNote(clip, first))
+    assert clip.notes == [second] and clip.notes[0] is second
+    stack.undo()
+    assert clip.notes[0] is first and clip.notes[1] is second
+
+
+def test_move_note_moves_time_only_when_no_pitch_given():
+    clip = _clip()
+    note = clip.notes[0]
+    stack = edit.EditStack()
+    stack.run(edit.MoveNote(clip, note, 4.0))
+    assert note.start_beat == 4.0 and note.pitch == 60
+    stack.undo()
+    assert note.start_beat == 0.0 and note.pitch == 60
+
+
+def test_move_note_moves_time_and_pitch_together():
+    clip = _clip()
+    note = clip.notes[0]
+    stack = edit.EditStack()
+    stack.run(edit.MoveNote(clip, note, 4.0, pitch=67))
+    assert note.start_beat == 4.0 and note.pitch == 67
+    stack.undo()
+    assert note.start_beat == 0.0 and note.pitch == 60
+    stack.redo()
+    assert note.start_beat == 4.0 and note.pitch == 67
+
+
+def test_move_note_cannot_go_before_the_start():
+    clip = _clip()
+    note = clip.notes[0]
+    stack = edit.EditStack()
+    stack.run(edit.MoveNote(clip, note, -3.0))
+    assert note.start_beat == 0.0
+
+
+def test_resize_note_round_trips():
+    clip = _clip()
+    note = clip.notes[0]
+    stack = edit.EditStack()
+    stack.run(edit.ResizeNote(clip, note, 2.0))
+    assert note.duration_beats == 2.0
+    stack.undo()
+    assert note.duration_beats == 1.0
+    stack.redo()
+    assert note.duration_beats == 2.0
+
+
+def test_resize_note_clamps_to_a_minimum_duration():
+    clip = _clip()
+    note = clip.notes[0]
+    stack = edit.EditStack()
+    stack.run(edit.ResizeNote(clip, note, 0.0))
+    assert note.duration_beats == edit.ResizeNote.MIN_DURATION_BEATS
+    stack.run(edit.ResizeNote(clip, note, -5.0))
+    assert note.duration_beats == edit.ResizeNote.MIN_DURATION_BEATS

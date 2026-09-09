@@ -175,6 +175,90 @@ class RemoveTrack(Command):
         self.project.tracks.insert(self.index, self.track)
 
 
+class AddNote(Command):
+    name = "Add Note"
+
+    def __init__(self, clip, note):
+        self.clip = clip
+        self.note = note
+
+    def do(self):
+        self.clip.notes.append(self.note)
+
+    def undo(self):
+        remove_exact(self.clip.notes, self.note)
+
+
+class DeleteNote(Command):
+    name = "Delete Note"
+
+    def __init__(self, clip, note):
+        self.clip = clip
+        self.note = note
+        # Identity-based, like `remove_exact` -- `list.index()` matches by
+        # `==` and would find the wrong note among value-equal ones.
+        self.index = next((i for i, n in enumerate(clip.notes) if n is note),
+                          len(clip.notes))
+
+    def do(self):
+        remove_exact(self.clip.notes, self.note)
+
+    def undo(self):
+        # Clamp rather than trust the captured index: EditStack usage never
+        # interleaves other edits between an undo and its matching redo, but
+        # a stale index should degrade to "append" instead of crashing.
+        index = min(self.index, len(self.clip.notes))
+        self.clip.notes.insert(index, self.note)
+
+
+class MoveNote(Command):
+    """Move a note in time and, optionally, in pitch -- one drag, one command.
+
+    `pitch=None` means the gesture was time-only (e.g. a keyboard nudge);
+    leaving `self.pitch` `None` too means `do`/`undo` never touch
+    `note.pitch`, rather than round-tripping it through its own unchanged
+    value.
+    """
+
+    name = "Move Note"
+
+    def __init__(self, clip, note, start_beat, pitch=None):
+        self.clip = clip
+        self.note = note
+        self.from_beat = note.start_beat
+        self.to_beat = max(0.0, float(start_beat))
+        self.from_pitch = note.pitch
+        self.to_pitch = pitch
+
+    def do(self):
+        self.note.start_beat = self.to_beat
+        if self.to_pitch is not None:
+            self.note.pitch = self.to_pitch
+
+    def undo(self):
+        self.note.start_beat = self.from_beat
+        if self.to_pitch is not None:
+            self.note.pitch = self.from_pitch
+
+
+class ResizeNote(_SetAttribute):
+    name = "Resize Note"
+
+    #: Short enough to be "as short as it gets" but never zero -- a
+    #: zero-length note is invisible on the piano roll and meaningless to
+    #: play back.
+    MIN_DURATION_BEATS = 0.05
+
+    def __init__(self, clip, note, duration_beats):
+        # `clip` isn't needed to mutate `note`, but every note command takes
+        # it -- the GUI always has a clip in hand and a consistent shape
+        # means it doesn't need to special-case this one.
+        self.clip = clip
+        super().__init__(note, "duration_beats",
+                         max(self.MIN_DURATION_BEATS, float(duration_beats)),
+                         "Resize Note")
+
+
 class EditStack:
     """Undo/redo over commands.
 
