@@ -680,28 +680,54 @@ def test_clicking_the_main_canvas_returns_focus_and_normal_arrow_meaning(window)
 # --- note-name column --------------------------------------------------
 
 
-def test_note_name_column_uses_sharp_spelling_for_nonnegative_key_fifths(window):
+def test_note_name_column_reads_the_live_key(window):
     window.project.key_fifths = 0
+    window.project.key_mode = "major"
     panel = _open(window)
     from notecolor.project.model import chromatic_note_names
-    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "C#"
+    assert chromatic_note_names(*panel.keys_column._key_signature())[1] == "Db"
 
 
-def test_note_name_column_uses_flat_spelling_for_negative_key_fifths(window):
+def test_note_name_column_reads_the_live_key_at_negative_fifths(window):
     window.project.key_fifths = -3
+    window.project.key_mode = "major"
     panel = _open(window)
     from notecolor.project.model import chromatic_note_names
-    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "Db"
+    assert chromatic_note_names(*panel.keys_column._key_signature())[1] == "Db"
 
 
 def test_note_name_column_follows_a_live_key_change(window):
     window.project.key_fifths = 0
+    window.project.key_mode = "major"
     panel = _open(window)
     from notecolor.project.model import chromatic_note_names
-    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "C#"
+    assert chromatic_note_names(*panel.keys_column._key_signature())[1] == "Db"
 
     window.project.key_fifths = -5     # changed while the panel stays open
-    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "Db"
+    assert chromatic_note_names(*panel.keys_column._key_signature())[1] == "Db"
+
+
+def test_note_name_column_spells_c_major_per_the_circle_of_fifths(window):
+    """C major's chromatic passing tones are flats of the degree above,
+    except the raised 4th (F#) -- not a blanket all-sharp/all-flat table."""
+    window.project.key_fifths = 0
+    window.project.key_mode = "major"
+    panel = _open(window)
+    from notecolor.project.model import chromatic_note_names
+    assert chromatic_note_names(*panel.keys_column._key_signature()) == [
+        "C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+
+
+def test_note_name_column_highlights_the_keys_own_scale_not_just_white_keys(window):
+    """F# major's diatonic scale is all black keys except one -- the tint
+    must follow the key's 7 scale notes, not the piano's white keys."""
+    window.project.key_fifths = 6
+    window.project.key_mode = "major"
+    panel = _open(window)
+    from notecolor.project.model import diatonic_pitch_classes
+    scale = diatonic_pitch_classes(*panel.keys_column._key_signature())
+    assert scale == {6, 8, 10, 11, 1, 3, 5}
+    assert 0 not in scale   # C is not in F# major's scale
 
 
 def test_note_name_column_paints_without_error(window):
@@ -798,3 +824,37 @@ def test_plain_wheel_does_not_zoom(window):
     panel.view.wheelEvent(_wheel(120))
 
     assert (scene.px_per_beat, scene.px_per_semitone) == before
+
+
+def test_opening_the_panel_gives_it_a_real_usable_height(window):
+    """Regression for the bug this fixes: with no default `QSplitter` size,
+    the panel opened at its bare `setMinimumHeight(60)` -- mostly toolbar,
+    a sliver of actual roll -- so the mouse was rarely really over it."""
+    panel = _open(window)
+    assert panel.height() > panel.minimumHeight()
+
+
+def test_ctrl_wheel_over_the_open_panel_zooms_it_not_the_main_canvas(window):
+    """Drives the real Qt hit-testing/dispatch path (see this file's
+    docstring), not a direct `wheelEvent()` call -- a fake call can't catch
+    a real routing/layout bug like the one `test_opening_the_panel_gives_it_
+    a_real_usable_height` above regresses against, where Ctrl+scroll over
+    what the user sees as the piano roll actually lands on the main canvas
+    underneath because the panel had no real screen area."""
+    panel = _open(window)
+    viewport = panel.view.viewport()
+    global_point = viewport.mapToGlobal(QtCore.QPoint(30, viewport.height() // 2))
+    target = QtWidgets.QApplication.widgetAt(global_point)
+    assert target is viewport      # the point really is over the piano roll
+
+    main_before = window.scene.px_per_beat
+    panel_before = panel.view.scene().px_per_beat
+    local_point = target.mapFromGlobal(global_point)
+    event = QtGui.QWheelEvent(
+        QtCore.QPointF(local_point), QtCore.QPointF(global_point),
+        QtCore.QPoint(0, 0), QtCore.QPoint(0, 120), QtCore.Qt.NoButton,
+        QtCore.Qt.ControlModifier, QtCore.Qt.NoScrollPhase, False)
+    QtWidgets.QApplication.sendEvent(target, event)
+
+    assert window.scene.px_per_beat == main_before
+    assert panel.view.scene().px_per_beat != panel_before

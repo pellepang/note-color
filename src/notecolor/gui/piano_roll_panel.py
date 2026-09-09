@@ -20,7 +20,8 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from notecolor.gui import theme
 from notecolor.project import edit
-from notecolor.project.model import Note, NoteClip, chromatic_note_names
+from notecolor.project.model import (Note, NoteClip, chromatic_note_names,
+                                     diatonic_pitch_classes)
 
 #: Default pixel-per-semitone scale, same value the inline piano roll used --
 #: now a `PianoRollScene` instance attribute (`px_per_semitone`) rather than
@@ -656,16 +657,17 @@ class PianoRollKeys(QtWidgets.QWidget):
     `scene.px_per_semitone` directly so a row's label always lines up with
     the matching note row, including after a zoom.
 
-    `key_fifths` is a callable (not a value) so the label spelling follows
-    the project's *current* key live -- re-read on every `paintEvent()`
-    rather than cached at construction or `open_track()` time, since the key
-    can change from the header while this panel is open.
+    `key_signature` is a callable returning `(key_fifths, key_mode)` (not a
+    plain value) so the label spelling and in-scale tint follow the
+    project's *current* key live -- re-read on every `paintEvent()` rather
+    than cached at construction or `open_track()` time, since the key can
+    change from the header while this panel is open.
     """
 
-    def __init__(self, scene, key_fifths):
+    def __init__(self, scene, key_signature):
         super().__init__()
         self._scene = scene
-        self._key_fifths = key_fifths
+        self._key_signature = key_signature
         self.scroll = 0
         self.setFixedWidth(PIANO_ROLL_KEYS_WIDTH)
 
@@ -680,7 +682,9 @@ class PianoRollKeys(QtWidgets.QWidget):
         if scene.track is None:
             return
         low, high = scene.bounds
-        names = chromatic_note_names(self._key_fifths())
+        key_fifths, key_mode = self._key_signature()
+        names = chromatic_note_names(key_fifths, key_mode)
+        scale = diatonic_pitch_classes(key_fifths, key_mode)
         row_h = scene.px_per_semitone
         font_size = max(5, min(9, int(row_h) - 3))
         for pitch in range(int(low), int(high) + 1):
@@ -688,14 +692,14 @@ class PianoRollKeys(QtWidgets.QWidget):
             if y + row_h < 0 or y > self.height():
                 continue
             name = names[pitch % 12]
-            natural = len(name) == 1
-            if not natural:
+            in_scale = pitch % 12 in scale
+            if not in_scale:
                 p.fillRect(QtCore.QRectF(0, y, PIANO_ROLL_KEYS_WIDTH, row_h),
                           theme.CHROME_DEEP)
             p.setPen(theme.RULE)
             p.drawLine(QtCore.QPointF(0, y + row_h), QtCore.QPointF(PIANO_ROLL_KEYS_WIDTH, y + row_h))
-            p.setPen(theme.TEXT if natural else theme.TEXT_FAINT)
-            p.setFont(theme.font(font_size, bold=natural))
+            p.setPen(theme.TEXT if in_scale else theme.TEXT_FAINT)
+            p.setFont(theme.font(font_size, bold=in_scale))
             p.drawText(QtCore.QRectF(2, y, PIANO_ROLL_KEYS_WIDTH - 4, row_h),
                        QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, name)
 
@@ -718,7 +722,7 @@ class PianoRollPanel(QtWidgets.QWidget):
     #: here (clear the header's "piano roll open" marker), not just refresh.
     closed = QtCore.Signal()
 
-    def __init__(self, run_command, say, pitch_colour, key_fifths):
+    def __init__(self, run_command, say, pitch_colour, key_signature):
         super().__init__()
         self._say_host = say
         self.track_index = None
@@ -779,7 +783,7 @@ class PianoRollPanel(QtWidgets.QWidget):
         # The note-name column is a sibling widget kept in vertical
         # scroll-sync with `self.view`, not drawn inside its scene -- see
         # `PianoRollKeys`'s own docstring for why.
-        self.keys_column = PianoRollKeys(self.view.scene(), key_fifths)
+        self.keys_column = PianoRollKeys(self.view.scene(), key_signature)
         self.view.verticalScrollBar().valueChanged.connect(self.keys_column.set_scroll)
 
         body_layout.addWidget(self.keys_column)

@@ -30,6 +30,15 @@ from notecolor.project import model
 LANE_H, HEADER_W, RULER_H = 54, 196, 22
 DEFAULT_PX_PER_BEAT = 34
 MIN_BARS = 16
+#: Default height given to the piano-roll panel the first time it opens --
+#: without this the panel's `QSplitter` pane has no size hint of its own and
+#: opens at its bare `setMinimumHeight(60)` (mostly toolbar, a sliver of
+#: actual roll), which made Ctrl+scroll zoom over the piano roll land on the
+#: main canvas underneath instead, since the mouse was rarely actually inside
+#: that sliver. Only applied while the panel is still at/under that minimum,
+#: so a user's own drag-resize (a deliberate, bigger choice) is never
+#: overridden on a later open.
+PIANO_ROLL_DEFAULT_HEIGHT = 260
 
 
 def pitch_colour(pitch_class, lightness=0.66, alpha=255):
@@ -592,16 +601,16 @@ class StudioWindow(QtWidgets.QMainWindow):
         # rather than a `QDockWidget` because the user wants it anchored at
         # the bottom and drag-resizable, not floatable/undockable.
         self.piano_panel = PianoRollPanel(self.run, self.say, pitch_colour,
-                                          lambda: self.project.key_fifths)
+                                          lambda: (self.project.key_fifths, self.project.key_mode))
         self.piano_panel.changed.connect(self._on_panel_changed)
         self.piano_panel.closed.connect(self._on_panel_closed)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        splitter.addWidget(grid_host)
-        splitter.addWidget(self.piano_panel)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        outer.addWidget(splitter)
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        self.splitter.addWidget(grid_host)
+        self.splitter.addWidget(self.piano_panel)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        outer.addWidget(self.splitter)
         self.setCentralWidget(central)
 
         for title, area in (("inspector", QtCore.Qt.LeftDockWidgetArea),
@@ -970,9 +979,21 @@ class StudioWindow(QtWidgets.QMainWindow):
             self.scene.open_piano_roll(row)
             self.piano_panel.open_track(row, track)
             self.say(f"piano roll: {track.name}")
+            self._ensure_piano_panel_has_room()
         self.headers.selected_index = row
         self.scene.rebuild()
         self.headers.update()
+
+    def _ensure_piano_panel_has_room(self):
+        """Give the panel a real, usable height on its first open -- see
+        `PIANO_ROLL_DEFAULT_HEIGHT`'s docstring for why. Skipped once the
+        panel is already taller than its bare minimum, so this never
+        clobbers a size the user dragged themselves."""
+        if self.piano_panel.height() > self.piano_panel.minimumHeight():
+            return
+        total = sum(self.splitter.sizes()) or self.height()
+        panel_height = min(PIANO_ROLL_DEFAULT_HEIGHT, max(0, total - 100))
+        self.splitter.setSizes([total - panel_height, panel_height])
 
     def _on_panel_closed(self):
         self.scene.close_piano_roll()

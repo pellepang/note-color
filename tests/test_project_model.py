@@ -21,6 +21,7 @@ from notecolor.project.model import (
     TimeSignature,
     Track,
     chromatic_note_names,
+    diatonic_pitch_classes,
     key_label,
     key_tonic_pitch_class,
 )
@@ -174,23 +175,56 @@ def test_key_tonic_pitch_class(fifths, mode, pitch_class):
     assert key_tonic_pitch_class(fifths, mode) == pitch_class
 
 
-def test_chromatic_note_names_are_sharp_spelled_at_zero_and_positive_fifths():
-    names = chromatic_note_names(0)
-    assert (names[1], names[6], names[10]) == ("C#", "F#", "A#")
-    assert chromatic_note_names(3)[1] == "C#"
+def test_chromatic_note_names_spell_c_major_per_the_circle_of_fifths():
+    """Every passing tone is the flat of the degree above it, except the
+    raised 4th (the tritone from the tonic), which is always sharp."""
+    assert chromatic_note_names(0, "major") == [
+        "C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 
 
-def test_chromatic_note_names_are_flat_spelled_at_negative_fifths():
-    names = chromatic_note_names(-2)
-    assert (names[1], names[6], names[10]) == ("Db", "Gb", "Bb")
+def test_chromatic_note_names_relative_minor_can_differ_from_its_major():
+    """A minor shares C major's key signature (fifths=0) but its own tonic,
+    so its raised-4th tritone falls on a different pitch class (D#, not F#)."""
+    assert chromatic_note_names(0, "minor") == [
+        "C", "Db", "D", "D#", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
 
 
-def test_chromatic_note_names_agree_on_naturals_either_way():
-    naturals = {0: "C", 2: "D", 4: "E", 5: "F", 7: "G", 9: "A", 11: "B"}
-    for fifths in (-4, 0, 4):
-        names = chromatic_note_names(fifths)
-        for pitch_class, letter in naturals.items():
-            assert names[pitch_class] == letter
+def test_chromatic_note_names_diatonic_degrees_keep_their_own_letter():
+    """A key whose diatonic scale itself needs an accidental (D major has
+    F# as a *scale* tone, not a passing tone) must show it -- not silently
+    fall back to the bare natural letter."""
+    names = chromatic_note_names(2, "major")   # D major: D E F# G A B C#
+    assert names[6] == "F#"
+    assert names[1] == "C#"
+
+
+def test_chromatic_note_names_agree_with_diatonic_pitch_classes():
+    """Every diatonic (in-scale) pitch class gets a single-letter name (no
+    accidental needed beyond what's baked into the letter itself already
+    being correct for that scale, e.g. plain 'C' in C major)."""
+    for fifths, mode in [(-4, "major"), (0, "major"), (4, "major"), (0, "minor")]:
+        names = chromatic_note_names(fifths, mode)
+        for pitch_class in diatonic_pitch_classes(fifths, mode):
+            assert names[pitch_class][0] in "CDEFGAB"
+
+
+def test_diatonic_pitch_classes_major():
+    assert diatonic_pitch_classes(0, "major") == {0, 2, 4, 5, 7, 9, 11}
+
+
+def test_diatonic_pitch_classes_minor_can_differ_from_relative_major():
+    """Same key signature as C major (fifths=0), but a different tonic, so
+    highlighting must key off (fifths, mode) together, not fifths alone --
+    it happens to land on the same 7 pitch classes here since A natural
+    minor shares C major's key signature exactly, but the *scale* -- degree
+    order and starting point -- genuinely differs."""
+    assert diatonic_pitch_classes(0, "minor") == {0, 2, 4, 5, 7, 9, 11}
+
+
+def test_diatonic_pitch_classes_are_not_just_the_white_keys():
+    """F# major's scale is mostly black keys -- highlighting must follow
+    the key, not a fixed natural-letter set."""
+    assert diatonic_pitch_classes(6, "major") == {1, 3, 5, 6, 8, 10, 11}
 
 
 def test_key_label():

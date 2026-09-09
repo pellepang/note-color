@@ -157,13 +157,19 @@ class TimeSignature:
 #: `key_tonic_pitch_class()` below.
 KEY_MODES = ("major", "minor")
 
-#: Sharp-spelled chromatic note names, used when `key_fifths >= 0`.
-_SHARP_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
-#: Flat-spelled chromatic note names, used when `key_fifths < 0`. A separate
-#: fixed table from `analysis.color_map.NOTE_NAMES_FIFTHS` (which is a single
-#: always-flat convention for pitch-class coloring) -- this one flips with
-#: the sign of the *project's own* key signature instead.
-_FLAT_NOTE_NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
+#: Natural letters, alphabetical order -- index -> letter.
+_LETTER_NAMES = "CDEFGAB"
+#: A natural letter's own pitch class (no accidental).
+_NATURAL_PITCH_CLASS = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+#: Circle-of-fifths letter order (order of sharps/flats): each step is a
+#: perfect fifth, so the major tonic's *letter* (ignoring its accidental)
+#: cycles through this every 7 fifths -- e.g. fifths=6 (F# major) and
+#: fifths=-6 (Gb major) both land on letter F, index (fifths+1) % 7 == 0.
+_FIFTHS_LETTER_CYCLE = "FCGDAEB"
+
+#: Major-scale and natural-minor-scale steps (semitones above the tonic).
+_MAJOR_SCALE_STEPS = (0, 2, 4, 5, 7, 9, 11)
+_NATURAL_MINOR_SCALE_STEPS = (0, 2, 3, 5, 7, 8, 10)
 
 
 def key_tonic_pitch_class(key_fifths, key_mode):
@@ -177,22 +183,83 @@ def key_tonic_pitch_class(key_fifths, key_mode):
     return (7 * key_fifths) % 12
 
 
-def chromatic_note_names(key_fifths):
-    """12 note names, indexed by pitch class 0-11, spelled with sharps
-    (`key_fifths >= 0`) or flats (`key_fifths < 0`).
+def _major_tonic_letter(key_fifths):
+    """The major tonic's bare letter (no accidental), e.g. 'F' for both F#
+    major (fifths=6) and Gb major (fifths=-6) -- the accidental is derived
+    separately from the target pitch class, not stored here."""
+    return _FIFTHS_LETTER_CYCLE[(key_fifths + 1) % 7]
 
-    A deliberate simplification of full diatonic key-signature spelling
-    (which varies the accidental by scale degree -- see
-    `analysis.staff_map.key_signature_accidental()`) down to a single
-    sharps-vs-flats convention: good enough to label a piano-roll's 12
-    chromatic rows, not a substitute for that more precise notation-only
-    logic."""
-    return list(_SHARP_NOTE_NAMES if key_fifths >= 0 else _FLAT_NOTE_NAMES)
+
+def _spell(letter, target_pitch_class):
+    """`letter` (e.g. 'F') raised or lowered by however many semitones it
+    takes to reach `target_pitch_class` -- 'F#' if the target sits a
+    semitone above F, 'Bb' if a semitone below B, plain 'C' if already
+    natural. Handles the (rare, extreme-key-signature) double-accidental
+    case too, spelling e.g. two semitones sharp as '##'."""
+    diff = (target_pitch_class - _NATURAL_PITCH_CLASS[letter] + 6) % 12 - 6
+    if diff == 0:
+        return letter
+    return letter + ("#" if diff > 0 else "b") * abs(diff)
+
+
+def _diatonic_degrees(key_fifths, key_mode):
+    """The key's 7 scale degrees, in order, as `(letter, pitch_class)` pairs.
+
+    A relative major/minor pair shares the same 7 *letters* (that is what
+    "relative" means) -- only the starting letter and the scale's own step
+    pattern (major vs. natural minor) differ, so the minor tonic's letter is
+    always 2 alphabetical steps behind its relative major's (e.g. C major /
+    A minor: A is 2 letters back from C in C-D-E-F-G-A-B)."""
+    major_letter_idx = _LETTER_NAMES.index(_major_tonic_letter(key_fifths))
+    if key_mode == "minor":
+        start = (major_letter_idx - 2) % 7
+        steps = _NATURAL_MINOR_SCALE_STEPS
+    else:
+        start = major_letter_idx
+        steps = _MAJOR_SCALE_STEPS
+    tonic = key_tonic_pitch_class(key_fifths, key_mode)
+    return [(_LETTER_NAMES[(start + i) % 7], (tonic + step) % 12)
+            for i, step in enumerate(steps)]
+
+
+def diatonic_pitch_classes(key_fifths, key_mode):
+    """The key's 7 diatonic (in-scale) pitch classes, as a set -- major
+    scale for `key_mode="major"`, natural minor (no raised 7th) for
+    `"minor"`."""
+    return {pitch_class for _letter, pitch_class in _diatonic_degrees(key_fifths, key_mode)}
+
+
+def chromatic_note_names(key_fifths, key_mode):
+    """12 note names, indexed by pitch class 0-11, spelled for the given
+    key: each of the 7 diatonic (scale) pitch classes keeps its own plain
+    letter; each of the other 5 (passing) pitch classes is spelled as the
+    flat of the scale degree above it, except the tritone from the tonic
+    (the raised 4th), which is always the sharp of the 4th scale degree's
+    letter -- e.g. C major (fifths=0) gives C, Db, D, Eb, E, F, F#, G, Ab,
+    A, Bb, B. A relative major/minor pair (same `key_fifths`) can differ
+    here, since their 4th scale degrees -- and so their tritones -- differ."""
+    degrees = _diatonic_degrees(key_fifths, key_mode)
+    names = [None] * 12
+    for letter, pitch_class in degrees:
+        names[pitch_class] = _spell(letter, pitch_class)
+
+    tonic = key_tonic_pitch_class(key_fifths, key_mode)
+    tritone_pitch_class = (tonic + 6) % 12
+    fourth_letter, _fourth_pc = degrees[3]
+    if names[tritone_pitch_class] is None:
+        names[tritone_pitch_class] = _spell(fourth_letter, tritone_pitch_class)
+
+    letter_by_pitch_class = {pitch_class: letter for letter, pitch_class in degrees}
+    for pitch_class in range(12):
+        if names[pitch_class] is None:
+            upper_letter = letter_by_pitch_class[(pitch_class + 1) % 12]
+            names[pitch_class] = _spell(upper_letter, pitch_class)
+    return names
 
 
 def key_label(key_fifths, key_mode):
     """Human-readable key label, e.g. `"F major"` or `"D minor"`."""
-    tonic_name = chromatic_note_names(key_fifths)[key_tonic_pitch_class(key_fifths, key_mode)]
+    tonic_name = chromatic_note_names(key_fifths, key_mode)[key_tonic_pitch_class(key_fifths, key_mode)]
     return f"{tonic_name} {key_mode}"
 
 
