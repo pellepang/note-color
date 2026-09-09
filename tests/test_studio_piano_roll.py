@@ -675,3 +675,126 @@ def test_clicking_the_main_canvas_returns_focus_and_normal_arrow_meaning(window)
     window.headers.selected_index = 0
     QTest.keyClick(window, QtCore.Qt.Key_Down)
     assert window.headers.selected_index == 1
+
+
+# --- note-name column --------------------------------------------------
+
+
+def test_note_name_column_uses_sharp_spelling_for_nonnegative_key_fifths(window):
+    window.project.key_fifths = 0
+    panel = _open(window)
+    from notecolor.project.model import chromatic_note_names
+    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "C#"
+
+
+def test_note_name_column_uses_flat_spelling_for_negative_key_fifths(window):
+    window.project.key_fifths = -3
+    panel = _open(window)
+    from notecolor.project.model import chromatic_note_names
+    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "Db"
+
+
+def test_note_name_column_follows_a_live_key_change(window):
+    window.project.key_fifths = 0
+    panel = _open(window)
+    from notecolor.project.model import chromatic_note_names
+    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "C#"
+
+    window.project.key_fifths = -5     # changed while the panel stays open
+    assert chromatic_note_names(panel.keys_column._key_fifths())[1] == "Db"
+
+
+def test_note_name_column_paints_without_error(window):
+    """Not a pixel test (see module docstring) -- just confirms the paint
+    path (row loop, natural/accidental branch, scroll offset) runs clean
+    over a real track's bounds."""
+    panel = _open(window)
+    panel.keys_column.resize(panel.keys_column.width(), 200)
+    panel.keys_column.set_scroll(10)
+    panel.keys_column.repaint()
+
+
+# --- zoom ----------------------------------------------------------------
+
+
+def test_zoom_in_increases_both_axes(window):
+    from notecolor.gui import piano_roll_panel as prp
+    panel = _open(window)
+    scene = panel.view.scene()
+    before = (scene.px_per_beat, scene.px_per_semitone)
+
+    panel.view.zoom_in()
+
+    assert scene.px_per_beat == pytest.approx(before[0] * prp.ZOOM_FACTOR)
+    assert scene.px_per_semitone == pytest.approx(before[1] * prp.ZOOM_FACTOR)
+
+
+def test_zoom_out_decreases_both_axes(window):
+    from notecolor.gui import piano_roll_panel as prp
+    panel = _open(window)
+    scene = panel.view.scene()
+    before = (scene.px_per_beat, scene.px_per_semitone)
+
+    panel.view.zoom_out()
+
+    assert scene.px_per_beat == pytest.approx(before[0] / prp.ZOOM_FACTOR)
+    assert scene.px_per_semitone == pytest.approx(before[1] / prp.ZOOM_FACTOR)
+
+
+def test_zoom_clamps_at_the_minimum(window):
+    from notecolor.gui import piano_roll_panel as prp
+    panel = _open(window)
+    scene = panel.view.scene()
+    for _ in range(60):
+        panel.view.zoom_out()
+    assert scene.px_per_beat == pytest.approx(prp.MIN_PX_PER_BEAT)
+    assert scene.px_per_semitone == pytest.approx(prp.MIN_PX_PER_SEMITONE)
+
+
+def test_zoom_clamps_at_the_maximum(window):
+    from notecolor.gui import piano_roll_panel as prp
+    panel = _open(window)
+    scene = panel.view.scene()
+    for _ in range(60):
+        panel.view.zoom_in()
+    assert scene.px_per_beat == pytest.approx(prp.MAX_PX_PER_BEAT)
+    assert scene.px_per_semitone == pytest.approx(prp.MAX_PX_PER_SEMITONE)
+
+
+def test_zoom_buttons_drive_the_same_zoom(window):
+    from notecolor.gui import piano_roll_panel as prp
+    panel = _open(window)
+    scene = panel.view.scene()
+    before = scene.px_per_beat
+
+    panel._on_zoom_in_clicked()
+    assert scene.px_per_beat == pytest.approx(before * prp.ZOOM_FACTOR)
+
+    panel._on_zoom_out_clicked()
+    assert scene.px_per_beat == pytest.approx(before)
+
+
+def _wheel(angle_delta_y, modifiers=QtCore.Qt.NoModifier, pos=QtCore.QPointF(50, 50)):
+    return QtGui.QWheelEvent(
+        pos, pos, QtCore.QPoint(0, 0), QtCore.QPoint(0, angle_delta_y),
+        QtCore.Qt.NoButton, modifiers, QtCore.Qt.NoScrollPhase, False)
+
+
+def test_ctrl_wheel_zooms_the_panel(window):
+    panel = _open(window)
+    scene = panel.view.scene()
+    before = scene.px_per_beat
+
+    panel.view.wheelEvent(_wheel(120, QtCore.Qt.ControlModifier))
+
+    assert scene.px_per_beat != before
+
+
+def test_plain_wheel_does_not_zoom(window):
+    panel = _open(window)
+    scene = panel.view.scene()
+    before = (scene.px_per_beat, scene.px_per_semitone)
+
+    panel.view.wheelEvent(_wheel(120))
+
+    assert (scene.px_per_beat, scene.px_per_semitone) == before

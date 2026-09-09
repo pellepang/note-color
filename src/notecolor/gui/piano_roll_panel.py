@@ -20,11 +20,11 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 from notecolor.gui import theme
 from notecolor.project import edit
-from notecolor.project.model import Note, NoteClip
+from notecolor.project.model import Note, NoteClip, chromatic_note_names
 
-#: Same fixed pixel-per-semitone scale the inline piano roll used -- pitch has
-#: to mean the same y everywhere so a dragged note lands where the eye expects
-#: it, not wherever the open track's own range happened to put it.
+#: Default pixel-per-semitone scale, same value the inline piano roll used --
+#: now a `PianoRollScene` instance attribute (`px_per_semitone`) rather than
+#: a constant, so zooming can change it; this is only the starting value.
 PIANO_ROLL_PX_PER_SEMITONE = 8
 PIANO_ROLL_PAD = 12
 #: Semitones of headroom above/below the open track's own note range, so a
@@ -41,6 +41,16 @@ DEFAULT_PX_PER_BEAT = 34
 #: Minimum bars of empty grid shown past the last clip, so there is always
 #: room to add a note past the end of what exists.
 MIN_BARS = 4
+
+#: Zoom bounds and step for both axes together (toolbar +/- buttons,
+#: Ctrl+wheel) -- horizontal and vertical always move together, not
+#: independent knobs, per the feature's own design.
+MIN_PX_PER_BEAT, MAX_PX_PER_BEAT = 10.0, 200.0
+MIN_PX_PER_SEMITONE, MAX_PX_PER_SEMITONE = 3.0, 24.0
+ZOOM_FACTOR = 1.25
+
+#: Left-side note-name column width, in widget pixels.
+PIANO_ROLL_KEYS_WIDTH = 32
 
 #: Keys the panel's view claims for itself while a track is open. Anything
 #: else is left for `StudioWindow`'s global handler.
@@ -61,6 +71,9 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
         super().__init__()
         self.pitch_colour = pitch_colour
         self.px_per_beat = DEFAULT_PX_PER_BEAT
+        #: Pixel-per-semitone scale -- instance state (not the module
+        #: constant it started from) so zooming can change it per panel.
+        self.px_per_semitone = PIANO_ROLL_PX_PER_SEMITONE
         #: The open `Track`, or `None` when the panel is closed.
         self.track = None
         #: `(low, high)` MIDI pitch bounds, frozen at open time -- recomputing
@@ -108,12 +121,25 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
 
     def pitch_to_y(self, pitch):
         low, high = self.bounds
-        return PIANO_ROLL_PAD + (high - pitch) * PIANO_ROLL_PX_PER_SEMITONE
+        return PIANO_ROLL_PAD + (high - pitch) * self.px_per_semitone
 
     def y_to_pitch(self, y):
         low, high = self.bounds
-        semitones = (y - PIANO_ROLL_PAD) / PIANO_ROLL_PX_PER_SEMITONE
+        semitones = (y - PIANO_ROLL_PAD) / self.px_per_semitone
         return max(low, min(high, round(high - semitones)))
+
+    # -- zoom ---------------------------------------------------------------
+
+    def zoom(self, factor):
+        """Scale both axes together by `factor` (>1 in, <1 out), clamped so
+        the grid never gets illegibly small or absurdly large. Horizontal and
+        vertical always move together -- not independent knobs -- per this
+        feature's own design."""
+        self.px_per_beat = max(MIN_PX_PER_BEAT,
+                               min(MAX_PX_PER_BEAT, self.px_per_beat * factor))
+        self.px_per_semitone = max(MIN_PX_PER_SEMITONE,
+                                   min(MAX_PX_PER_SEMITONE,
+                                       self.px_per_semitone * factor))
 
     # -- model-coordinate lookups (no mouse position needed) ---------------
 
@@ -168,7 +194,7 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
             self.setSceneRect(0, 0, 0, 0)
             return
         low, high = self.bounds
-        height = (high - low + 1) * PIANO_ROLL_PX_PER_SEMITONE + 2 * PIANO_ROLL_PAD
+        height = (high - low + 1) * self.px_per_semitone + 2 * PIANO_ROLL_PAD
         width = self.total_beats * self.px_per_beat
         self.setSceneRect(0, 0, width, height)
 
@@ -203,7 +229,7 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
         self.addItem(band)
 
     def _notes(self, clip):
-        note_h = max(2.0, PIANO_ROLL_PX_PER_SEMITONE - 1)
+        note_h = max(2.0, self.px_per_semitone - 1)
         for note in clip.notes:
             nx = (clip.start_beat + note.start_beat) * self.px_per_beat
             nw = max(RESIZE_HANDLE_PX * 1.5, note.duration_beats * self.px_per_beat - 1)
@@ -231,7 +257,7 @@ class PianoRollScene(QtWidgets.QGraphicsScene):
         nx = beat * self.px_per_beat
         nw = max(RESIZE_HANDLE_PX * 1.5, 1.0 * self.px_per_beat - 1)
         ny = self.pitch_to_y(pitch)
-        note_h = max(2.0, PIANO_ROLL_PX_PER_SEMITONE - 1)
+        note_h = max(2.0, self.px_per_semitone - 1)
         item = QtWidgets.QGraphicsRectItem(nx, ny, nw, note_h)
         pen = QtGui.QPen(theme.SELECTION, 2, QtCore.Qt.DashLine)
         pen.setCosmetic(True)
@@ -256,6 +282,10 @@ class PianoRollView(QtWidgets.QGraphicsView):
     #: model -- the host refreshes its toolbar labels off this rather than
     #: every call site remembering to ask for it.
     edited = QtCore.Signal()
+    #: Emitted after a zoom step -- separate from `edited` since zoom is not
+    #: a mode/selection/model change, but the host's note-name column (which
+    #: shares this view's `px_per_semitone`/row geometry) still has to redraw.
+    zoomed = QtCore.Signal()
 
     def __init__(self, run_command, say, pitch_colour):
         # Held in `self._piano_scene` too: passing the scene straight through
@@ -287,6 +317,49 @@ class PianoRollView(QtWidgets.QGraphicsView):
 
     def rebuild(self):
         self.scene().rebuild()
+
+    # -- zoom: toolbar +/- buttons and Ctrl+wheel, both axes together -------
+
+    def zoom_in(self):
+        self._zoom(ZOOM_FACTOR)
+
+    def zoom_out(self):
+        self._zoom(1.0 / ZOOM_FACTOR)
+
+    def _zoom(self, factor, viewport_pos=None):
+        scene = self.scene()
+        if scene.track is None:
+            return
+        if viewport_pos is None:
+            viewport_pos = self.viewport().rect().center()
+        # Standard "zoom to a point" trick: remember where the anchor point
+        # sits in the viewport, rescale, then shift the scrollbars back by
+        # however far that point drifted -- keeps whatever is under the
+        # mouse (or the viewport centre, for the toolbar buttons) visually
+        # still instead of the view jumping to the scene origin.
+        anchor_scene = self.mapToScene(viewport_pos)
+        old_px_per_beat, old_px_per_semitone = scene.px_per_beat, scene.px_per_semitone
+        scene.zoom(factor)
+        scene.rebuild()
+        x_scale = scene.px_per_beat / old_px_per_beat
+        y_scale = scene.px_per_semitone / old_px_per_semitone
+        target = QtCore.QPointF(
+            anchor_scene.x() * x_scale,
+            PIANO_ROLL_PAD + (anchor_scene.y() - PIANO_ROLL_PAD) * y_scale)
+        self.centerOn(target)
+        drift = self.viewport().rect().center() - viewport_pos
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - drift.x())
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() - drift.y())
+        self.zoomed.emit()
+
+    def wheelEvent(self, event):
+        scene = self.scene()
+        if scene.track is not None and event.modifiers() & QtCore.Qt.ControlModifier:
+            factor = ZOOM_FACTOR if event.angleDelta().y() > 0 else 1.0 / ZOOM_FACTOR
+            self._zoom(factor, event.position().toPoint())
+            event.accept()
+            return
+        super().wheelEvent(event)
 
     # -- one action = one command, run through the host's undo stack -------
 
@@ -572,6 +645,61 @@ class PianoRollView(QtWidgets.QGraphicsView):
         return super().event(event)
 
 
+class PianoRollKeys(QtWidgets.QWidget):
+    """The left-side note-name column, one label per semitone row.
+
+    A separate sibling widget kept in vertical scroll-sync with
+    `PianoRollView` -- the same precedent `gui/studio.py`'s `TrackHeaders`
+    uses for `ArrangeScene` (a `scroll` offset the host updates from the
+    view's `verticalScrollBar().valueChanged`, rather than drawing labels
+    inside the scrollable `QGraphicsScene` itself). Reads `scene.bounds` and
+    `scene.px_per_semitone` directly so a row's label always lines up with
+    the matching note row, including after a zoom.
+
+    `key_fifths` is a callable (not a value) so the label spelling follows
+    the project's *current* key live -- re-read on every `paintEvent()`
+    rather than cached at construction or `open_track()` time, since the key
+    can change from the header while this panel is open.
+    """
+
+    def __init__(self, scene, key_fifths):
+        super().__init__()
+        self._scene = scene
+        self._key_fifths = key_fifths
+        self.scroll = 0
+        self.setFixedWidth(PIANO_ROLL_KEYS_WIDTH)
+
+    def set_scroll(self, value):
+        self.scroll = value
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QtGui.QPainter(self)
+        p.fillRect(self.rect(), theme.CHROME)
+        scene = self._scene
+        if scene.track is None:
+            return
+        low, high = scene.bounds
+        names = chromatic_note_names(self._key_fifths())
+        row_h = scene.px_per_semitone
+        font_size = max(5, min(9, int(row_h) - 3))
+        for pitch in range(int(low), int(high) + 1):
+            y = scene.pitch_to_y(pitch) - self.scroll
+            if y + row_h < 0 or y > self.height():
+                continue
+            name = names[pitch % 12]
+            natural = len(name) == 1
+            if not natural:
+                p.fillRect(QtCore.QRectF(0, y, PIANO_ROLL_KEYS_WIDTH, row_h),
+                          theme.CHROME_DEEP)
+            p.setPen(theme.RULE)
+            p.drawLine(QtCore.QPointF(0, y + row_h), QtCore.QPointF(PIANO_ROLL_KEYS_WIDTH, y + row_h))
+            p.setPen(theme.TEXT if natural else theme.TEXT_FAINT)
+            p.setFont(theme.font(font_size, bold=natural))
+            p.drawText(QtCore.QRectF(2, y, PIANO_ROLL_KEYS_WIDTH - 4, row_h),
+                       QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft, name)
+
+
 class PianoRollPanel(QtWidgets.QWidget):
     """The bottom pane: a mode/add/delete toolbar over the `PianoRollView`.
 
@@ -590,7 +718,7 @@ class PianoRollPanel(QtWidgets.QWidget):
     #: here (clear the header's "piano roll open" marker), not just refresh.
     closed = QtCore.Signal()
 
-    def __init__(self, run_command, say, pitch_colour):
+    def __init__(self, run_command, say, pitch_colour, key_fifths):
         super().__init__()
         self._say_host = say
         self.track_index = None
@@ -621,15 +749,42 @@ class PianoRollPanel(QtWidgets.QWidget):
         self.delete_button.clicked.connect(self._on_delete_clicked)
         bar.addWidget(self.delete_button)
 
+        self.zoom_out_button = QtWidgets.QPushButton("−")
+        self.zoom_out_button.setFixedWidth(24)
+        self.zoom_out_button.setToolTip("zoom out (ctrl+scroll)")
+        self.zoom_out_button.clicked.connect(self._on_zoom_out_clicked)
+        bar.addWidget(self.zoom_out_button)
+
+        self.zoom_in_button = QtWidgets.QPushButton("+")
+        self.zoom_in_button.setFixedWidth(24)
+        self.zoom_in_button.setToolTip("zoom in (ctrl+scroll)")
+        self.zoom_in_button.clicked.connect(self._on_zoom_in_clicked)
+        bar.addWidget(self.zoom_in_button)
+
         close_button = QtWidgets.QPushButton("close")
         close_button.clicked.connect(self._on_close_clicked)
         bar.addWidget(close_button)
 
         layout.addWidget(toolbar)
 
+        body = QtWidgets.QWidget()
+        body_layout = QtWidgets.QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+
         self.view = PianoRollView(run_command, self._say, pitch_colour)
         self.view.edited.connect(self._on_edited)
-        layout.addWidget(self.view, 1)
+        self.view.zoomed.connect(self._on_zoomed)
+
+        # The note-name column is a sibling widget kept in vertical
+        # scroll-sync with `self.view`, not drawn inside its scene -- see
+        # `PianoRollKeys`'s own docstring for why.
+        self.keys_column = PianoRollKeys(self.view.scene(), key_fifths)
+        self.view.verticalScrollBar().valueChanged.connect(self.keys_column.set_scroll)
+
+        body_layout.addWidget(self.keys_column)
+        body_layout.addWidget(self.view, 1)
+        layout.addWidget(body, 1)
 
         self.setMinimumHeight(60)
         self.hide()
@@ -647,6 +802,7 @@ class PianoRollPanel(QtWidgets.QWidget):
         self.track_index = track_index
         self.title_label.setText(f"piano roll -- {track.name}")
         self.view.open_track(track)
+        self.keys_column.update()
         self.show()
         self.view.setFocus()
         self._refresh_toolbar()
@@ -654,6 +810,7 @@ class PianoRollPanel(QtWidgets.QWidget):
     def close_track(self):
         self.track_index = None
         self.view.close_track()
+        self.keys_column.update()
         self.hide()
 
     @property
@@ -689,3 +846,14 @@ class PianoRollPanel(QtWidgets.QWidget):
     def _on_close_clicked(self):
         self.close_track()
         self.closed.emit()
+
+    def _on_zoomed(self):
+        self.keys_column.update()
+
+    def _on_zoom_in_clicked(self):
+        self.view.zoom_in()
+        self.view.setFocus()
+
+    def _on_zoom_out_clicked(self):
+        self.view.zoom_out()
+        self.view.setFocus()
