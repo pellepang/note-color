@@ -22,32 +22,13 @@ from notecolor.project import edit
 from notecolor.project.bundle import (
     BUNDLE_SUFFIX, bundle_path, default_projects_dir, save_project,
 )
+from notecolor.gui.piano_roll_panel import PianoRollPanel
 from notecolor.gui.recent import recent_paths, remember_path
-from notecolor.project.model import AUDIO_TRACK, Note, NoteClip
+from notecolor.project.model import AUDIO_TRACK, NoteClip
 
 LANE_H, HEADER_W, RULER_H = 54, 196, 22
 DEFAULT_PX_PER_BEAT = 34
 MIN_BARS = 16
-
-#: Piano-roll geometry (map #145 milestone 2, #155). A fixed pixel-per-
-#: semitone scale, not the collapsed thumbnail's per-clip min/max squeeze --
-#: a real piano roll needs pitch to mean the same y everywhere so a dragged
-#: note lands where your eye expects it, not wherever that clip's own range
-#: happened to put it.
-PIANO_ROLL_PX_PER_SEMITONE = 8
-PIANO_ROLL_PAD = 12
-#: Semitones shown above/below the open track's own note range -- headroom to
-#: drag or add a note past what is already there without the window feeling
-#: clipped.
-PIANO_ROLL_MARGIN_SEMITONES = 3
-#: Window used when a track has no notes yet (freshly opened, empty clip):
-#: two and a half octaves centred on middle C, wide enough to place a first
-#: note without immediately hitting the edge.
-PIANO_ROLL_DEFAULT_LOW, PIANO_ROLL_DEFAULT_HIGH = 48, 78
-#: Hit-target width, in scene pixels, for "grabbed the right edge to resize"
-#: rather than "grabbed the body to move". The view applies no scale
-#: transform, so scene pixels and screen pixels are the same thing here.
-RESIZE_HANDLE_PX = 6
 
 
 def pitch_colour(pitch_class, lightness=0.66, alpha=255):
@@ -73,19 +54,11 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
         self.project = project
         self.px_per_beat = px_per_beat
         self.playhead = None
-        #: The one track currently expanded into an editable piano roll, or
-        #: `None` -- #155 settled "only one open at a time" as a deliberate
-        #: simplification, so this is a single slot rather than a set.
+        #: The one track whose piano roll panel is currently open, or `None`
+        #: -- purely a marker for `TrackHeaders` to highlight, per #52's
+        #: reversal of #155: the panel itself (`PianoRollPanel`) now owns all
+        #: editable note geometry and state, not this scene.
         self.piano_roll_row = None
-        #: `(low, high)` MIDI pitch bounds for the open piano roll, frozen at
-        #: open time rather than recomputed every rebuild. Recomputing it live
-        #: would mean a note dragged near the current edge widens the window
-        #: and shifts every other note's y under the pointer mid-drag.
-        self.piano_roll_bounds = None
-        #: Last-clicked note, `(clip, note)` or `None`. Deliberately not a
-        #: general multi-select -- #155 scoped selection down to "enough for
-        #: Delete to know what to delete", nothing more.
-        self.selected_note = None
         self.rebuild()
 
     @property
@@ -96,13 +69,9 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
     def total_beats(self):
         return max(self.project.end_beat, MIN_BARS * self.beats_per_bar)
 
-    # -- piano roll: row geometry -------------------------------------------
+    # -- row geometry -------------------------------------------------------
 
     def row_height(self, row):
-        if row == self.piano_roll_row and self.piano_roll_bounds is not None:
-            low, high = self.piano_roll_bounds
-            span = high - low + 1
-            return span * PIANO_ROLL_PX_PER_SEMITONE + 2 * PIANO_ROLL_PAD
         return LANE_H
 
     def row_top(self, row):
@@ -124,29 +93,10 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
         return rows - 1
 
     def open_piano_roll(self, row):
-        track = self.project.tracks[row]
-        pitches = [note.pitch for clip in track.clips
-                  if isinstance(clip, NoteClip) for note in clip.notes]
-        if pitches:
-            low = min(pitches) - PIANO_ROLL_MARGIN_SEMITONES
-            high = max(pitches) + PIANO_ROLL_MARGIN_SEMITONES
-        else:
-            low, high = PIANO_ROLL_DEFAULT_LOW, PIANO_ROLL_DEFAULT_HIGH
         self.piano_roll_row = row
-        self.piano_roll_bounds = (low, high)
 
     def close_piano_roll(self):
         self.piano_roll_row = None
-        self.piano_roll_bounds = None
-
-    def pitch_to_y(self, pitch, top):
-        low, high = self.piano_roll_bounds
-        return top + PIANO_ROLL_PAD + (high - pitch) * PIANO_ROLL_PX_PER_SEMITONE
-
-    def y_to_pitch(self, y, top):
-        low, high = self.piano_roll_bounds
-        semitones = (y - top - PIANO_ROLL_PAD) / PIANO_ROLL_PX_PER_SEMITONE
-        return max(low, min(high, round(high - semitones)))
 
     def _pen(self, colour, width=1):
         pen = QtGui.QPen(colour)
@@ -187,9 +137,6 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
         top, row_h = self.row_top(row), self.row_height(row)
         x = clip.start_beat * self.px_per_beat
         w = max(6.0, clip.length_beats * self.px_per_beat - 1)
-
-        piano_roll = (row == self.piano_roll_row and track.kind != AUDIO_TRACK
-                     and isinstance(clip, NoteClip))
         y, h = top + 4, row_h - 9
 
         body = QtWidgets.QGraphicsRectItem(x, y, w, h)
@@ -213,15 +160,13 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
 
         if track.kind == AUDIO_TRACK or not isinstance(clip, NoteClip):
             return
-        if piano_roll:
-            self._piano_roll_notes(x, top, clip)
-        elif clip.notes:
+        if clip.notes:
             self._clip_thumbnail_notes(x, y, h, clip)
 
     def _clip_thumbnail_notes(self, x, y, h, clip):
-        """The collapsed view: a 3px decoration squeezed into one clip's own
-        min/max pitch range. Unclickable on purpose -- this is a thumbnail,
-        not an editing surface; that surface is `_piano_roll_notes()`."""
+        """The always-visible mini view: a 3px decoration squeezed into one
+        clip's own min/max pitch range. Unclickable on purpose -- editing a
+        track's notes happens in the `PianoRollPanel` bottom pane, not here."""
         pitches = [n.pitch for n in clip.notes]
         low, high = min(pitches), max(pitches)
         span = max(1, high - low)
@@ -236,31 +181,6 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
             item.setZValue(self.Z_NOTE)
             self.addItem(item)
 
-    def _piano_roll_notes(self, clip_x, row_top, clip):
-        """The editable view: real, hit-testable rects at a fixed
-        pixel-per-semitone scale, carrying the `Note`/`NoteClip` pair
-        `note_at()` needs -- distinct from `data(1)`, which `clip_at()` owns
-        and must keep meaning "a clip body", never a note."""
-        note_h = max(2.0, PIANO_ROLL_PX_PER_SEMITONE - 1)
-        for note in clip.notes:
-            nx = clip_x + note.start_beat * self.px_per_beat
-            nw = max(RESIZE_HANDLE_PX * 1.5, note.duration_beats * self.px_per_beat - 1)
-            ny = self.pitch_to_y(note.pitch, row_top)
-            # Identity, not `==`: `Note` is a plain dataclass with generated
-            # value equality, so two notes that merely look alike (same
-            # pitch/beat) would otherwise both light up as "selected".
-            selected = (self.selected_note is not None
-                       and self.selected_note[0] is clip
-                       and self.selected_note[1] is note)
-            item = QtWidgets.QGraphicsRectItem(nx, ny, nw, note_h)
-            item.setBrush(QtGui.QBrush(pitch_colour(note.pitch_class)))
-            item.setPen(QtGui.QPen(theme.SELECTION if selected else theme.CLIP_EDGE,
-                                   2 if selected else 1))
-            item.setData(2, note)
-            item.setData(3, clip)
-            item.setZValue(self.Z_NOTE)
-            self.addItem(item)
-
     def clip_at(self, scene_point):
         """`(row, clip)` under a scene position, or `None`.
 
@@ -270,20 +190,6 @@ class ArrangeScene(QtWidgets.QGraphicsScene):
             clip = item.data(1)
             if clip is not None:
                 return item.data(0), clip
-        return None
-
-    def note_at(self, scene_point):
-        """`(note, clip, is_resize_handle)` under a scene position, or `None`.
-
-        `data(1)` (a clip) is never set on a note item, so this and
-        `clip_at()` never see each other's hits even though a note usually
-        sits directly on top of its own clip's body.
-        """
-        for item in self.items(scene_point):
-            note = item.data(2)
-            if note is not None:
-                is_resize = item.rect().right() - scene_point.x() <= RESIZE_HANDLE_PX
-                return note, item.data(3), is_resize
         return None
 
     def move_playhead(self, beat):
@@ -598,6 +504,12 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"visualnote studio — {project.name}")
         self.setAcceptDrops(True)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        # This window is the default keyboard-focus holder: the main canvas
+        # explicitly refuses focus (below) so a click on it never steals key
+        # events away from the window's own always-live shortcuts, and only
+        # the piano roll panel's own view (`piano_roll_panel.PianoRollView`)
+        # ever claims focus for itself, deliberately.
+        self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self.resize(1280, 720)
         self._build()
         self.timer = QtCore.QTimer(self)
@@ -631,6 +543,10 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.view.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
         self.view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOn)
         self.view.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        # `QGraphicsView` defaults to `StrongFocus` -- explicitly refused, so
+        # clicking the main canvas can never make it the keyboard-focus
+        # widget and swallow keys ahead of `StudioWindow`'s own handler.
+        self.view.setFocusPolicy(QtCore.Qt.NoFocus)
         self.ruler = Ruler(self.scene)
         self.ruler.located.connect(self._locate)
         self.ruler.loop_set.connect(self._set_loop)
@@ -649,7 +565,22 @@ class StudioWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.ruler, 0, 1)
         grid.addWidget(self.headers, 1, 0)
         grid.addWidget(self.view, 1, 1)
-        outer.addWidget(grid_host)
+
+        # The piano roll lives in its own vertically-resizable bottom pane
+        # (map #145 milestone 2, #52's reversal of #155) rather than growing
+        # a track's row height in place on the main canvas -- a `QSplitter`
+        # rather than a `QDockWidget` because the user wants it anchored at
+        # the bottom and drag-resizable, not floatable/undockable.
+        self.piano_panel = PianoRollPanel(self.run, self.say, pitch_colour)
+        self.piano_panel.changed.connect(self._on_panel_changed)
+        self.piano_panel.closed.connect(self._on_panel_closed)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        splitter.addWidget(grid_host)
+        splitter.addWidget(self.piano_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        outer.addWidget(splitter)
         self.setCentralWidget(central)
 
         for title, area in (("inspector", QtCore.Qt.LeftDockWidgetArea),
@@ -818,7 +749,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         # piano roll "open" on whatever row happens to share that index in
         # the new project is a coincidence, not a feature.
         self.scene.close_piano_roll()
-        self.scene.selected_note = None
+        self.piano_panel.close_track()
         self.scene.rebuild()
         self.headers.project = project
         self.headers.selected_index = 0
@@ -940,27 +871,38 @@ class StudioWindow(QtWidgets.QMainWindow):
             self.say("drag on the ruler to set a loop first")
 
     def toggle_piano_roll(self, row):
-        """Open `row`'s track as an editable piano roll, or close it.
+        """Open `row`'s track in the piano roll panel, or close it.
 
         Double-clicking the already-open track's lane closes it; double-
         clicking a different one switches to that track instead of stacking
-        a second one open -- #155 settled "only one at a time".
+        a second one open -- #155 settled "only one at a time", unchanged by
+        #52's move to a separate panel.
         """
         if not 0 <= row < len(self.project.tracks):
             return
         if self.scene.piano_roll_row == row:
             self.scene.close_piano_roll()
+            self.piano_panel.close_track()
             self.say("piano roll closed")
         else:
             track = self.project.tracks[row]
             if track.kind == AUDIO_TRACK:
                 return self.say(f"{track.name} is an audio track -- no piano roll")
             self.scene.open_piano_roll(row)
+            self.piano_panel.open_track(row, track)
             self.say(f"piano roll: {track.name}")
-        self.scene.selected_note = None
         self.headers.selected_index = row
         self.scene.rebuild()
         self.headers.update()
+
+    def _on_panel_closed(self):
+        self.scene.close_piano_roll()
+        self.scene.rebuild()
+        self.headers.update()
+
+    def _on_panel_changed(self):
+        self.headers.update()
+        self._retitle()
 
     def _toggle_track(self, index, letter):
         track = self.project.tracks[index]
@@ -1015,20 +957,7 @@ class StudioWindow(QtWidgets.QMainWindow):
         self.ruler.update()
         self.say(f"zoom {after:.0f} px/beat")
 
-    # -- piano roll: add / drag / resize -----------------------------------
-
-    def _add_note(self, clip, point):
-        """Ctrl+click a clip's body, while its track's piano roll is open, to
-        drop a one-beat note there -- chosen over a plain click because a
-        plain click on a clip already means "grab it to move it in time",
-        and empty lane space (no clip) already means "locate the playhead"."""
-        row = self.scene.piano_roll_row
-        beat = self.snap(max(0.0, point.x() / self.scene.px_per_beat
-                             - clip.start_beat))
-        pitch = self.scene.y_to_pitch(point.y(), self.scene.row_top(row))
-        note = Note(beat, 1.0, pitch)
-        self.run(edit.AddNote(clip, note))
-        self.scene.selected_note = (clip, note)
+    # -- clip drag ----------------------------------------------------------
 
     def _drag_move(self, point):
         drag = self._drag
@@ -1037,21 +966,6 @@ class StudioWindow(QtWidgets.QMainWindow):
             target = self.snap(max(0.0, drag["from"] + beat - drag["grab"]))
             if target != drag["clip"].start_beat:
                 drag["clip"].start_beat = target
-                drag["moved"] = True
-        elif drag["kind"] == "move-note":
-            note = drag["note"]
-            target_beat = self.snap(max(0.0, drag["from_beat"] + beat - drag["grab"]))
-            target_pitch = self.scene.y_to_pitch(
-                point.y(), self.scene.row_top(self.scene.piano_roll_row))
-            if target_beat != note.start_beat or target_pitch != note.pitch:
-                note.start_beat, note.pitch = target_beat, target_pitch
-                drag["moved"] = True
-        elif drag["kind"] == "resize-note":
-            note = drag["note"]
-            target = max(edit.ResizeNote.MIN_DURATION_BEATS,
-                        drag["from_duration"] + beat - drag["grab"])
-            if target != note.duration_beats:
-                note.duration_beats = target
                 drag["moved"] = True
         if drag["moved"]:
             self.scene.rebuild()
@@ -1067,25 +981,6 @@ class StudioWindow(QtWidgets.QMainWindow):
             landed = drag["clip"].start_beat
             drag["clip"].start_beat = drag["from"]
             self.run(edit.MoveClip(self.project, drag["row"], drag["clip"], landed))
-        elif drag["kind"] == "move-note":
-            note = drag["note"]
-            landed_beat, landed_pitch = note.start_beat, note.pitch
-            note.start_beat, note.pitch = drag["from_beat"], drag["from_pitch"]
-            self.run(edit.MoveNote(drag["clip"], note, landed_beat, pitch=landed_pitch))
-            self.scene.selected_note = (drag["clip"], note)
-        elif drag["kind"] == "resize-note":
-            note = drag["note"]
-            landed = note.duration_beats
-            note.duration_beats = drag["from_duration"]
-            self.run(edit.ResizeNote(drag["clip"], note, landed))
-            self.scene.selected_note = (drag["clip"], note)
-
-    def delete_selected_note(self):
-        if self.scene.selected_note is None:
-            return self.say("no note selected")
-        clip, note = self.scene.selected_note
-        self.scene.selected_note = None
-        self.run(edit.DeleteNote(clip, note))
 
     def eventFilter(self, watched, event):
         # Clicking anywhere in the track area moves the playhead. Every DAW
@@ -1094,32 +989,12 @@ class StudioWindow(QtWidgets.QMainWindow):
         if (watched is self.view.viewport()
                 and event.type() == QtCore.QEvent.MouseButtonPress
                 and event.button() == QtCore.Qt.LeftButton):
+            # Reclaim keyboard focus from the piano roll panel (if it has it)
+            # so arrow keys/Space/Delete go back to meaning their main-window
+            # things the moment the user clicks back on the main canvas --
+            # the other half of the panel's own click-to-focus.
+            self.setFocus()
             point = self.view.mapToScene(event.position().toPoint())
-            # Notes render *above* their clip's body (Z_NOTE > Z_CLIP), so a
-            # click on a note would also be a click on the clip underneath --
-            # `note_at()` has to get first refusal, or every note-drag would
-            # instead drag the whole clip in time.
-            note_hit = self.scene.note_at(point)
-            if note_hit is not None:
-                note, clip, is_resize = note_hit
-                self.scene.selected_note = (clip, note)
-                self.headers.update()
-                if is_resize:
-                    self._drag = {"kind": "resize-note", "clip": clip, "note": note,
-                                  "grab": point.x() / self.scene.px_per_beat,
-                                  "from_duration": note.duration_beats, "moved": False}
-                else:
-                    self._drag = {"kind": "move-note", "clip": clip, "note": note,
-                                  "grab": point.x() / self.scene.px_per_beat,
-                                  "from_beat": note.start_beat,
-                                  "from_pitch": note.pitch, "moved": False}
-                return True
-            if (self.scene.piano_roll_row is not None
-                    and event.modifiers() & QtCore.Qt.ControlModifier):
-                hit = self.scene.clip_at(point)
-                if hit is not None and hit[0] == self.scene.piano_roll_row:
-                    self._add_note(hit[1], point)
-                    return True
             hit = self.scene.clip_at(point)
             if hit is not None:
                 row, clip = hit
@@ -1253,8 +1128,6 @@ class StudioWindow(QtWidgets.QMainWindow):
             self._toggle_track(self.headers.selected_index, "s")
         elif key == QtCore.Qt.Key_L:
             self._toggle_loop()
-        elif key in (QtCore.Qt.Key_Delete, QtCore.Qt.Key_Backspace):
-            self.delete_selected_note()
         elif key in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
             step = -1 if key == QtCore.Qt.Key_Up else 1
             count = max(1, len(self.project.tracks))

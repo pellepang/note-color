@@ -56,3 +56,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [Evaluation protocol, metrics and the accuracy bar (issue #132)](decisions/49-evaluation-protocol-metrics-and-the-accuracy-bar-issue-132.md)
 - [Multi-track score project format on disk (issue #131)](decisions/50-multi-track-score-project-format-on-disk-issue-131.md)
 - [Rhythm, meter, barline and drum-notation strategy (issue #130)](decisions/51-rhythm-meter-barline-and-drum-notation-strategy-issue-130.md)
+- [The piano roll editing surface reversed into its own panel (issue #155 reopened by hands-on use)](decisions/52-the-piano-roll-editing-surface-reversed-into-its-own-panel-issue-155-reopened-by-hands-on-use.md)

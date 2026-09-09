@@ -1,7 +1,16 @@
-"""The piano roll -- editable note rendering on the same arrange canvas
-(map #145 milestone 2, decided in #155). Same offscreen-Qt discipline as
-`test_studio_window.py`: no display, no audio device, assert the decisions
-the window makes rather than pixels.
+"""The piano roll -- editable note editing in its own bottom panel (map #145
+milestone 2). Originally built inline on the main arrange canvas (#155);
+reversed into a separate, resizable `PianoRollPanel` after hands-on use
+surfaced keybinding collisions with the main window's own transport/track-
+select shortcuts -- see
+`docs/decisions/52-the-piano-roll-editing-surface-reversed-into-its-own-panel-issue-155-reopened-by-hands-on-use.md`.
+
+Same offscreen-Qt discipline as `test_studio_window.py`: no display, no audio
+device, assert the decisions the window makes rather than pixels. The one
+place this file departs from that and drives real Qt event delivery
+(`QTest.keyClick`) is the focus-scoping tests -- the whole point of the panel
+being its own widget is that Qt's real focus/shortcut machinery routes keys
+correctly, so that is the one behaviour a direct method call cannot verify.
 """
 
 import os
@@ -13,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
+from PySide6.QtTest import QTest  # noqa: E402
 
 from notecolor.audio.transport import Transport  # noqa: E402
 from notecolor.project import edit as project_edit  # noqa: E402
@@ -49,53 +59,71 @@ def window(app):
     win.deleteLater()
 
 
-def _press(window, scene_x, scene_y, modifiers=QtCore.Qt.NoModifier):
-    point = QtCore.QPointF(scene_x, scene_y)
-    return QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, point,
+def _pump(window, blocks=4):
+    """Commands apply at a block boundary, so a test has to run blocks."""
+    for _ in range(blocks):
+        window.transport.process_block(512)
+
+
+def _key(qt_key, modifiers=QtCore.Qt.NoModifier):
+    return QtGui.QKeyEvent(QtCore.QEvent.KeyPress, qt_key, modifiers)
+
+
+def _press(scene_x, scene_y, modifiers=QtCore.Qt.NoModifier):
+    return QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress,
+                             QtCore.QPointF(scene_x, scene_y),
                              QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
                              modifiers)
 
 
-def _move(window, scene_x, scene_y):
+def _move(scene_x, scene_y):
     return QtGui.QMouseEvent(QtCore.QEvent.MouseMove, QtCore.QPointF(scene_x, scene_y),
                              QtCore.Qt.NoButton, QtCore.Qt.LeftButton,
                              QtCore.Qt.NoModifier)
 
 
-def _release(window, scene_x, scene_y):
+def _release(scene_x, scene_y):
     return QtGui.QMouseEvent(QtCore.QEvent.MouseButtonRelease,
                              QtCore.QPointF(scene_x, scene_y),
                              QtCore.Qt.LeftButton, QtCore.Qt.NoButton,
                              QtCore.Qt.NoModifier)
 
 
-def _note_item(window, note):
-    for item in window.scene.items():
+def _note_item(view, note):
+    for item in view.scene().items():
         if item.data(2) is note:
             return item
     return None
 
 
-# --- entering / exiting ------------------------------------------------
+def _open(window, row=0):
+    window.toggle_piano_roll(row)
+    return window.piano_panel
 
 
-def test_double_click_opens_and_closes_the_piano_roll(window):
-    assert window.scene.piano_roll_row is None
+# --- entering / exiting -----------------------------------------------------
+
+
+def test_double_click_opens_and_closes_the_panel(window):
+    assert not window.piano_panel.is_open
     window.toggle_piano_roll(0)
-    assert window.scene.piano_roll_row == 0
+    assert window.piano_panel.is_open
+    assert window.piano_panel.isVisible()
     window.toggle_piano_roll(0)
-    assert window.scene.piano_roll_row is None
+    assert not window.piano_panel.is_open
+    assert not window.piano_panel.isVisible()
 
 
 def test_opening_a_different_track_switches_rather_than_stacks(window):
     window.toggle_piano_roll(0)
     window.toggle_piano_roll(1)
+    assert window.piano_panel.track_index == 1
     assert window.scene.piano_roll_row == 1
 
 
-def test_an_audio_track_refuses_a_piano_roll(window):
+def test_an_audio_track_refuses_a_panel(window):
     window.toggle_piano_roll(2)
-    assert window.scene.piano_roll_row is None
+    assert not window.piano_panel.is_open
     assert "audio track" in window._status
 
 
@@ -104,20 +132,37 @@ def test_the_header_double_click_drives_the_same_toggle(window):
         QtGui.QMouseEvent(QtCore.QEvent.MouseButtonDblClick,
                           QtCore.QPointF(20, 20), QtCore.Qt.LeftButton,
                           QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
-    assert window.scene.piano_roll_row == 0
+    assert window.piano_panel.is_open
 
 
-# --- rendering / hit-testing --------------------------------------------
+def test_the_panels_own_close_button_clears_the_header_marker(window):
+    panel = _open(window)
+    panel._on_close_clicked()
+    assert not panel.is_open
+    assert window.scene.piano_roll_row is None
 
 
-def test_opening_the_piano_roll_makes_notes_real_hit_targets(window):
+def test_the_main_canvas_never_grows_a_row_for_editing(window):
+    """#52 reversed #155's inline row-height-expansion -- every row stays
+    `LANE_H` regardless of which piano roll (if any) is open."""
+    from notecolor.gui.studio import LANE_H
+
+    before = [window.scene.row_height(r) for r in range(3)]
+    window.toggle_piano_roll(0)
+    after = [window.scene.row_height(r) for r in range(3)]
+    assert before == after == [LANE_H] * 3
+
+
+# --- rendering / hit-testing -------------------------------------------------
+
+
+def test_opening_the_panel_makes_notes_real_hit_targets(window):
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    assert window.scene.note_at(QtCore.QPointF(5, 5)) is None
-    window.toggle_piano_roll(0)
-    top = window.scene.row_top(0)
-    y = window.scene.pitch_to_y(note.pitch, top) + 1
-    hit = window.scene.note_at(QtCore.QPointF(2, y))
+    scene = panel.view.scene()
+    y = scene.pitch_to_y(note.pitch) + 1
+    hit = scene.note_at(QtCore.QPointF(2, y))
     assert hit is not None
     hit_note, hit_clip, is_resize = hit
     assert hit_note is note and hit_clip is clip
@@ -125,74 +170,68 @@ def test_opening_the_piano_roll_makes_notes_real_hit_targets(window):
 
 
 def test_the_right_edge_is_a_resize_handle_not_a_move_grab(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    item = _note_item(window, note)
+    scene = panel.view.scene()
+    item = _note_item(panel.view, note)
     right = item.rect().right()
-    top = window.scene.row_top(0)
-    y = window.scene.pitch_to_y(note.pitch, top) + 1
-    _, _, is_resize = window.scene.note_at(QtCore.QPointF(right - 1, y))
+    y = scene.pitch_to_y(note.pitch) + 1
+    _, _, is_resize = scene.note_at(QtCore.QPointF(right - 1, y))
     assert is_resize is True
-    _, _, is_resize = window.scene.note_at(QtCore.QPointF(right - 20, y))
+    _, _, is_resize = scene.note_at(QtCore.QPointF(right - 20, y))
     assert is_resize is False
 
 
-def test_the_thumbnail_view_stays_unclickable(window):
-    """Track b's clip is never opened -- its notes keep the old 3px
-    decoration, with no `data(2)` for `note_at()` to find."""
-    window.toggle_piano_roll(0)
+def test_the_main_canvas_thumbnail_stays_unclickable(window):
+    """The always-visible mini view on the main arrange canvas carries no
+    hit-testable note data at all -- editing happens only in the panel."""
+    _open(window, row=0)
     for item in window.scene.items():
-        if item.data(1) is window.project.tracks[1].clips[0]:
-            continue
-    assert window.scene.note_at(QtCore.QPointF(2, window.scene.row_top(1) + 30)) is None
+        assert item.data(2) is None
 
 
-# --- add ------------------------------------------------------------------
+# --- add ---------------------------------------------------------------
 
 
 def test_ctrl_click_on_a_clip_adds_one_note_undoably(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     before = len(clip.notes)
-    top = window.scene.row_top(0)
-    point = QtCore.QPointF(4 * window.scene.px_per_beat, top + 20)
-    handled = window.eventFilter(window.view.viewport(),
-                                 _press(window, point.x(), point.y(),
-                                       QtCore.Qt.ControlModifier))
-    assert handled is True
+    point = QtCore.QPointF(4 * panel.view.scene().px_per_beat, 20)
+    panel.view.mousePressEvent(_press(point.x(), point.y(), QtCore.Qt.ControlModifier))
     assert len(clip.notes) == before + 1
     assert window.edits.undo_name() == "Add Note"
     window.undo()
     assert len(clip.notes) == before
 
 
-def test_plain_click_on_a_clip_still_grabs_it_not_adds_a_note(window):
-    window.toggle_piano_roll(0)
+def test_plain_click_on_empty_space_parks_the_cursor_there(window):
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     before = len(clip.notes)
-    top = window.scene.row_top(0)
-    window.eventFilter(window.view.viewport(),
-                       _press(window, 6 * window.scene.px_per_beat, top + 45))
+    scene = panel.view.scene()
+    panel.view.mousePressEvent(_press(6 * scene.px_per_beat, 200))
     assert len(clip.notes) == before
-    assert window._drag is not None and window._drag["kind"] == "clip"
+    assert scene.selected_note is None
+    assert scene.cursor is not None
 
 
 # --- move -------------------------------------------------------------
 
 
 def test_dragging_a_note_moves_it_in_time_and_pitch_as_one_command(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    top = window.scene.row_top(0)
-    start_y = window.scene.pitch_to_y(note.pitch, top) + 1
-    window.eventFilter(window.view.viewport(), _press(window, 2, start_y))
-    assert window._drag["kind"] == "move-note"
-    new_x = 3 * window.scene.px_per_beat
-    new_y = window.scene.pitch_to_y(note.pitch - 2, top) + 1
-    window.eventFilter(window.view.viewport(), _move(window, new_x, new_y))
-    window.eventFilter(window.view.viewport(), _release(window, new_x, new_y))
+    scene = panel.view.scene()
+    start_y = scene.pitch_to_y(note.pitch) + 1
+    panel.view.mousePressEvent(_press(2, start_y))
+    assert panel.view._drag["kind"] == "move"
+    new_x = 3 * scene.px_per_beat
+    new_y = scene.pitch_to_y(note.pitch - 2) + 1
+    panel.view.mouseMoveEvent(_move(new_x, new_y))
+    panel.view.mouseReleaseEvent(_release(new_x, new_y))
 
     assert note.start_beat == pytest.approx(3.0)
     assert note.pitch == 58
@@ -203,14 +242,14 @@ def test_dragging_a_note_moves_it_in_time_and_pitch_as_one_command(window):
 
 
 def test_a_click_with_no_movement_is_not_an_undoable_command(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    top = window.scene.row_top(0)
-    y = window.scene.pitch_to_y(note.pitch, top) + 1
+    scene = panel.view.scene()
+    y = scene.pitch_to_y(note.pitch) + 1
     before_name = window.edits.undo_name()
-    window.eventFilter(window.view.viewport(), _press(window, 2, y))
-    window.eventFilter(window.view.viewport(), _release(window, 2, y))
+    panel.view.mousePressEvent(_press(2, y))
+    panel.view.mouseReleaseEvent(_release(2, y))
     assert window.edits.undo_name() == before_name
 
 
@@ -218,18 +257,18 @@ def test_a_click_with_no_movement_is_not_an_undoable_command(window):
 
 
 def test_dragging_the_right_edge_resizes_undoably(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    top = window.scene.row_top(0)
-    item = _note_item(window, note)
+    scene = panel.view.scene()
+    item = _note_item(panel.view, note)
     right = item.rect().right()
-    y = window.scene.pitch_to_y(note.pitch, top) + 1
-    window.eventFilter(window.view.viewport(), _press(window, right - 1, y))
-    assert window._drag["kind"] == "resize-note"
-    new_x = right + window.scene.px_per_beat
-    window.eventFilter(window.view.viewport(), _move(window, new_x, y))
-    window.eventFilter(window.view.viewport(), _release(window, new_x, y))
+    y = scene.pitch_to_y(note.pitch) + 1
+    panel.view.mousePressEvent(_press(right - 1, y))
+    assert panel.view._drag["kind"] == "resize"
+    new_x = right + scene.px_per_beat
+    panel.view.mouseMoveEvent(_move(new_x, y))
+    panel.view.mouseReleaseEvent(_release(new_x, y))
 
     assert note.duration_beats == pytest.approx(2.0, abs=0.15)
     assert window.edits.undo_name() == "Resize Note"
@@ -238,17 +277,17 @@ def test_dragging_the_right_edge_resizes_undoably(window):
 
 
 def test_resize_clamps_to_the_minimum_duration(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    top = window.scene.row_top(0)
-    item = _note_item(window, note)
+    scene = panel.view.scene()
+    item = _note_item(panel.view, note)
     right = item.rect().right()
-    y = window.scene.pitch_to_y(note.pitch, top) + 1
-    window.eventFilter(window.view.viewport(), _press(window, right - 1, y))
+    y = scene.pitch_to_y(note.pitch) + 1
+    panel.view.mousePressEvent(_press(right - 1, y))
     far_left = -500
-    window.eventFilter(window.view.viewport(), _move(window, far_left, y))
-    window.eventFilter(window.view.viewport(), _release(window, far_left, y))
+    panel.view.mouseMoveEvent(_move(far_left, y))
+    panel.view.mouseReleaseEvent(_release(far_left, y))
     assert note.duration_beats == pytest.approx(project_edit.ResizeNote.MIN_DURATION_BEATS)
 
 
@@ -256,17 +295,17 @@ def test_resize_clamps_to_the_minimum_duration(window):
 
 
 def test_selecting_then_deleting_a_note_is_one_undoable_command(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    top = window.scene.row_top(0)
-    y = window.scene.pitch_to_y(note.pitch, top) + 1
-    window.eventFilter(window.view.viewport(), _press(window, 2, y))
-    window.eventFilter(window.view.viewport(), _release(window, 2, y))
-    assert window.scene.selected_note == (clip, note)
+    scene = panel.view.scene()
+    y = scene.pitch_to_y(note.pitch) + 1
+    panel.view.mousePressEvent(_press(2, y))
+    panel.view.mouseReleaseEvent(_release(2, y))
+    assert scene.selected_note == (clip, note)
 
     before = len(clip.notes)
-    window.delete_selected_note()
+    panel.view.delete_selected()
     assert len(clip.notes) == before - 1
     assert note not in clip.notes
     assert window.edits.undo_name() == "Delete Note"
@@ -275,17 +314,287 @@ def test_selecting_then_deleting_a_note_is_one_undoable_command(window):
 
 
 def test_deleting_with_nothing_selected_says_so_rather_than_raising(window):
-    window.scene.selected_note = None
-    window.delete_selected_note()
+    panel = _open(window)
+    panel.view.scene().selected_note = None
+    panel.view.delete_selected()
     assert "no note selected" in window._status
 
 
 def test_delete_key_removes_the_selected_note(window):
-    window.toggle_piano_roll(0)
+    panel = _open(window)
     clip = window.project.tracks[0].clips[0]
     note = clip.notes[0]
-    window.scene.selected_note = (clip, note)
-    event = QtGui.QKeyEvent(QtCore.QEvent.KeyPress, QtCore.Qt.Key_Delete,
-                            QtCore.Qt.NoModifier)
-    window.keyPressEvent(event)
+    panel.view.scene().selected_note = (clip, note)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Delete))
     assert note not in clip.notes
+
+
+# --- ghost cursor: keyboard movement -----------------------------------
+
+
+def test_opening_the_panel_starts_a_ghost_cursor_on_the_first_note(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    scene = panel.view.scene()
+    assert scene.selected_note is None
+    assert scene.cursor == (clip.notes[0].start_beat, clip.notes[0].pitch)
+
+
+def test_closing_the_panel_clears_the_cursor(window):
+    panel = _open(window)
+    window.toggle_piano_roll(0)
+    assert panel.view.scene().cursor is None
+
+
+def test_arrow_keys_move_the_ghost_cursor_when_no_note_is_selected(window):
+    panel = _open(window)
+    scene = panel.view.scene()
+    beat, pitch = scene.cursor
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right))
+    assert scene.cursor == (beat + 1.0, pitch)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    assert scene.cursor == (beat + 1.0, pitch + 1)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left, QtCore.Qt.ShiftModifier))
+    assert scene.cursor == (max(0.0, beat + 1.0 - 4.0), pitch + 1)
+
+
+def test_space_at_an_empty_cursor_position_adds_a_note(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    scene = panel.view.scene()
+    scene.cursor = (5.0, 71)
+    before = len(clip.notes)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Space))
+    assert len(clip.notes) == before + 1
+    added = clip.notes[-1]
+    assert (added.start_beat, added.pitch) == (5.0, 71)
+    assert window.edits.undo_name() == "Add Note"
+
+
+def test_space_on_an_existing_note_removes_it(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    scene = panel.view.scene()
+    scene.cursor = (note.start_beat, note.pitch)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Space))
+    assert note not in clip.notes
+    assert window.edits.undo_name() == "Delete Note"
+
+
+def test_space_outside_any_clip_says_so_rather_than_crashing(window):
+    panel = _open(window)
+    panel.view.scene().cursor = (999.0, 71)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Space))
+    assert "no clip here" in window._status
+
+
+# --- note mode: arrow-key nudging ---------------------------------------
+
+
+def test_arrow_keys_nudge_the_selected_note_in_pitch_and_time(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    panel.view.scene().selected_note = (clip, note)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    assert note.pitch == 61
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Down))
+    assert note.pitch == 60
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right))
+    assert note.start_beat == 1.0
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left))
+    assert note.start_beat == 0.0
+
+    assert window.edits.undo_name() == "Move Note"
+    window.undo()
+    assert note.start_beat == 1.0
+
+
+def test_shift_arrow_nudges_by_octave_and_bar(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    scene = panel.view.scene()
+    scene.bounds = (0, 127)  # wide enough that the octave jump can't clamp
+    scene.selected_note = (clip, note)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up, QtCore.Qt.ShiftModifier))
+    assert note.pitch == 72
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Right, QtCore.Qt.ShiftModifier))
+    assert note.start_beat == 4.0
+
+
+def test_nudge_clamps_pitch_to_the_panels_own_bounds(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    scene = panel.view.scene()
+    scene.selected_note = (clip, note)
+    _, high = scene.bounds
+    note.pitch = high
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    assert note.pitch == high
+
+
+def test_left_arrow_does_not_move_a_note_before_the_start_of_time(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    assert note.start_beat == 0.0
+    panel.view.scene().selected_note = (clip, note)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Left))
+    assert note.start_beat == 0.0
+    assert window.edits.undo_name() is None
+
+
+# --- mode switching: keyboard (Enter) and toolbar button ----------------
+
+
+def test_enter_switches_from_cursor_mode_to_note_mode_and_back(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    scene = panel.view.scene()
+    scene.cursor = (note.start_beat, note.pitch)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Return))
+    assert scene.selected_note == (clip, note)
+    assert panel.view.in_note_mode()
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Up))
+    assert note.pitch == 61
+    # Note-mode nudges the note, not the parked cursor -- it only catches up
+    # once Enter hands control back to it.
+    assert scene.cursor == (note.start_beat, note.pitch - 1)
+
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Return))
+    assert scene.selected_note is None
+    assert scene.cursor == (note.start_beat, note.pitch)
+
+
+def test_enter_on_an_empty_cursor_position_says_so(window):
+    panel = _open(window)
+    panel.view.scene().cursor = (999.0, 71)
+    panel.view.keyPressEvent(_key(QtCore.Qt.Key_Return))
+    assert panel.view.scene().selected_note is None
+    assert "no note under cursor" in window._status
+
+
+def test_mode_button_label_reflects_the_current_mode(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    panel.view.scene().cursor = (note.start_beat, note.pitch)
+
+    assert "cursor mode" in panel.mode_button.text()
+    panel._on_mode_clicked()
+    assert "note mode" in panel.mode_button.text()
+    assert panel.delete_button.isEnabled()
+    panel._on_mode_clicked()
+    assert "cursor mode" in panel.mode_button.text()
+    assert not panel.delete_button.isEnabled()
+
+
+def test_add_delete_button_mirrors_space(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    panel.view.scene().cursor = (note.start_beat, note.pitch)
+
+    panel._on_add_delete_clicked()
+    assert note not in clip.notes
+    assert window.edits.undo_name() == "Delete Note"
+
+
+def test_delete_button_mirrors_delete_key(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    panel.view.scene().selected_note = (clip, note)
+
+    panel._on_delete_clicked()
+    assert note not in clip.notes
+    assert window.edits.undo_name() == "Delete Note"
+
+
+def test_close_button_closes_the_panel(window):
+    panel = _open(window)
+    panel._on_close_clicked()
+    assert not panel.is_open
+
+
+# --- focus scoping: the actual bug being fixed --------------------------
+#
+# These drive real Qt event delivery (`QTest.keyClick`), unlike every test
+# above -- the whole point of moving the piano roll into its own widget is
+# that Qt's real focus/shortcut machinery (including `QAction` shortcuts
+# registered with `Qt.WindowShortcut` context, which fire on a
+# `ShortcutOverride` event ahead of a widget's own `keyPressEvent()`) routes
+# a key to the right place. A direct method call can't exercise that at all.
+
+
+def test_space_on_the_main_window_still_means_play_stop_when_the_panel_is_closed(window):
+    assert not window.piano_panel.is_open
+    assert not window.transport.snapshot().playing
+    QTest.keyClick(window, QtCore.Qt.Key_Space)
+    _pump(window)
+    assert window.transport.snapshot().playing
+
+
+def test_space_on_the_panel_view_means_add_delete_not_play_stop(window):
+    panel = _open(window)
+    clip = window.project.tracks[0].clips[0]
+    note = clip.notes[0]
+    panel.view.scene().cursor = (note.start_beat, note.pitch)
+    assert not window.transport.snapshot().playing
+
+    QTest.keyClick(panel.view, QtCore.Qt.Key_Space)
+
+    assert note not in clip.notes                       # the panel handled it
+    _pump(window)
+    assert not window.transport.snapshot().playing       # transport untouched
+
+
+def test_arrow_keys_on_the_main_window_still_select_tracks_when_the_panel_is_closed(window):
+    assert not window.piano_panel.is_open
+    window.headers.selected_index = 0
+    QTest.keyClick(window, QtCore.Qt.Key_Down)
+    assert window.headers.selected_index == 1
+
+
+def test_arrow_keys_on_the_panel_view_move_the_cursor_not_the_track_selection(window):
+    panel = _open(window)
+    window.headers.selected_index = 0
+    scene = panel.view.scene()
+    beat, pitch = scene.cursor
+
+    QTest.keyClick(panel.view, QtCore.Qt.Key_Up)
+
+    assert scene.cursor == (beat, pitch + 1)             # the panel handled it
+    assert window.headers.selected_index == 0            # main window untouched
+
+
+def test_clicking_the_main_canvas_returns_focus_and_normal_arrow_meaning(window):
+    panel = _open(window)
+    panel.view.setFocus()
+
+    point = QtCore.QPointF(6 * window.scene.px_per_beat, window.scene.row_top(0) + 20)
+    window.eventFilter(window.view.viewport(),
+                       QtGui.QMouseEvent(QtCore.QEvent.MouseButtonPress, point,
+                                        QtCore.Qt.LeftButton, QtCore.Qt.LeftButton,
+                                        QtCore.Qt.NoModifier))
+    window.eventFilter(window.view.viewport(),
+                       QtGui.QMouseEvent(QtCore.QEvent.MouseButtonRelease, point,
+                                        QtCore.Qt.LeftButton, QtCore.Qt.NoButton,
+                                        QtCore.Qt.NoModifier))
+
+    window.headers.selected_index = 0
+    QTest.keyClick(window, QtCore.Qt.Key_Down)
+    assert window.headers.selected_index == 1
