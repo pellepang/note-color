@@ -83,9 +83,9 @@ def test_rewind_stops_and_returns_to_the_start(window):
     assert not window.transport.snapshot().playing
 
 
-def test_record_says_it_is_unimplemented_rather_than_doing_nothing(window):
+def test_record_with_no_audio_device_says_so_rather_than_doing_nothing(window):
     window._transport_action("record")
-    assert "not implemented" in window._status
+    assert "no audio device" in window._status
 
 
 # --- seeking ---------------------------------------------------------------
