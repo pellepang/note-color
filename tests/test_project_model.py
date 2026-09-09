@@ -135,6 +135,12 @@ def test_an_empty_project_has_no_length_and_does_not_raise():
     assert Project().duration_seconds == 0.0
 
 
+def test_track_patch_name_defaults_to_none():
+    """Every Track imported from MusicXML today keeps working unchanged
+    until something assigns it a patch from the Synth view (#156)."""
+    assert Track().patch_name is None
+
+
 def test_unique_track_name_avoids_the_one_thing_that_does_not_round_trip():
     """#128 measured that a duplicate part name silently merges two parts'
     provenance on export, so duplicates are prevented at the source."""

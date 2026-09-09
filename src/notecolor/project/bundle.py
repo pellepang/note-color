@@ -119,6 +119,7 @@ def project_to_dict(project):
                 "color_pitch_class": track.color_pitch_class,
                 "muted": track.muted, "soloed": track.soloed,
                 "gain_db": track.gain_db, "pan": track.pan,
+                "patch_name": track.patch_name,
                 "clips": [_clip_to_dict(c) for c in track.clips],
             }
             for track in project.tracks
@@ -197,6 +198,8 @@ def project_from_dict(data):
             soloed=bool(entry.get("soloed", False)),
             gain_db=float(entry.get("gain_db", 0.0)),
             pan=float(entry.get("pan", 0.0)),
+            patch_name=(None if entry.get("patch_name") is None
+                        else str(entry["patch_name"])),
         ))
     chords = []
     for entry in data.get("chords", []):

@@ -329,6 +329,14 @@ class Track:
     soloed: bool = False
     gain_db: float = 0.0
     pan: float = 0.0                # -1 left .. +1 right
+    #: Bare patch name (#156), the same by-name convention `patch_format`/
+    #: `synth_engine.py` use everywhere -- never a path, never a loaded
+    #: `Patch` object. None means "play through the engine's current
+    #: default patch", the existing `NoteOn.patch=None` fallback, so every
+    #: Track imported from MusicXML keeps working unchanged until the Synth
+    #: view assigns it a patch. Resolved lazily by `ProjectPlayer` at
+    #: playback time, not here -- see `audio/player.py`.
+    patch_name: Optional[str] = None
 
     @property
     def end_beat(self):

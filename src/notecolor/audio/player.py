@@ -97,6 +97,7 @@ class ProjectPlayer:
         self.transport = transport
         self.schedule = _Schedule(flatten(project), audible_tracks(project))
         self.notes_started = 0
+        _register_track_patches(engine, project)
 
     @property
     def notes(self):
@@ -124,6 +125,7 @@ class ProjectPlayer:
             self.project = project
         self.schedule = _Schedule(flatten(self.project),
                                   audible_tracks(self.project))
+        _register_track_patches(self.engine, self.project)
 
     def on_block(self, frames):
         """The audio callback's per-block entry point.
@@ -147,8 +149,9 @@ class ProjectPlayer:
                 break                           # sorted, so nothing later is due
             if note.start_beat < start_beat or note.track_index not in audible:
                 continue
+            patch_name = self.project.tracks[note.track_index].patch_name
             voice = self.engine.note_on(
-                _note_on_event(note), velocity=note.velocity,
+                _note_on_event(note, patch_name), velocity=note.velocity,
                 channel=note.track_index % 16)
             self.notes_started += 1
             if voice is None:
@@ -158,9 +161,47 @@ class ProjectPlayer:
             self.engine.schedule_note_off(voice, max(0.01, seconds))
 
 
-def _note_on_event(note):
+def _note_on_event(note, patch_name=None):
     """A `sound_engine.NoteOn` for a scheduled note, built lazily so this
-    module imports without the audio stack present."""
+    module imports without the audio stack present. `patch_name=None`
+    reuses `NoteOn`'s own default -- the engine's current default patch
+    (#156) -- exactly as an unset `Track.patch_name` always has."""
     from notecolor.audio.sound_engine import NoteOn
 
-    return NoteOn(pitch=note.pitch, velocity=note.velocity)
+    return NoteOn(pitch=note.pitch, velocity=note.velocity, patch=patch_name)
+
+
+def _register_track_patches(engine, project):
+    """Loads each track's named patch (#156) into the process-wide sound
+    engine's name -> `Patch` map, if it names one that map doesn't already
+    hold.
+
+    Called only from `__init__`/`refresh()` -- the edit thread -- never
+    from `on_block()`'s audio callback, precisely because it may touch
+    disk. `engine` here is a `sound_engine.SoundEngine`; its own `.engine`
+    is the underlying voice engine (a `SynthEngine` when patches apply, a
+    `SamplerEngine`/other otherwise), so both attributes are read with
+    `getattr` and either being absent is simply a no-op -- the same
+    degrade-don't-crash posture `patch_format` already takes for a
+    missing/unreadable file, after which `SynthEngine.patch_for()`'s
+    existing unknown-name fallback to the engine's default patch takes
+    over unchanged.
+    """
+    synth = getattr(engine, "engine", None)
+    patches = getattr(synth, "patches", None)
+    if patches is None:
+        return
+
+    import os
+
+    from notecolor.settings import patch_format
+
+    names = {t.patch_name for t in project.tracks if t.patch_name}
+    for name in names - patches.keys():
+        path = os.path.join(patch_format.patches_dir(), name + ".toml")
+        if not os.path.isfile(path):
+            continue
+        try:
+            patches[name] = patch_format.load_patch(path)
+        except (OSError, ValueError):
+            continue

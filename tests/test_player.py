@@ -18,12 +18,13 @@ RATE, BLOCK = 48000, 512
 
 class FakeEngine:
     def __init__(self):
-        self.started, self.offs = [], []
+        self.started, self.offs, self.patches = [], [], []
         self._next = 0
 
     def note_on(self, event, velocity=1.0, channel=0, patch=None):
         self._next += 1
         self.started.append((event.pitch, round(velocity, 3), channel))
+        self.patches.append(event.patch)
         return self._next
 
     def schedule_note_off(self, voice_id, delay_seconds):
@@ -186,3 +187,73 @@ def test_refresh_picks_up_an_edit_without_rebuilding_the_player():
     for _ in range(400):
         player.on_block(BLOCK)
     assert engine.started == []
+
+
+# --- track patch (#156) -----------------------------------------------------
+
+
+class FakeSynth:
+    """Stands in for `synth_engine.SynthEngine`'s name -> `Patch` map."""
+
+    def __init__(self):
+        self.patches = {}
+
+
+def test_unset_patch_name_plays_the_engines_default():
+    engine, _t, _p = _run(_project())
+    assert engine.patches == [None, None, None]
+
+
+def test_a_tracks_patch_name_is_passed_on_every_note_on():
+    project = _project(tracks=[Track(name="a", patch_name="Warm Pad", clips=[
+        NoteClip(length_beats=8, notes=[Note(0.0, 1.0, 60)])])])
+    engine, _t, _p = _run(project, blocks=50)
+    assert engine.patches == ["Warm Pad"]
+
+
+def test_a_named_patch_is_registered_with_the_process_wide_engine(monkeypatch, tmp_path):
+    """`ProjectPlayer` resolves `patch_name` lazily (#156): a bare name in
+    the project turns into a loaded `Patch` in the engine's own name map,
+    found in `patch_format.patches_dir()` at playback time, not stashed on
+    the model."""
+    from notecolor.settings import patch_format
+
+    monkeypatch.setattr(patch_format, "patches_dir", lambda: str(tmp_path))
+    sentinel = object()
+    monkeypatch.setattr(patch_format, "load_patch", lambda path: sentinel)
+    (tmp_path / "Warm Pad.toml").write_text("")
+
+    engine = FakeEngine()
+    engine.engine = FakeSynth()
+    project = _project(tracks=[Track(name="a", patch_name="Warm Pad", clips=[
+        NoteClip(length_beats=8, notes=[Note(0.0, 1.0, 60)])])])
+    transport = Transport(project.tempo_map, sample_rate=RATE)
+    player = pl.ProjectPlayer(project, engine, transport)
+
+    assert engine.engine.patches == {"Warm Pad": sentinel}
+
+
+def test_a_patch_name_with_no_file_on_disk_is_not_registered(monkeypatch, tmp_path):
+    """No file, no crash, no fabricated patch: `SynthEngine.patch_for()`'s
+    existing unknown-name fallback to the engine's default handles it."""
+    from notecolor.settings import patch_format
+
+    monkeypatch.setattr(patch_format, "patches_dir", lambda: str(tmp_path))
+
+    engine = FakeEngine()
+    engine.engine = FakeSynth()
+    project = _project(tracks=[Track(name="a", patch_name="Missing", clips=[
+        NoteClip(length_beats=8, notes=[Note(0.0, 1.0, 60)])])])
+    transport = Transport(project.tempo_map, sample_rate=RATE)
+    pl.ProjectPlayer(project, engine, transport)
+
+    assert engine.engine.patches == {}
+
+
+def test_registration_is_a_no_op_when_the_engine_has_no_patch_map():
+    """A `FakeEngine` with no `.engine` attribute at all (like every other
+    test in this file) must not raise."""
+    project = _project(tracks=[Track(name="a", patch_name="Warm Pad", clips=[
+        NoteClip(length_beats=8, notes=[Note(0.0, 1.0, 60)])])])
+    engine, _t, _p = _run(project, blocks=1)
+    assert engine.patches == ["Warm Pad"]

@@ -37,6 +37,7 @@ def _project():
         sample_rate=44100,
         tracks=[
             Track(name="Bass", color_pitch_class=0, gain_db=-3.0, pan=-0.25,
+                  patch_name="Warm Pad",
                   clips=[NoteClip(name="verse", start_beat=0, length_beats=8,
                                   notes=[Note(0.0, 1.0, 40, 0.8, 0.91),
                                          Note(2.0, 0.5, 47)])]),
@@ -77,6 +78,8 @@ def test_everything_survives_a_round_trip(tmp_path):
 
     bass, vox = loaded.tracks
     assert (bass.name, bass.color_pitch_class, bass.gain_db, bass.pan) == ("Bass", 0, -3.0, -0.25)
+    assert bass.patch_name == "Warm Pad"
+    assert vox.patch_name is None
     note = bass.clips[0].notes[0]
     assert (note.pitch, note.velocity, note.confidence) == (40, 0.8, 0.91)
     assert bass.clips[0].notes[1].confidence is None
@@ -101,6 +104,21 @@ def test_a_manifest_with_no_key_mode_defaults_to_major(tmp_path):
     open(manifest, "w").write(json.dumps(data))
 
     assert bundle.load_project(path).key_mode == "major"
+
+
+def test_a_v1_manifest_with_no_patch_name_defaults_to_none(tmp_path):
+    """`patch_name` (#156) postdates every manifest already on disk -- those
+    must still load, with every track playing the engine's default patch
+    exactly as it did before this field existed."""
+    path = bundle.save_project(_project(), tmp_path / "Demo")
+    manifest = os.path.join(path, "project.json")
+    data = json.loads(open(manifest).read())
+    for track in data["tracks"]:
+        del track["patch_name"]
+    open(manifest, "w").write(json.dumps(data))
+
+    loaded = bundle.load_project(path)
+    assert all(t.patch_name is None for t in loaded.tracks)
 
 
 def test_a_missing_confidence_stays_missing_rather_than_becoming_zero(tmp_path):

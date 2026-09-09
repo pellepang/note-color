@@ -30,6 +30,25 @@ def test_mute_round_trips_and_carries_a_name():
     assert project.tracks[0].muted is False
 
 
+def test_set_track_patch_round_trips_and_carries_a_name():
+    project = _project()
+    stack = edit.EditStack()
+    stack.run(edit.SetTrackPatch(project.tracks[0], "Warm Pad"))
+    assert project.tracks[0].patch_name == "Warm Pad"
+    assert stack.undo_name() == "Set Patch: a"
+    stack.undo()
+    assert project.tracks[0].patch_name is None
+
+
+def test_set_track_patch_redo_reapplies():
+    project = _project()
+    stack = edit.EditStack()
+    stack.run(edit.SetTrackPatch(project.tracks[0], "Warm Pad"))
+    stack.undo()
+    stack.redo()
+    assert project.tracks[0].patch_name == "Warm Pad"
+
+
 def test_redo_reapplies():
     project = _project()
     stack = edit.EditStack()

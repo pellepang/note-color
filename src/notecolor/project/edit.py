@@ -99,6 +99,16 @@ class RenameTrack(_SetAttribute):
         super().__init__(track, "name", value, "Rename Track")
 
 
+class SetTrackPatch(_SetAttribute):
+    """Assigns (or clears, with `value=None`) the bare patch name a track
+    plays through (#156). `ProjectPlayer` resolves the name to a loaded
+    `Patch` lazily at playback time, so this command only ever touches the
+    plain string on the model."""
+
+    def __init__(self, track, value):
+        super().__init__(track, "patch_name", value, f"Set Patch: {track.name}")
+
+
 class SetTempo(Command):
     name = "Set Tempo"
 
