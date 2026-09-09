@@ -26,6 +26,7 @@ from notecolor.gui.piano_roll_panel import PianoRollPanel
 from notecolor.gui.recent import recent_paths, remember_path
 from notecolor.gui import synth_recording
 from notecolor.audio import synth_bounce
+from notecolor.settings import patch_format
 from notecolor.project.model import AUDIO_TRACK, NoteClip
 from notecolor.project import model
 
@@ -544,6 +545,12 @@ class StudioWindow(QtWidgets.QMainWindow):
         self._synth_take = None
         self._bounce_thread = None
         self._bounce_worker = None
+        #: Singleton Synth View (map #145, ticket #157), lazily created by
+        #: the View menu's "Synth View…" action -- `None` until first
+        #: opened, and put back to `None` on close (`WA_DeleteOnClose`)
+        #: rather than kept around invisible, so a second open is a fresh
+        #: window exactly the way a user closing it would expect.
+        self._synth_view = None
         self.setWindowTitle(f"visualnote studio — {project.name}")
         self.setAcceptDrops(True)
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
@@ -624,10 +631,16 @@ class StudioWindow(QtWidgets.QMainWindow):
         # once) is what lets this keep working across a `self.player` swap
         # (File->Open) and stay `None`-safe when there is no audio device at
         # all (`self.player is None`).
+        #: Stored as a bound-lambda attribute (rather than only ever built
+        #: inline for the piano roll) so `SynthView` -- which has no
+        #: `self.player` of its own to close over -- can read the exact
+        #: same lazy, swap-safe accessor through the controller interface
+        #: (`gui/synth_view.py`'s module docstring).
+        self.sound_engine_provider = lambda: self.player.engine if self.player else None
         self.piano_panel = PianoRollPanel(
             self.run, self.say, pitch_colour,
             lambda: (self.project.key_fifths, self.project.key_mode),
-            sound_engine_provider=lambda: self.player.engine if self.player else None)
+            sound_engine_provider=self.sound_engine_provider)
         self.piano_panel.changed.connect(self._on_panel_changed)
         self.piano_panel.closed.connect(self._on_panel_closed)
 
@@ -685,6 +698,8 @@ class StudioWindow(QtWidgets.QMainWindow):
         self._add(view_menu, "Zoom &In", "Ctrl++", lambda: self.zoom(self.ZOOM_STEP))
         self._add(view_menu, "Zoom &Out", "Ctrl+-", lambda: self.zoom(1 / self.ZOOM_STEP))
         self._add(view_menu, "Zoom to &Fit", "Ctrl+0", self.zoom_to_fit)
+        view_menu.addSeparator()
+        self._add(view_menu, "Synth &View…", "Ctrl+Shift+Y", self._open_synth_view)
 
         transport_menu = bar.addMenu("&Transport")
         self._add(transport_menu, "&Play/Stop", "Space",
@@ -993,6 +1008,64 @@ class StudioWindow(QtWidgets.QMainWindow):
     def _on_synth_take_bounce_failed(self, message):
         self._bounce_thread = self._bounce_worker = None
         self.say(f"recording failed: {message}")
+
+    # -- Synth View (ticket #157): the small controller surface it drives --
+
+    def record_note_on(self, pitch, velocity=1.0):
+        """Thin forwarder to the in-flight take, if any -- lets
+        `synth_keyboard.SynthKeyboardBand` feed the recorder without
+        knowing `synth_bounce` exists. A no-op while unarmed."""
+        if self._synth_take is not None:
+            self._synth_take.note_on(pitch, velocity)
+
+    def record_note_off(self, pitch):
+        if self._synth_take is not None:
+            self._synth_take.note_off(pitch)
+
+    def toggle_recording(self):
+        self._toggle_synth_recording()
+
+    def is_recording(self):
+        return bool(self.transport_bar.recording)
+
+    def toggle_play(self):
+        self._transport_action("play")
+
+    def panic(self):
+        engine = self.sound_engine_provider()
+        if engine is not None:
+            engine.all_notes_off()
+
+    def initial_patch(self):
+        """The patch a freshly-opened Synth View should start on: the
+        selected track's own `patch_name` (#156), resolved against the
+        patches on disk, or a brand-new patch when there is no track, an
+        audio track, or a `patch_name` that no longer resolves to a file."""
+        index = self.headers.selected_index
+        if 0 <= index < len(self.project.tracks):
+            track = self.project.tracks[index]
+            if track.kind != AUDIO_TRACK and track.patch_name:
+                for path in patch_format.patch_paths():
+                    if patch_format.patch_name_for_path(path) == track.patch_name:
+                        return patch_format.load_patch(path)
+        return patch_format.new_patch()
+
+    def _open_synth_view(self):
+        if self._synth_view is not None:
+            self._synth_view.raise_()
+            self._synth_view.activateWindow()
+            return
+        from notecolor.gui.synth_view import SynthView
+
+        self._synth_view = SynthView(self)
+        self._synth_view.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+        self._synth_view.destroyed.connect(self._on_synth_view_destroyed)
+        self._synth_view.show()
+        self._synth_view.raise_()
+        self._synth_view.activateWindow()
+
+    def _on_synth_view_destroyed(self, *_args):
+        self._synth_view = None
 
     def _locate(self, beat):
         if self.transport is not None:

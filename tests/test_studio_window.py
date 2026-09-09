@@ -108,6 +108,60 @@ def test_zoomed_far_out_the_grid_becomes_a_bar(window):
     assert window.snap(2.4) == 4.0          # 4/4, so a bar is 4 beats
 
 
+# --- Synth View controller surface (map #145, ticket #157) -----------------
+
+
+def test_record_note_on_off_are_noops_without_an_armed_take(window):
+    window.record_note_on(60, 0.8)
+    window.record_note_off(60)  # neither raises with no `_synth_take`
+
+
+def test_record_note_on_off_forward_to_an_armed_take(window):
+    calls = []
+
+    class FakeTake:
+        def note_on(self, pitch, velocity=1.0):
+            calls.append(("on", pitch, velocity))
+
+        def note_off(self, pitch):
+            calls.append(("off", pitch))
+
+    window._synth_take = FakeTake()
+    window.record_note_on(64, 0.5)
+    window.record_note_off(64)
+    assert calls == [("on", 64, 0.5), ("off", 64)]
+
+
+def test_panic_guards_a_missing_sound_engine(window):
+    assert window.player is None
+    window.panic()  # must not raise
+
+
+def test_panic_calls_all_notes_off_on_the_live_engine(window):
+    calls = []
+
+    class FakeEngine:
+        def all_notes_off(self):
+            calls.append(True)
+
+    window.sound_engine_provider = lambda: FakeEngine()
+    window.panic()
+    assert calls == [True]
+
+
+def test_synth_view_menu_action_opens_a_singleton(window, app):
+    assert window._synth_view is None
+    window._open_synth_view()
+    first = window._synth_view
+    assert first is not None
+    window._open_synth_view()
+    assert window._synth_view is first
+    first.close()
+    app.processEvents()
+    app.processEvents()
+    assert window._synth_view is None
+
+
 # --- loop ------------------------------------------------------------------
 
 
