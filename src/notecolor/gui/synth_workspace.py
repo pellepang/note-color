@@ -96,6 +96,13 @@ class Knob(QtWidgets.QWidget):
         #: this module's docstring), just keyed on a y-position instead of
         #: a grab point since a knob only cares about vertical motion.
         self._drag_start_y = None
+        #: Accumulates raw wheel `angleDelta().y()` units between emitted
+        #: steps -- see `wheelEvent()`. A hi-res trackpad delivers dozens of
+        #: small-delta wheel events per "flick" instead of one, and the old
+        #: code emitted a full step on every single one of them, so a light
+        #: trackpad scroll could fly through a knob's whole range in one
+        #: gesture (issue #161).
+        self._wheel_accum = 0
         self.setFixedSize(KNOB_SIZE, KNOB_SIZE + 24)
         self.setToolTip(f"{label} — wheel or drag to sweep, shift = coarse")
         self.setCursor(QtCore.Qt.SizeVerCursor)
@@ -110,15 +117,31 @@ class Knob(QtWidgets.QWidget):
         self.setToolTip(f"{label} — wheel or drag to sweep, shift = coarse")
         self.update()
 
+    #: Standard wheel "detent" size (`QWheelEvent.angleDelta()` units per
+    #: physical click on a notched mouse wheel, per Qt convention). A
+    #: hi-res/trackpad wheel reports many small deltas per gesture instead
+    #: of one 120-unit tick, so accumulating to this threshold before
+    #: emitting a step keeps one detent's worth of physical scrolling equal
+    #: to one step everywhere, rather than one step per tiny sub-delta
+    #: (issue #161: a light trackpad flick used to blow through the whole
+    #: range).
+    WHEEL_UNITS_PER_STEP = 120
+
     def wheelEvent(self, event):
         self.last_shift = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
-        direction = 1 if event.angleDelta().y() > 0 else -1
-        self.wheelStepped.emit(direction)
+        self._wheel_accum += event.angleDelta().y()
+        step = self.WHEEL_UNITS_PER_STEP
+        while abs(self._wheel_accum) >= step:
+            direction = 1 if self._wheel_accum > 0 else -1
+            self.wheelStepped.emit(direction)
+            self._wheel_accum -= direction * step
         event.accept()
 
-    #: Pixels of vertical drag per one `wheelStepped` step -- small enough
-    #: to feel responsive on a 40px-wide knob without being hair-trigger.
-    DRAG_PIXELS_PER_STEP = 4
+    #: Pixels of vertical drag per one `wheelStepped` step. Was 4px --
+    #: hair-trigger enough that a couple of pixels of mouse jitter swept a
+    #: knob through several steps. Raised substantially (issue #161: user
+    #: wants deliberate, controlled drag distance per step, not raw speed).
+    DRAG_PIXELS_PER_STEP = 28
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
