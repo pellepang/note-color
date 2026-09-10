@@ -255,13 +255,18 @@ def test_non_piano_key_does_nothing(app):
     assert band._held == {}
 
 
-# -- centering (user feedback round on ticket #157) -------------------------
+# -- fill-to-available-width, not centered-with-dead-margins (ticket #184) --
 
-def test_dual_row_has_stretch_at_both_ends(app):
+def test_key_box_row_column_gets_stretch_instead_of_flanking_spacers(app):
+    # Ticket #157 centered a fixed-size row with flanking stretch spacers;
+    # ticket #184's bug report wants the keys themselves to grow and fill
+    # the available width instead, so those flanking spacers are gone and
+    # the pill+keys column now carries the row's own stretch factor.
     band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
     row_box = _row_box(band, "upper")
-    assert row_box.itemAt(0).spacerItem() is not None
-    assert row_box.itemAt(row_box.count() - 1).spacerItem() is not None
+    assert all(item.spacerItem() is None for item in
+               (row_box.itemAt(i) for i in range(row_box.count())))
+    assert row_box.stretch(row_box.count() - 1) > 0
 
 
 # -- staggered black keys (user feedback round on ticket #157) --------------
@@ -286,13 +291,32 @@ def test_pad_row_boxes_never_marked_black(app):
 
 # -- KeyBoxRow: taller fixed height + is_black storage -----------------------
 
-def test_key_box_row_height_grew_to_fit_the_stagger(app):
+def test_key_box_row_minimum_height_grew_to_fit_the_stagger(app):
+    # Ticket #184 bug #2: KeyBoxRow no longer pins itself to a fixed
+    # pixel size (it resizes to fill whatever room its layout gives it,
+    # via `_geometry()` at paint time) -- but it still reports a real
+    # minimum, with equal top/bottom margin so the black+white contour
+    # centers instead of sitting flush top/bottom.
     assert sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER > sk.KeyBoxRow.BOX_H
     row = sk.KeyBoxRow()
-    # Ticket #184: equal top/bottom margin so the black+white contour
-    # centers in the row instead of sitting flush top/bottom.
     expected = sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
-    assert row.height() == expected
+    assert row.minimumSizeHint().height() == expected
+    assert row.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Expanding
+    assert row.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Expanding
+
+
+def test_key_box_row_geometry_scales_up_to_fill_extra_height(app):
+    row = sk.KeyBoxRow()
+    row.set_boxes([{"letter": "a", "label": "C4", "color": None, "is_black": False}])
+    ref_height = sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
+
+    row.resize(row.width(), ref_height)
+    _box_w, box_h, *_ = row._geometry()
+    assert box_h == pytest.approx(sk.KeyBoxRow.BOX_H)
+
+    row.resize(row.width(), ref_height * 2)
+    _box_w, box_h_scaled, *_ = row._geometry()
+    assert box_h_scaled == pytest.approx(sk.KeyBoxRow.BOX_H * 2)
 
 
 def test_key_box_row_set_boxes_stores_mixed_black_white_without_raising(app):

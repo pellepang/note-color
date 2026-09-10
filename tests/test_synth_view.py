@@ -28,12 +28,30 @@ from notecolor.tui.synth_layout import NOTE_CHANNEL, PAD_CHANNEL  # noqa: E402
 from notecolor.notation.score_audition import PIANO_LOWER_ROW, pitch_for_key  # noqa: E402
 from notecolor.audio.sound_engine import midi_pitch  # noqa: E402
 from notecolor.gui import synth_keyboard as sk  # noqa: E402
-from notecolor.gui.synth_view import SynthView  # noqa: E402
+from notecolor.gui.synth_view import SynthView, _FOOTER_MAX_HEIGHT  # noqa: E402
 
 
 @pytest.fixture(scope="module")
 def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _close_synth_view_windows():
+    """Ticket #184 follow-up: `_make_view()` never closed the `SynthView`
+    it created, so every test in this module left its `QMainWindow` (and
+    its 200ms status-refresh `QTimer`) alive for the rest of the run.
+    That pollution was harmless for the assertions this file used to
+    make, but the new splitter-collapse tests below hit real,
+    order-dependent Qt layout flakiness once enough leaked windows piled
+    up in the same offscreen `QApplication` -- closing each `SynthView`
+    (and letting Qt process the resulting deferred-delete events) after
+    every test removes that pollution instead of working around it."""
+    yield
+    for widget in QtWidgets.QApplication.topLevelWidgets():
+        if isinstance(widget, QtWidgets.QMainWindow):
+            widget.close()
+    QtWidgets.QApplication.processEvents()
 
 
 class _FakeKeyEvent:
@@ -314,61 +332,97 @@ def test_splitter_between_canvas_and_keyboard_band_is_resizable(app):
     footer = view.keyboard_band.parentWidget()
     assert view.splitter.widget(1) is footer
 
-    view.resize(900, 700)
+    # Tall enough that main_row's own minimum height doesn't compete with
+    # the footer for the requested split below.
+    view.resize(900, 900)
     total = sum(view.splitter.sizes())
     assert total > 0
     before = view.keyboard_band.height()
 
-    view.splitter.setSizes([total - 250, 250])
+    target = view.splitter.playable_min + 60
+    view.splitter.setSizes([total - target, target])
     QtWidgets.QApplication.processEvents()
 
     # The resize must not raise and must actually move the handle: the
     # footer's height should now roughly track the requested size rather
     # than staying pinned at its old value.
     assert footer.height() != before
-    assert abs(footer.height() - 250) <= 40
+    assert abs(footer.height() - target) <= 15  # nested-layout rounding slack
 
 
 def test_footer_playable_minimum_is_smaller_than_its_full_size_hint(app):
     # Ticket #184: the floor used to equal the footer's full natural
-    # height (no play in the splitter handle at all -- see the test this
-    # replaces, from ticket #157). The floor is now a genuinely smaller
-    # "playable minimum" -- room for the rows and tabs but not the
-    # recents rail -- so the handle actually has somewhere to go before
-    # hitting the collapse point tested below.
+    # height with no give at all (see the test this replaces, from
+    # ticket #157). The floor is now the footer's own real, Qt-computed
+    # `minimumSizeHint()` instead of a hand-picked number: `KeyBoxRow`'s
+    # `sizeHint()` deliberately equals its `minimumSizeHint()` (it has no
+    # "preferred" size distinct from its floor -- filling extra room is
+    # `Expanding` sizePolicy's job, not a bigger sizeHint), so this floor
+    # equals the footer's `sizeHint()` too. What actually gives the
+    # splitter handle room to move is growth *above* that floor, up to
+    # `_FOOTER_MAX_HEIGHT` -- checked by the "tracks" test below.
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
-    assert 0 < footer.minimumHeight() < footer.sizeHint().height()
+    assert 0 < view.splitter.playable_min <= footer.sizeHint().height()
     assert footer.maximumHeight() < 16777215  # not Qt's unbounded default
+    assert view.splitter.playable_min < _FOOTER_MAX_HEIGHT
 
 
 def test_footer_collapses_fully_below_its_playable_minimum(app):
     # Dragging (or, here, programmatically requesting) the footer down to
     # less than its playable minimum must snap it fully shut rather than
     # clamp it at the minimum -- ticket #184's "shrinks to a sensible
-    # playable minimum, then collapses entirely" requirement.
+    # playable minimum, then collapses entirely" requirement. A laid-out
+    # widget can never actually be *sized* to 0 (its children's own
+    # `minimumSizeHint()` floors it), so the collapse is done by hiding
+    # it outright -- `QSplitter` gives a hidden pane zero space on its
+    # own, which is what makes the "0" here real rather than clamped.
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
-    view.resize(900, 700)
+    view.resize(900, 900)
     total = sum(view.splitter.sizes())
 
     view.splitter.setSizes([total - 1, 1])  # far below the playable minimum
     QtWidgets.QApplication.processEvents()
 
     assert footer.height() == 0
+    assert footer.isVisible() is False
 
 
 def test_footer_tracks_a_size_at_or_above_its_playable_minimum(app):
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
-    view.resize(900, 700)
+    view.resize(900, 900)
     total = sum(view.splitter.sizes())
-    requested = footer.minimumHeight() + 20
+    requested = view.splitter.playable_min + 20
 
     view.splitter.setSizes([total - requested, requested])
     QtWidgets.QApplication.processEvents()
 
-    assert footer.height() >= footer.minimumHeight()
+    assert footer.height() >= view.splitter.playable_min - 15  # nested-layout rounding slack
+    assert footer.isVisible() is True
+
+
+def test_footer_expands_back_out_of_a_collapsed_state(app):
+    # The hide/show mechanics behind the collapse must also work in
+    # reverse: dragging back out past the playable minimum after having
+    # been fully collapsed must re-show the footer and size it, not
+    # leave it stuck hidden.
+    view, _controller, _patch = _make_view()
+    footer = view.keyboard_band.parentWidget()
+    view.resize(900, 900)
+    total = sum(view.splitter.sizes())
+
+    view.splitter.setSizes([total - 1, 1])
+    QtWidgets.QApplication.processEvents()
+    assert footer.height() == 0
+
+    requested = view.splitter.playable_min + 40
+    view.splitter.setSizes([total - requested, requested])
+    QtWidgets.QApplication.processEvents()
+
+    assert footer.isVisible() is True
+    assert footer.height() >= view.splitter.playable_min - 15  # nested-layout rounding slack
 
 
 def test_per_patch_workspace_is_restored_on_switching_back(app):

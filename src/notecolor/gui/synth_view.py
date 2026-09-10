@@ -182,21 +182,89 @@ STATUS_TIMER_MS = 200
 _FOOTER_MAX_HEIGHT = 640
 
 
+#: Same dot spacing `synth_workspace.Canvas.paintEvent` uses for its own
+#: background grid (`CANVAS_GRID_SPACING`) -- reused rather than picked
+#: independently, so the footer's texture reads as the same visual
+#: system as the canvas's, just recoloured for a lighter surface.
+_FOOTER_GRID_SPACING = 22
+
+
+class _FooterSurface(QtWidgets.QWidget):
+    """The footer pane's own background: `theme.CHROME` with a dot grid,
+    the same convention `synth_workspace.Canvas` uses for the module
+    canvas (dots at `_FOOTER_GRID_SPACING` spacing) -- ticket #184's bug
+    report #6. The canvas draws lighter dots (`theme.RULE`) on its darker
+    `theme.CANVAS`; the footer's `theme.CHROME` is lighter than that, so
+    matching dots there means a *darker* token instead (`theme.INK_0`),
+    not literally reusing `RULE`, which is lighter than `CHROME`."""
+
+    def paintEvent(self, _event):
+        painter = QtGui.QPainter(self)
+        painter.fillRect(self.rect(), theme.CHROME)
+        painter.setPen(QtGui.QPen(theme.ink(theme.INK_0), 1))
+        painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        spacing = _FOOTER_GRID_SPACING
+        y = spacing / 2
+        while y < self.height():
+            x = spacing / 2
+            while x < self.width():
+                painter.drawPoint(QtCore.QPointF(x, y))
+                x += spacing
+            y += spacing
+
+
 class _CollapsingSplitter(QtWidgets.QSplitter):
     """A splitter whose `collapse_index` pane snaps fully shut once
     dragged below its own playable minimum, instead of clamping there
     (ticket #184's "shrinks to a playable minimum, then collapses
-    entirely" footer behaviour). Plain `QSplitter` only auto-collapses a
-    pane during interactive dragging past its `minimumHeight`/`Width`;
-    `setSizes()` itself just clamps to that minimum, so both the live
-    drag (`splitterMoved`) and a direct `setSizes()` call are routed
-    through the same snap rule here."""
+    entirely" footer behaviour).
+
+    Bug-report root cause (follow-up pass on #184): the first version of
+    this class kept the collapse pane's real Qt `minimumHeight` at
+    `playable_min` and flipped it down to `0` (then back up) on every
+    snap, so it could actually *reach* 0 through `setSizes()` (which
+    always honours a pane's declared minimum, unlike interactive
+    dragging). But `setChildrenCollapsible(True)` left Qt's *own* native
+    collapse-on-drag logic active at the same time, and that logic reads
+    the pane's *current* minimum too -- so the two collapse mechanisms
+    fought over the same mutating value: whichever one saw `minimumHeight
+    == 0` first would treat the entire remaining drag as "past the
+    collapse point", snapping the footer shut (or wide open) after a
+    pixel or two of movement. That one shared cause is what produced the
+    "resize range is way too short" report *and*, once the footer
+    collapsed on the first stray drag, the "rail/pill/keys are invisible,
+    no popup opens" reports -- there was nothing wrong with those widgets
+    themselves, their parent's height had just been squeezed to ~0.
+
+    A second attempt at the fix (still same follow-up pass) tried keeping
+    the pane's real Qt `minimumHeight` at a constant `0` and letting
+    `_snap()` alone push its requested size down to `0`. That still
+    couldn't reach `0`: a widget with a *layout* effectively floors at
+    `max(explicit minimumSize(), the layout's own computed minimum)`,
+    and `QLayout` always derives its minimum from each child's
+    `minimumSizeHint()` regardless of what `setMinimumHeight()` says --
+    `KeyBoxRow.minimumSizeHint()` (itself a deliberate, real floor so
+    keys never shrink to unplayable size) propagates straight up through
+    `SynthKeyboardBand`'s layout to the footer, so `setSizes()` requests
+    below that floor were silently clamped back up to it -- the footer
+    never visibly moved at all below that point.
+
+    The fix that actually works with a *laid-out* pane, rather than
+    fighting Qt's floor: below the playable minimum, hide the pane
+    outright (`QSplitter` gives a hidden child 0 space on its own,
+    without needing its minimum size to be 0) instead of asking for a
+    literal 0-pixel size; above it, show it again and let sizing proceed
+    normally. `_snap()` is run identically for both interactive dragging
+    (`splitterMoved`) and a direct `setSizes()` call."""
 
     def __init__(self, orientation, collapse_index, playable_min, parent=None):
         super().__init__(orientation, parent)
         self._collapse_index = collapse_index
-        self._playable_min = playable_min
-        self.setChildrenCollapsible(True)
+        #: Public: `SynthView`'s own splitter-collapse tests, and anyone
+        #: else who needs to know where the snap point actually is,
+        #: read this rather than recomputing it.
+        self.playable_min = playable_min
+        self.setChildrenCollapsible(False)
         self.splitterMoved.connect(self._on_moved)
 
     def _on_moved(self, _pos, _index):
@@ -206,28 +274,18 @@ class _CollapsingSplitter(QtWidgets.QSplitter):
         super().setSizes(self._snap(list(sizes)))
 
     def _snap(self, sizes):
-        """Below the playable minimum, snap the collapse pane fully to 0
-        instead of clamping there. `QSplitter.setSizes()` (unlike
-        interactive dragging) always honours a pane's real `minimumSize`,
-        so actually reaching 0 means relaxing that constraint on the
-        widget itself while collapsed, and restoring it once the pane is
-        asked to be playable-sized again -- `minimumHeight`/`Width`
-        depending on orientation."""
         idx = self._collapse_index
         if not (0 <= idx < len(sizes)):
             return sizes
-        if 0 < sizes[idx] < self._playable_min:
+        collapsed = sizes[idx] < self.playable_min
+        if collapsed and sizes[idx] != 0:
             deficit = sizes[idx]
             sizes[idx] = 0
             other = 1 - idx if len(sizes) == 2 else idx
             sizes[other] += deficit
         widget = self.widget(idx)
         if widget is not None:
-            floor = 0 if sizes[idx] == 0 else self._playable_min
-            if self.orientation() == QtCore.Qt.Vertical:
-                widget.setMinimumHeight(floor)
-            else:
-                widget.setMinimumWidth(floor)
+            widget.setVisible(not collapsed)
         return sizes
 
 
@@ -324,8 +382,7 @@ class SynthView(QtWidgets.QMainWindow):
         row.addWidget(self.drawer)
         row.addWidget(self.canvas, 1)
 
-        footer = QtWidgets.QWidget(central)
-        footer.setStyleSheet(f"background: {theme.rgba(theme.CHROME)};")
+        footer = _FooterSurface(central)
         footer_layout = QtWidgets.QVBoxLayout(footer)
         footer_layout.setContentsMargins(0, 0, 0, 0)
         footer_layout.setSpacing(0)
@@ -336,20 +393,36 @@ class SynthView(QtWidgets.QMainWindow):
         self.keyboard_band.noteReleased.connect(self._on_note_released)
         self.keyboard_band.layoutChanged.connect(self._on_layout_changed)
         self.keyboard_band.panicRequested.connect(self._on_panic_clicked)
-        footer_layout.addWidget(self.keyboard_band)
+        # Stretch 1: the layout-tabs bar above it is fixed-height, so the
+        # band is the only thing that should grow when the footer pane
+        # itself grows -- otherwise extra room from dragging the splitter
+        # open just sits as dead space below a top-pinned band instead of
+        # letting the key rows fill/recenter in it (ticket #184 bug #1).
+        footer_layout.addWidget(self.keyboard_band, 1)
 
         #: A drag handle between the canvas and the footer (issue: user
         #: feedback on ticket #157). Ticket #184: rather than a hard floor
         #: at the footer's full natural height (which left no play in the
-        #: handle at all), the floor is now a genuinely smaller "playable
-        #: minimum" -- the footer's own height minus just the recents
-        #: rail's -- so the rail is the first thing squeezed out; dragging
-        #: past that playable minimum collapses the footer fully rather
-        #: than clipping its rows. The ceiling is generous but bounded
-        #: (`_FOOTER_MAX_HEIGHT`), not the unbounded default.
-        playable_min = max(0, footer.sizeHint().height()
-                            - self.keyboard_band.recents_rail.sizeHint().height())
-        footer.setMinimumHeight(playable_min)
+        #: handle at all), the floor is now the footer's own real,
+        #: Qt-computed `minimumSizeHint()` -- with the key boxes now
+        #: Expanding rather than fixed-size (bug #2 below), that floor is
+        #: well short of the footer's natural `sizeHint()`, so there is
+        #: real 1:1-tracking room between it and `_FOOTER_MAX_HEIGHT`
+        #: before the collapse point. (A hand-picked value smaller than
+        #: this floor was tried first and rejected: `QLayout` never lets
+        #: a laid-out widget size below its children's own
+        #: `minimumSizeHint()`, visible or not, so requesting anything
+        #: between 0 and that real floor just got silently clamped back
+        #: up to it -- the floor has to be Qt's own number, not ours.)
+        #:
+        #: `footer`'s own Qt `minimumHeight` stays at 0 permanently --
+        #: see `_CollapsingSplitter`'s docstring for why a *second*,
+        #: mutating notion of "minimum" here previously fought Qt's own
+        #: native collapse-on-drag logic and made the whole footer
+        #: (recents rail, pill, keys, and their click targets) collapse
+        #: to ~0 height on the first stray drag.
+        playable_min = footer.minimumSizeHint().height()
+        footer.setMinimumHeight(0)
         footer.setMaximumHeight(_FOOTER_MAX_HEIGHT)
 
         self.splitter = _CollapsingSplitter(QtCore.Qt.Vertical, 1, playable_min, central)

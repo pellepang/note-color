@@ -364,7 +364,13 @@ class KeyBoxRow(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._boxes = []
-        self.setFixedHeight(self.BOX_H + self.STAGGER + 2 * self.MARGIN)
+        #: Ticket #184 bug report: keys must resize to fill the available
+        #: view rather than staying pinned to `BOX_W`/`BOX_H` -- so this
+        #: widget now takes whatever room its layout gives it (down to
+        #: `minimumSizeHint()`) and `_geometry()` derives the actual
+        #: on-screen box size from `self.width()`/`self.height()` at
+        #: paint time, instead of `set_boxes()` dictating a fixed size.
+        self.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self.setAcceptDrops(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
 
@@ -373,17 +379,45 @@ class KeyBoxRow(QtWidgets.QWidget):
         "is_black" (bool, synth rows only -- pad rows omit/default False),
         "overridden" (bool, optional -- draws the per-key marker dot)}."""
         self._boxes = boxes
-        width = len(boxes) * (self.BOX_W + self.GAP) - self.GAP if boxes else 0
-        self.setFixedWidth(max(0, width))
+        self.updateGeometry()
         self.update()
+
+    def sizeHint(self):
+        return self.minimumSizeHint()
+
+    def minimumSizeHint(self):
+        count = max(1, len(self._boxes))
+        width = count * (self.BOX_W + self.GAP) - self.GAP
+        height = self.BOX_H + self.STAGGER + 2 * self.MARGIN
+        return QtCore.QSize(width, height)
+
+    def _geometry(self):
+        """(box_w, box_h, gap, stagger, margin) actually drawn this paint:
+        the reference constants scaled up to fill `self.width()`/
+        `self.height()`, never scaled *down* below them (the widget's own
+        `minimumSizeHint()` is what keeps a layout from ever handing it
+        less room than that in the first place)."""
+        count = len(self._boxes)
+        ref_height = self.BOX_H + self.STAGGER + 2 * self.MARGIN
+        v_scale = max(1.0, self.height() / ref_height) if ref_height else 1.0
+        box_h = self.BOX_H * v_scale
+        stagger = self.STAGGER * v_scale
+        margin = self.MARGIN * v_scale
+        gap = float(self.GAP)
+        if count:
+            box_w = max(float(self.BOX_W), (self.width() - (count - 1) * gap) / count)
+        else:
+            box_w = float(self.BOX_W)
+        return box_w, box_h, gap, stagger, margin
 
     def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
+        box_w, box_h, gap, stagger, margin = self._geometry()
         x = 0.0
         for box in self._boxes:
-            y = float(self.MARGIN) if box.get("is_black") else float(self.MARGIN + self.STAGGER)
-            rect = QtCore.QRectF(x, y, self.BOX_W, self.BOX_H)
+            y = margin if box.get("is_black") else margin + stagger
+            rect = QtCore.QRectF(x, y, box_w, box_h)
             colour = box.get("color")
             if colour is not None:
                 painter.fillRect(rect, colour)
@@ -395,32 +429,33 @@ class KeyBoxRow(QtWidgets.QWidget):
 
             painter.setFont(theme.font(7, bold=True))
             painter.setPen(theme.TEXT if colour is not None else theme.TEXT_FAINT)
-            painter.drawText(QtCore.QRectF(x, y + 2, self.BOX_W, 13),
+            painter.drawText(QtCore.QRectF(x, y + 2, box_w, 13),
                              QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
                              box.get("letter", "").upper())
 
             painter.setFont(theme.font(6))
             painter.setPen(theme.TEXT if colour is not None else theme.TEXT_DIM)
-            painter.drawText(QtCore.QRectF(x, y + 17, self.BOX_W, self.BOX_H - 17),
+            painter.drawText(QtCore.QRectF(x, y + 17, box_w, box_h - 17),
                              QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
                              box.get("label", ""))
 
             if box.get("overridden"):
-                dot = QtCore.QRectF(x + self.BOX_W - self.OVERRIDE_DOT - 2, y + 2,
+                dot = QtCore.QRectF(x + box_w - self.OVERRIDE_DOT - 2, y + 2,
                                     self.OVERRIDE_DOT, self.OVERRIDE_DOT)
                 painter.setPen(QtCore.Qt.NoPen)
                 painter.setBrush(theme.AMBER)
                 painter.drawEllipse(dot)
                 painter.setBrush(QtCore.Qt.NoBrush)
 
-            x += self.BOX_W + self.GAP
+            x += box_w + gap
 
     # -- per-key click / drag-drop -----------------------------------------
 
     def _box_index_at(self, x):
         if not self._boxes:
             return None
-        index = int(x // (self.BOX_W + self.GAP))
+        box_w, _box_h, gap, _stagger, _margin = self._geometry()
+        index = int(x // (box_w + gap))
         if 0 <= index < len(self._boxes):
             return index
         return None
@@ -550,14 +585,35 @@ class RecentsRail(QtWidgets.QWidget):
         self._label.setFont(theme.font(7))
         self._label.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};")
         self._layout.addWidget(self._label)
+        #: Shown only while `set_names([])` -- an explicit "nothing yet"
+        #: placeholder, so the rail (and its "RECENT" label) still occupy
+        #: their full-width strip on a fresh session instead of the whole
+        #: rail disappearing (ticket #184 bug report: hiding this widget
+        #: whenever there were no recents yet made it read as "not
+        #: visible at all", and its `sizeHint()` -- used by `synth_view.
+        #: SynthView` to size the splitter's playable minimum -- silently
+        #: excluded a hidden widget's height, throwing off that whole
+        #: calculation too).
+        self._empty_hint = QtWidgets.QLabel("none yet", self)
+        self._empty_hint.setFont(theme.font(7))
+        self._empty_hint.setStyleSheet(
+            f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)}; font-style: italic;")
+        self._layout.addWidget(self._empty_hint)
         self._layout.addStretch(1)
+        self._chips = []
 
     def set_names(self, names):
-        while self._layout.count() > 1:
-            _delete_layout_item(self._layout.takeAt(1))
+        for chip in self._chips:
+            self._layout.removeWidget(chip)
+            chip.deleteLater()
+        self._chips = []
+        self._empty_hint.setVisible(not names)
+        insert_at = self._layout.count() - 1  # just before the trailing stretch
         for name in names:
-            self._layout.insertWidget(self._layout.count() - 1, _RecentChip(name, self))
-        self.setVisible(bool(names))
+            chip = _RecentChip(name, self)
+            self._layout.insertWidget(insert_at, chip)
+            insert_at += 1
+            self._chips.append(chip)
 
 
 # --------------------------------------------------------------------------
@@ -665,9 +721,15 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         self.recents_rail = RecentsRail(self)
         self._body.addWidget(self.recents_rail)
 
+        #: Stretch 1 (rather than the layout default of 0), so this row of
+        #: key-box rows -- not the fixed-height hint label/recents rail
+        #: above it -- is what actually grows to fill any extra vertical
+        #: room the footer gets handed (ticket #184 bug report: keys were
+        #: staying pinned to the top with dead space below as the footer
+        #: grew, instead of the whole band filling/recentering).
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._rows_layout.setSpacing(4)
-        self._body.addLayout(self._rows_layout)
+        self._body.addLayout(self._rows_layout, 1)
 
         self.setFocusPolicy(QtCore.Qt.StrongFocus)
         self._rebuild_structure()
@@ -682,16 +744,16 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         self._split_buttons = {}
 
         # Upper row drawn above lower, matching the prototype and a real
-        # keyboard's own up/down sense.
+        # keyboard's own up/down sense. Stretch 1 each, so the two rows
+        # share any extra vertical room equally.
         for base_row in ("upper", "lower"):
-            self._rows_layout.addLayout(self._build_base_row(base_row))
+            self._rows_layout.addLayout(self._build_base_row(base_row), 1)
 
         self._refresh_boxes()
 
     def _build_base_row(self, base_row):
         row_box = QtWidgets.QHBoxLayout()
         row_box.setSpacing(6)
-        row_box.insertStretch(0, 1)
 
         if self.layout_state.layout == LAYOUT_CUSTOM:
             kind_button = QtWidgets.QToolButton(self)
@@ -739,10 +801,14 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             half_box.addWidget(pill)
             half_box.setAlignment(pill, QtCore.Qt.AlignLeft)
             half_box.addWidget(key_box_row)
-            row_box.addLayout(half_box)
+            # Stretch 1: this column (pill + its keys) is what fills the
+            # row's available width -- ticket #184 bug report wanted keys
+            # to grow to fill the view rather than sit fixed-size with
+            # dead space held open by flanking stretches (the previous,
+            # now-removed `insertStretch`/`addStretch` centering here).
+            row_box.addLayout(half_box, 1)
             self._row_widgets[row_key] = (pill, key_box_row)
 
-        row_box.addStretch(1)
         return row_box
 
     # -- content refresh: box specs + pill labels, no structural change ---
