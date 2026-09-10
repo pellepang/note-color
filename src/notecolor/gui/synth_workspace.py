@@ -723,6 +723,17 @@ class _DrawerRow(QtWidgets.QLabel):
         mime = QtCore.QMimeData()
         mime.setText(self.type_key)
         drag.setMimeData(mime)
+        # Without an explicit pixmap, `QDrag` drags nothing visible -- the
+        # canvas's own drop-target highlight worked (that's `Canvas`
+        # reacting to `dragEnterEvent`/`dragMoveEvent`, unrelated to this),
+        # but the row itself vanished the moment the drag started, leaving
+        # no feedback for where it actually is. Grabbing the row's own
+        # rendered pixels and anchoring the pixmap at the same point the
+        # mouse grabbed it (`setHotSpot`) makes the drag image track the
+        # cursor exactly the way the row sat under it before the drag
+        # (issue #167).
+        drag.setPixmap(self.grab())
+        drag.setHotSpot(event.position().toPoint())
         drag.exec(QtCore.Qt.CopyAction)
 
 
@@ -793,7 +804,17 @@ class Canvas(QtWidgets.QWidget):
         self._drop_hover = False
         self.update()
         type_key = event.mimeData().text()
-        pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        # Derived from the event's global position rather than trusted
+        # from `event.position()`/`event.pos()` directly: those are
+        # supposed to already be canvas-local, but this is the one point
+        # in the drop path any stale/mismapped coordinate would silently
+        # survive all the way to `spawn_module()`. `mapFromGlobal()` is
+        # unambiguous -- wherever the cursor actually is on screen, mapped
+        # into this widget's own frame -- so if a mismapped local position
+        # was ever the reason a dropped module used to land somewhere
+        # other than the cursor (issue #167), this removes that path
+        # entirely rather than trusting the event to have gotten it right.
+        pos = self.mapFromGlobal(event.globalPosition().toPoint())
         self.spawn_module(type_key, pos)
         event.acceptProposedAction()
 
@@ -801,11 +822,19 @@ class Canvas(QtWidgets.QWidget):
         """The actual drop-handling logic, factored out of `dropEvent()` so
         tests can call it directly -- synthesizing real Qt DnD is
         impractical (see the plan's testing note)."""
-        clamped = QtCore.QPoint(max(0, min(pos.x(), max(0, self.width() - 1))),
-                                max(0, min(pos.y(), max(0, self.height() - 1))))
-        window = self._module_factory(type_key, clamped)
+        window = self._module_factory(type_key, pos)
         if window is None:
             return None
+        # Clamped against the window's own size (not just a 1px inset off
+        # the canvas edge) so a module dropped near the canvas's right or
+        # bottom edge stays fully on-screen instead of hanging mostly off
+        # it -- part of issue #167's "drops in the wrong place" (a window
+        # that's 90% off-canvas reads as "wrong place" even when its
+        # top-left is technically at the cursor).
+        max_x = max(0, self.width() - window.width())
+        max_y = max(0, self.height() - window.height())
+        clamped = QtCore.QPoint(max(0, min(pos.x(), max_x)),
+                                max(0, min(pos.y(), max_y)))
         self.add_window(window)
         window.move(clamped)
         self._focus_window(window)
