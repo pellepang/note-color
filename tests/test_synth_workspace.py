@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6")
 
-from PySide6 import QtCore, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from notecolor.audio import effects as effects_module  # noqa: E402
 from notecolor.gui import synth_workspace as sw  # noqa: E402
@@ -229,3 +229,184 @@ def test_canvas_spawn_module_factory_declines(app):
     result = canvas.spawn_module("clap_plugin", QtCore.QPoint(10, 10))
     assert result is None
     assert canvas.window_count() == 0
+
+
+# -- Bug 1: drawer row text isn't clipped (ticket #157 feedback) -----------
+
+def test_drawer_row_is_vertically_centred_not_top_aligned(app):
+    """The reported symptom was descenders ("y" in "Delay") sitting right
+    on the fixed-height box's bottom edge -- caused by QLabel's default
+    top-left alignment leaving no headroom. Assert the fix directly."""
+    row = sw._DrawerRow("delay", "Delay")
+    assert int(row.alignment() & QtCore.Qt.AlignVCenter) == int(QtCore.Qt.AlignVCenter)
+
+
+# -- Bug 2: title-bar text isn't clipped or unreadably squeezed ------------
+
+def test_title_bar_labels_are_vertically_centred(app):
+    window = sw.ModuleWindow("filter_env", "Filter Env", tag="ADSR")
+    bar = window._title_bar
+    assert int(bar._title_label.alignment() & QtCore.Qt.AlignVCenter) == int(QtCore.Qt.AlignVCenter)
+    assert int(bar._tag_label.alignment() & QtCore.Qt.AlignVCenter) == int(QtCore.Qt.AlignVCenter)
+
+
+def test_title_bar_elides_long_title_instead_of_clipping(app):
+    long_title = "Really Long Module Title Here"
+    window = sw.ModuleWindow("filter_env", long_title, tag="EXTRALONGTAG")
+    window.resize(window.sizeHint())
+    bar = window._title_bar
+
+    shown = bar._title_label.text()
+    assert shown != long_title
+    assert shown.endswith("…")
+    # elidedText never produces something wider than the label's own box.
+    metrics = QtGui.QFontMetrics(bar._title_label.font())
+    assert metrics.horizontalAdvance(shown) <= bar._title_label.width()
+
+
+def test_title_bar_does_not_elide_a_title_that_fits(app):
+    # Regression: passing the pre-clamped `title_width` (equal to the
+    # title's own measured width when it fits) to `elidedText()` could
+    # still trigger a spurious one-character elision from font-metrics
+    # rounding -- "FILTER" became "FILT..." despite ~80px of unused room
+    # in the title bar. `elidedText()` must be given the real `available`
+    # budget, not a width clamped down to the text's own size.
+    window = sw.ModuleWindow("filter", "FILTER", tag="lp")
+    window.resize(window.sizeHint())
+    assert window._title_bar._title_label.text() == "FILTER"
+
+
+def test_title_bar_hides_tag_when_no_room_left(app):
+    window = sw.ModuleWindow("filter_env", "Really Long Module Title Here", tag="EXTRALONGTAG")
+    window.resize(window.sizeHint())
+    assert window._title_bar._tag_label.isHidden() is True
+
+
+def test_title_bar_shows_short_tag_when_room_permits(app):
+    window = sw.ModuleWindow("filter_env", "Filter Env", tag="ADSR")
+    window.resize(window.sizeHint())
+    assert window._title_bar._tag_label.isHidden() is False
+    assert window._title_bar._tag_label.text() == "ADSR"
+
+
+# -- Bug 3: focus highlight is only the outer window border -----------------
+
+def test_module_window_style_is_scoped_to_its_own_object_name(app):
+    """A bare/unselector-scoped rule on ModuleWindow is Qt's effective
+    style root for descendants that don't override every property --
+    that's what painted a "weird box" around the title text. The fix
+    scopes the rule with #moduleWindow so it can't leak."""
+    window = sw.ModuleWindow("filter_env", "Filter Env", tag="ADSR")
+    assert window.objectName() == "moduleWindow"
+    assert "#moduleWindow" in window.styleSheet()
+
+
+def test_title_bar_child_labels_explicitly_disclaim_border(app):
+    window = sw.ModuleWindow("filter_env", "Filter Env", tag="ADSR")
+    bar = window._title_bar
+    assert "border: none" in bar._title_label.styleSheet()
+    assert "border: none" in bar._tag_label.styleSheet()
+
+
+# -- Feature: Knob click-and-drag (in addition to wheel) --------------------
+
+class _FakeMouse:
+    """Stands in for a `QMouseEvent`: `Knob`'s mouse handlers only read
+    `button()`, `position()`, `modifiers()`, and call `accept()`."""
+
+    def __init__(self, y, shift=False, button=QtCore.Qt.LeftButton):
+        self._y = y
+        self._shift = shift
+        self._button = button
+
+    def button(self):
+        return self._button
+
+    def position(self):
+        return QtCore.QPointF(0, self._y)
+
+    def modifiers(self):
+        return QtCore.Qt.ShiftModifier if self._shift else QtCore.Qt.NoModifier
+
+    def accept(self):
+        pass
+
+
+def test_knob_drag_up_emits_positive_steps(app):
+    knob = sw.Knob("Cutoff", "440Hz", 0.0)
+    received = []
+    knob.wheelStepped.connect(received.append)
+
+    knob.mousePressEvent(_FakeMouse(100))
+    # Dragging UP (smaller y) by 2 full steps' worth of pixels.
+    knob.mouseMoveEvent(_FakeMouse(100 - 2 * sw.Knob.DRAG_PIXELS_PER_STEP))
+    knob.mouseReleaseEvent(_FakeMouse(100 - 2 * sw.Knob.DRAG_PIXELS_PER_STEP))
+
+    assert received == [1, 1]
+
+
+def test_knob_drag_down_emits_negative_steps(app):
+    knob = sw.Knob("Cutoff", "440Hz", 0.0)
+    received = []
+    knob.wheelStepped.connect(received.append)
+
+    knob.mousePressEvent(_FakeMouse(100))
+    knob.mouseMoveEvent(_FakeMouse(100 + 3 * sw.Knob.DRAG_PIXELS_PER_STEP))
+    knob.mouseReleaseEvent(_FakeMouse(100 + 3 * sw.Knob.DRAG_PIXELS_PER_STEP))
+
+    assert received == [-1, -1, -1]
+
+
+def test_knob_drag_does_not_emit_before_a_full_step(app):
+    knob = sw.Knob("Cutoff", "440Hz", 0.0)
+    received = []
+    knob.wheelStepped.connect(received.append)
+
+    knob.mousePressEvent(_FakeMouse(100))
+    knob.mouseMoveEvent(_FakeMouse(100 - (sw.Knob.DRAG_PIXELS_PER_STEP - 1)))
+    assert received == []
+
+
+def test_knob_drag_carries_leftover_pixels_across_moves(app):
+    """A drag that crosses a step boundary over two separate move events
+    (rather than one big jump) must still emit the step -- the accumulator
+    baseline needs to carry the leftover sub-step distance forward."""
+    knob = sw.Knob("Cutoff", "440Hz", 0.0)
+    received = []
+    knob.wheelStepped.connect(received.append)
+    step = sw.Knob.DRAG_PIXELS_PER_STEP
+
+    knob.mousePressEvent(_FakeMouse(100))
+    knob.mouseMoveEvent(_FakeMouse(100 - (step - 1)))   # just short of one step
+    assert received == []
+    knob.mouseMoveEvent(_FakeMouse(100 - (step - 1) - 1))  # the last pixel
+    assert received == [1]
+
+
+def test_knob_drag_sets_last_shift_per_step(app):
+    knob = sw.Knob("Cutoff", "440Hz", 0.0)
+    received = []
+    knob.wheelStepped.connect(received.append)
+    step = sw.Knob.DRAG_PIXELS_PER_STEP
+
+    knob.mousePressEvent(_FakeMouse(100))
+    knob.mouseMoveEvent(_FakeMouse(100 - step, shift=True))
+    assert received == [1]
+    assert knob.last_shift is True
+
+    knob.mouseMoveEvent(_FakeMouse(100 - 2 * step, shift=False))
+    assert received == [1, 1]
+    assert knob.last_shift is False
+
+
+def test_knob_drag_state_cleared_on_release(app):
+    knob = sw.Knob("Cutoff", "440Hz", 0.0)
+    knob.mousePressEvent(_FakeMouse(100))
+    assert knob._drag_start_y is not None
+    knob.mouseReleaseEvent(_FakeMouse(100))
+    assert knob._drag_start_y is None
+
+
+def test_knob_tooltip_mentions_drag(app):
+    knob = sw.Knob("Cutoff", "440Hz", 0.0)
+    assert "drag" in knob.toolTip()

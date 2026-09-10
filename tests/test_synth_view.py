@@ -303,6 +303,49 @@ def test_shift_m_shortcut_releases_held_keys_and_records_note_off():
 # --- per-patch workspace state -------------------------------------------
 
 
+# --- footer splitter (user feedback round on ticket #157) ---------------
+
+
+def test_splitter_between_canvas_and_keyboard_band_is_resizable(app):
+    view, _controller, _patch = _make_view()
+    assert isinstance(view.splitter, QtWidgets.QSplitter)
+    assert view.splitter.orientation() == QtCore.Qt.Vertical
+    assert view.splitter.count() == 2
+    footer = view.keyboard_band.parentWidget()
+    assert view.splitter.widget(1) is footer
+
+    view.resize(900, 700)
+    total = sum(view.splitter.sizes())
+    assert total > 0
+    before = view.keyboard_band.height()
+
+    view.splitter.setSizes([total - 250, 250])
+    QtWidgets.QApplication.processEvents()
+
+    # The resize must not raise and must actually move the handle: the
+    # footer's height should now roughly track the requested size rather
+    # than staying pinned at its old value.
+    assert footer.height() != before
+    assert abs(footer.height() - 250) <= 40
+
+
+def test_footer_minimum_height_matches_its_own_size_hint(app):
+    # Regression: a hardcoded 140px floor predated the piano-key stagger
+    # increasing `KeyBoxRow`'s height, and went stale -- dragging the
+    # splitter to that old minimum clipped the lower row's boxes against
+    # the status bar. The floor must track the footer's actual required
+    # height instead of a guessed constant.
+    view, _controller, _patch = _make_view()
+    footer = view.keyboard_band.parentWidget()
+    assert footer.minimumHeight() == footer.sizeHint().height()
+
+    view.resize(900, 700)
+    total = sum(view.splitter.sizes())
+    view.splitter.setSizes([total, 1])  # try to starve the footer pane
+    QtWidgets.QApplication.processEvents()
+    assert footer.height() >= footer.minimumHeight()
+
+
 def test_per_patch_workspace_is_restored_on_switching_back(app):
     patch_a = patch_format.new_patch(name="A")
     patch_b = patch_format.new_patch(name="B")

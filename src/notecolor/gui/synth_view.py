@@ -268,16 +268,36 @@ class SynthView(QtWidgets.QMainWindow):
         self.canvas = Canvas(self._module_factory, main_row)
         row.addWidget(self.drawer)
         row.addWidget(self.canvas, 1)
-        outer.addWidget(main_row, 1)
 
-        outer.addWidget(self._build_layout_tabs())
+        footer = QtWidgets.QWidget(central)
+        footer_layout = QtWidgets.QVBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(0)
+        footer_layout.addWidget(self._build_layout_tabs())
 
-        self.keyboard_band = SynthKeyboardBand(parent=central)
+        self.keyboard_band = SynthKeyboardBand(parent=footer)
         self.keyboard_band.notePreviewRequested.connect(self._on_note_preview)
         self.keyboard_band.noteReleased.connect(self._on_note_released)
         self.keyboard_band.layoutChanged.connect(self._on_layout_changed)
         self.keyboard_band.panicRequested.connect(self._on_panic_clicked)
-        outer.addWidget(self.keyboard_band)
+        footer_layout.addWidget(self.keyboard_band)
+        #: A drag handle between the canvas and the footer (issue: user
+        #: feedback on ticket #157) -- same shape as `studio.py`'s
+        #: bottom-pane splitter (see its `__init__`, around line 647).
+        #: The floor is the footer's own natural `sizeHint()` rather than a
+        #: hand-picked number: none of its content (two rows of fixed-height
+        #: key boxes plus the layout-tabs bar) can compress below that, so a
+        #: hardcoded constant just goes stale the next time a row's height
+        #: changes (as happened when the piano-key stagger grew `KeyBoxRow`
+        #: past an earlier guessed minimum, clipping the lower row).
+        footer.setMinimumHeight(footer.sizeHint().height())
+
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical, central)
+        self.splitter.addWidget(main_row)
+        self.splitter.addWidget(footer)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        outer.addWidget(self.splitter, 1)
 
         outer.addWidget(self._build_status_bar())
 
@@ -429,6 +449,12 @@ class SynthView(QtWidgets.QMainWindow):
         if not self._shown_once:
             self._shown_once = True
             self._apply_patch(self._initial_patch)
+        # Nothing else in this window competes for keyboard focus (module
+        # windows/knobs/drawer rows are all NoFocus), but nothing hands the
+        # keyboard band focus either -- without this, every key press this
+        # widget's `keyPressEvent` exists to handle (note preview, Tab,
+        # Shift+M, octave) never reaches it at all.
+        self.keyboard_band.setFocus()
 
     # -- module factory (Canvas's drop callback) ----------------------------
 

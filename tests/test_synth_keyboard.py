@@ -255,6 +255,76 @@ def test_non_piano_key_does_nothing(app):
     assert band._held == {}
 
 
+# -- centering (user feedback round on ticket #157) -------------------------
+
+def test_dual_row_has_stretch_at_both_ends(app):
+    band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
+    row_box = _row_box(band, "upper")
+    assert row_box.itemAt(0).spacerItem() is not None
+    assert row_box.itemAt(row_box.count() - 1).spacerItem() is not None
+
+
+# -- staggered black keys (user feedback round on ticket #157) --------------
+
+def test_boxes_for_row_marks_black_keys_for_known_base_octave(app):
+    band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
+    boxes = band._boxes_for_row("lower")
+    for letter, box in zip(PIANO_LOWER_ROW, boxes):
+        pitch_class, _octave = pitch_for_key(letter, band.base_octave)
+        assert box["is_black"] == (pitch_class in {1, 3, 6, 8, 10})
+
+
+def test_pad_row_boxes_never_marked_black(app):
+    kit_zones = {"Drum Kit": _kit(["kick.wav", "snare.wav"])}
+    band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names=kit_zones)
+    band.layout_state.layout = sk.LAYOUT_HYBRID  # lower row -> pad
+    band._rebuild_structure()
+    boxes = band._boxes_for_row("lower")
+    assert boxes  # sanity: pad row actually produced boxes
+    assert all(not b.get("is_black", False) for b in boxes)
+
+
+# -- KeyBoxRow: taller fixed height + is_black storage -----------------------
+
+def test_key_box_row_height_grew_to_fit_the_stagger(app):
+    assert sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER > sk.KeyBoxRow.BOX_H
+    row = sk.KeyBoxRow()
+    assert row.height() == sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER
+
+
+def test_key_box_row_set_boxes_stores_mixed_black_white_without_raising(app):
+    row = sk.KeyBoxRow()
+    boxes = [
+        {"letter": "a", "label": "C4", "color": None, "is_black": False},
+        {"letter": "s", "label": "Db4", "color": None, "is_black": True},
+    ]
+    row.set_boxes(boxes)
+    assert row._boxes[0]["is_black"] is False
+    assert row._boxes[1]["is_black"] is True
+
+
+def _flush_deferred_deletes(app):
+    for _ in range(5):
+        app.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
+        app.processEvents()
+
+
+def test_rebuild_structure_does_not_leak_row_widgets_across_layout_switches(app):
+    # Regression: `_rebuild_structure`'s cleanup used to check only
+    # `item.widget()`, which is always None for a row added via
+    # `addLayout()` -- every chip label/pill/key-box-row widget nested
+    # inside a taken row silently piled up on every switch instead of
+    # being deleted.
+    band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
+    before = len(band.findChildren(QtWidgets.QWidget))
+    band.set_layout(sk.LAYOUT_HYBRID)
+    _flush_deferred_deletes(app)
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    _flush_deferred_deletes(app)
+    after = len(band.findChildren(QtWidgets.QWidget))
+    assert after == before
+
+
 def test_tab_cycles_layout(app):
     band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
     assert band.layout_state.layout == sk.LAYOUT_DUAL

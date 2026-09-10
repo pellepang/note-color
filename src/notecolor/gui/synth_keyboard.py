@@ -259,14 +259,20 @@ class KeyBoxRow(QtWidgets.QWidget):
     BOX_W = 34
     BOX_H = 38
     GAP = 3
+    #: Vertical raise for a black-key box, in pixels -- enough to read as a
+    #: deliberate piano-style stagger at `BOX_H`'s scale without looking
+    #: broken. Black keys sit at `y = 0` (top of the taller row); white/pad
+    #: keys sit staggered down by this many pixels.
+    STAGGER = 10
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._boxes = []
-        self.setFixedHeight(self.BOX_H)
+        self.setFixedHeight(self.BOX_H + self.STAGGER)
 
     def set_boxes(self, boxes):
-        """`boxes`: list of {"letter", "label", "color" (QColor or None)}."""
+        """`boxes`: list of {"letter", "label", "color" (QColor or None),
+        "is_black" (bool, synth rows only -- pad rows omit/default False)}."""
         self._boxes = boxes
         width = len(boxes) * (self.BOX_W + self.GAP) - self.GAP if boxes else 0
         self.setFixedWidth(max(0, width))
@@ -277,7 +283,8 @@ class KeyBoxRow(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         x = 0.0
         for box in self._boxes:
-            rect = QtCore.QRectF(x, 0, self.BOX_W, self.BOX_H)
+            y = 0.0 if box.get("is_black") else float(self.STAGGER)
+            rect = QtCore.QRectF(x, y, self.BOX_W, self.BOX_H)
             colour = box.get("color")
             if colour is not None:
                 painter.fillRect(rect, colour)
@@ -289,13 +296,13 @@ class KeyBoxRow(QtWidgets.QWidget):
 
             painter.setFont(theme.font(7, bold=True))
             painter.setPen(theme.TEXT if colour is not None else theme.TEXT_FAINT)
-            painter.drawText(QtCore.QRectF(x, 2, self.BOX_W, 13),
+            painter.drawText(QtCore.QRectF(x, y + 2, self.BOX_W, 13),
                              QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
                              box.get("letter", "").upper())
 
             painter.setFont(theme.font(6))
             painter.setPen(theme.TEXT if colour is not None else theme.TEXT_DIM)
-            painter.drawText(QtCore.QRectF(x, 17, self.BOX_W, self.BOX_H - 17),
+            painter.drawText(QtCore.QRectF(x, y + 17, self.BOX_W, self.BOX_H - 17),
                              QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
                              box.get("label", ""))
             x += self.BOX_W + self.GAP
@@ -354,6 +361,23 @@ class AssignmentPill(QtWidgets.QWidget):
 #: uses alike), which is why that module doesn't hand-list `Qt.Key_Z`,
 #: `Qt.Key_2`, etc. one by one and neither does this one.
 _PIANO_KEYS = {QtCore.Qt.Key(ord(c.upper())): c for c in PIANO_LOWER_ROW + PIANO_UPPER_ROW}
+
+
+def _delete_layout_item(item):
+    """`deleteLater()`s every widget under a `takeAt()`-taken `QLayoutItem`,
+    including ones nested inside a sub-layout. A plain `item.widget()`
+    check misses everything inside a row built with `addLayout()` (as
+    `_build_base_row`'s rows are) -- that check alone silently leaked every
+    row's chip label/pill/key-box-row widgets on every layout switch, since
+    the taken item's `.widget()` is always `None` for a nested layout."""
+    widget = item.widget()
+    if widget is not None:
+        widget.deleteLater()
+        return
+    layout = item.layout()
+    if layout is not None:
+        while layout.count():
+            _delete_layout_item(layout.takeAt(0))
 
 
 class SynthKeyboardBand(QtWidgets.QWidget):
@@ -423,10 +447,7 @@ class SynthKeyboardBand(QtWidgets.QWidget):
 
     def _rebuild_structure(self):
         while self._rows_layout.count():
-            item = self._rows_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+            _delete_layout_item(self._rows_layout.takeAt(0))
         self._row_widgets = {}
         self._kind_buttons = {}
         self._split_buttons = {}
@@ -455,6 +476,7 @@ class SynthKeyboardBand(QtWidgets.QWidget):
     def _build_base_row(self, base_row):
         row_box = QtWidgets.QHBoxLayout()
         row_box.setSpacing(6)
+        row_box.insertStretch(0, 1)
 
         chip_label = QtWidgets.QLabel(self._row_chip_label(base_row).upper(), self)
         chip_label.setFont(theme.font(7))
@@ -540,6 +562,9 @@ class SynthKeyboardBand(QtWidgets.QWidget):
                 pitch_class, octave = pitch_for_key(letter, self.base_octave)
                 label = f"{NOTE_NAMES_FIFTHS[pitch_class]}{octave}"
                 colour = _synth_lit_colour(pitch_class) if lit else None
+                is_black = pitch_class in {1, 3, 6, 8, 10}
+                boxes.append({"letter": letter, "label": label, "color": colour,
+                              "is_black": is_black})
             else:
                 if zones:
                     sample = zones[position % len(zones)].sample or "--"
@@ -547,7 +572,7 @@ class SynthKeyboardBand(QtWidgets.QWidget):
                     sample = "--"
                 label = sample
                 colour = _pad_lit_colour(sample) if (lit and zones) else None
-            boxes.append({"letter": letter, "label": label, "color": colour})
+                boxes.append({"letter": letter, "label": label, "color": colour})
         return boxes
 
     # -- layout switching ---------------------------------------------------

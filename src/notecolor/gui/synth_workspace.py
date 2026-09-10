@@ -90,8 +90,15 @@ class Knob(QtWidgets.QWidget):
         #: without this widget needing to know about `Patch`/coarse-step
         #: semantics at all.
         self.last_shift = False
+        #: Set while a left-button drag is in progress; `None` otherwise.
+        #: Follows the same "populated on press, cleared on release"
+        #: `_drag` idiom `ModuleWindow` uses for its own window-drag (see
+        #: this module's docstring), just keyed on a y-position instead of
+        #: a grab point since a knob only cares about vertical motion.
+        self._drag_start_y = None
         self.setFixedSize(KNOB_SIZE, KNOB_SIZE + 24)
-        self.setToolTip(f"{label} — wheel to sweep, shift+wheel = coarse")
+        self.setToolTip(f"{label} — wheel or drag to sweep, shift = coarse")
+        self.setCursor(QtCore.Qt.SizeVerCursor)
 
     def set_display(self, value_text, rotation_degrees):
         self._value_text = value_text
@@ -100,7 +107,7 @@ class Knob(QtWidgets.QWidget):
 
     def set_label(self, label):
         self._label = label
-        self.setToolTip(f"{label} — wheel to sweep, shift+wheel = coarse")
+        self.setToolTip(f"{label} — wheel or drag to sweep, shift = coarse")
         self.update()
 
     def wheelEvent(self, event):
@@ -108,6 +115,45 @@ class Knob(QtWidgets.QWidget):
         direction = 1 if event.angleDelta().y() > 0 else -1
         self.wheelStepped.emit(direction)
         event.accept()
+
+    #: Pixels of vertical drag per one `wheelStepped` step -- small enough
+    #: to feel responsive on a 40px-wide knob without being hair-trigger.
+    DRAG_PIXELS_PER_STEP = 4
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_start_y = event.position().y()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_y is None:
+            super().mouseMoveEvent(event)
+            return
+        # Dragging UP increases the value -- matches every DAW/synth
+        # convention, and this widget's own wheelEvent (angleDelta().y() >
+        # 0, i.e. wheel-up, already emits +1).
+        current_y = event.position().y()
+        delta = self._drag_start_y - current_y
+        step = self.DRAG_PIXELS_PER_STEP
+        while abs(delta) >= step:
+            direction = 1 if delta > 0 else -1
+            self.last_shift = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+            self.wheelStepped.emit(direction)
+            delta -= direction * step
+        # Reset the baseline so the next move's delta picks up exactly
+        # where this one left off (less than one full step), so a long
+        # drag emits many discrete steps rather than one giant jump.
+        self._drag_start_y = current_y + delta
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton and self._drag_start_y is not None:
+            self._drag_start_y = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def paintEvent(self, _event):
         p = QtGui.QPainter(self)
@@ -164,6 +210,14 @@ class ModuleWindow(QtWidgets.QWidget):
         self._drag = None
         self._focused = False
         self.setFixedWidth(TIDY_SLOT_W - TIDY_GAP)
+        # Scoped to this widget alone (via the object-name selector in
+        # `_apply_border_style()`) so the focus border can't leak onto
+        # descendants (title/tag labels, the close button, Knobs) that
+        # don't explicitly set their own `border` -- an unscoped/bare
+        # stylesheet rule on an ancestor is Qt's effective style root for
+        # any descendant that doesn't fully override it, which used to
+        # paint a "weird box" around the title-bar text too.
+        self.setObjectName("moduleWindow")
         self.setAutoFillBackground(False)
         # Required for a plain QWidget subclass to actually paint the
         # border/background set via setStyleSheet() below.
@@ -213,8 +267,8 @@ class ModuleWindow(QtWidgets.QWidget):
     def _apply_border_style(self):
         border_colour = theme.COPPER if self._focused else theme.RULE_2
         self.setStyleSheet(
-            f"background: {theme.rgba(theme.CHROME)}; "
-            f"border: 1px solid {theme.rgba(theme.ink(border_colour))};"
+            f"#moduleWindow {{ background: {theme.rgba(theme.CHROME)}; "
+            f"border: 1px solid {theme.rgba(theme.ink(border_colour))}; }}"
         )
 
     def set_focused(self, focused):
@@ -294,16 +348,29 @@ class _TitleBar(QtWidgets.QWidget):
             "border-radius: 4px;")
         layout.addWidget(self._dot)
 
-        self._title_label = QtWidgets.QLabel(title, self)
+        self._title_label = QtWidgets.QLabel(self)
         self._title_label.setFont(theme.font(9, bold=True))
-        self._title_label.setStyleSheet("background: transparent;")
+        # `border: none` is explicit, not decorative -- without it this
+        # label has no border of its own, so Qt's stylesheet cascade falls
+        # through to ModuleWindow's ancestor rule (see
+        # `ModuleWindow._apply_border_style()`), which paints its focus
+        # border onto every descendant that doesn't opt out (bug: "weird
+        # box" around title-bar text). Same for `_tag_label` below.
+        self._title_label.setStyleSheet("background: transparent; border: none;")
+        self._title_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         layout.addWidget(self._title_label)
 
+        self._tag_label = None
         if tag:
-            self._tag_label = QtWidgets.QLabel(tag, self)
+            self._tag_label = QtWidgets.QLabel(self)
             self._tag_label.setFont(theme.font(7))
-            self._tag_label.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};")
+            self._tag_label.setStyleSheet(
+                f"background: transparent; border: none; color: {theme.rgba(theme.TEXT_FAINT)};")
+            self._tag_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             layout.addWidget(self._tag_label)
+
+        self._title_text = title
+        self._tag_text = tag
 
         layout.addStretch(1)
 
@@ -313,6 +380,58 @@ class _TitleBar(QtWidgets.QWidget):
         close_button.setStyleSheet("background: transparent; border: none;")
         close_button.clicked.connect(module.request_close)
         layout.addWidget(close_button)
+
+        self._set_elided_texts()
+
+    def _set_elided_texts(self):
+        """Squeeze `_title_label`/`_tag_label` to fit the title bar's fixed
+        (narrow -- `ModuleWindow.setFixedWidth`) width by eliding with
+        `...` rather than letting Qt clip the paint at the label's edge.
+        Title always keeps as much space as it needs first; the tag gives
+        way (shrinks, then disappears) when there isn't room left for it.
+
+        Uses `ModuleWindow`'s own fixed width directly rather than this
+        title bar's live `self.width()`: the outer `QVBoxLayout` stretches
+        the title bar to exactly that width with zero margins, but
+        `self.width()` can read a stale or mid-layout-pass value here
+        (this runs from `__init__`, before the widget has ever been shown
+        or laid out for real) -- the module's width is a constant set
+        before this title bar is even constructed, so it's the reliable
+        source.
+        """
+        width = self._module.width()
+
+        # Budget: title bar width minus the dot, close button, stretch's
+        # minimum, and layout margins/spacing -- everything but the two
+        # text labels.
+        reserved = 8 + 16 + 6 * 3 + 6 + 4
+        available = max(0, width - reserved)
+
+        title_metrics = QtGui.QFontMetrics(self._title_label.font())
+        title_full_width = title_metrics.horizontalAdvance(self._title_text)
+        # `elidedText()` is given the full `available` budget, not the
+        # narrower `title_width` below -- passing a width that exactly
+        # equals the text's own measured width can still trigger a
+        # spurious one-character elision (font-metrics rounding), so a
+        # title that actually fits must be handed real slack to fit in.
+        elided_title = title_metrics.elidedText(
+            self._title_text, QtCore.Qt.ElideRight, available)
+        title_width = min(title_full_width, available)
+        self._title_label.setText(elided_title)
+        self._title_label.setFixedWidth(max(title_width, 1))
+
+        if self._tag_label is None:
+            return
+        tag_available = max(0, available - title_width)
+        if tag_available < 12:
+            # No usable room left -- hide rather than paint a
+            # single-character sliver.
+            self._tag_label.setVisible(False)
+            return
+        self._tag_label.setVisible(True)
+        tag_metrics = QtGui.QFontMetrics(self._tag_label.font())
+        self._tag_label.setText(tag_metrics.elidedText(
+            self._tag_text, QtCore.Qt.ElideRight, tag_available))
 
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
@@ -496,6 +615,12 @@ class _DrawerRow(QtWidgets.QLabel):
         self.type_key = type_key
         self._enabled = enabled
         self.setFont(theme.font(8))
+        # QLabel defaults to top-left alignment, not vertical centering --
+        # combined with the fixed height below, that left descenders
+        # ("y", "p") sitting right on (or past) the bottom edge. Centering
+        # vertically gives the font's ascent/descent equal headroom instead
+        # of assuming top alignment has room to spare.
+        self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         self.setFixedHeight(22)
         self.setContentsMargins(6, 0, 6, 0)
         if enabled:
