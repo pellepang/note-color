@@ -599,6 +599,8 @@ class Drawer(QtWidgets.QWidget):
     toggled = QtCore.Signal(bool)
 
     WIDTH = 178
+    #: Width of the collapsed strip -- just the toggle tab, no content.
+    COLLAPSED_WIDTH = 20
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -630,8 +632,25 @@ class Drawer(QtWidgets.QWidget):
 
         self._toggle_button = QtWidgets.QToolButton(self)
         self._toggle_button.setText("☰")
-        self._toggle_button.setFixedHeight(28)
-        self._toggle_button.setFixedWidth(20)
+        # No fixed width: a `QVBoxLayout` item without one stretches to
+        # fill the full cross-axis (here, horizontal) width the layout has
+        # -- which used to be exactly what a fixed width of 20 prevented.
+        # With the drawer expanded to its full 178px, that left a bare
+        # 158px-wide strip of the drawer's own raw background to the
+        # button's right (issue #160's "black band to the right of the
+        # icon, the width of the opened tab"); letting it stretch makes
+        # the button itself span the drawer's whole current width in both
+        # states, so there's no gap of raw background beside it to read as
+        # a stray band.
+        self._toggle_button.setMinimumHeight(28)
+        # `QToolButton`'s own default size policy is Fixed/Fixed, which is
+        # exactly what made a `QVBoxLayout` leave it at its bare sizeHint
+        # in both directions instead of stretching it to fill the layout's
+        # cross-axis width (or, once expanded/collapsed toggles the
+        # remaining stretch below, the leftover height) -- Expanding in
+        # both directions is what actually makes it track the drawer.
+        self._toggle_button.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
         self._toggle_button.setStyleSheet(
             f"QToolButton {{ background: {theme.rgba(theme.ink(theme.INK_2))};"
             f" border: 1px solid {theme.rgba(theme.RULE)}; color: {theme.rgba(theme.TEXT_FAINT)}; }}"
@@ -639,6 +658,7 @@ class Drawer(QtWidgets.QWidget):
             f" border-color: {theme.rgba(theme.ink(theme.COPPER))}; }}"
         )
         self._toggle_button.clicked.connect(self.toggle)
+        self._outer_layout = outer
         outer.addWidget(self._toggle_button)
         outer.addWidget(self._content, 1)
 
@@ -654,7 +674,7 @@ class Drawer(QtWidgets.QWidget):
     def set_expanded(self, expanded):
         self._expanded = expanded
         self._content.setVisible(expanded)
-        self.setFixedWidth(self.WIDTH if expanded else 18)
+        self.setFixedWidth(self.WIDTH if expanded else self.COLLAPSED_WIDTH)
         self.toggled.emit(expanded)
 
     @property
