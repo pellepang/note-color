@@ -142,4 +142,11 @@ def main_stylesheet():
         QPushButton:disabled {{ color: {rgba(TEXT_FAINT)}; border-color: {rgba(RULE)}; }}
         QToolTip {{ color: {rgba(TEXT)}; background: {rgba(CHROME_DEEP)};
                    border: 1px solid {rgba(RULE_STRONG)}; }}
+        QMenu {{ background: {rgba(PANEL)}; color: {rgba(TEXT)};
+                border: 1px solid {rgba(ink(COPPER))}; font-family: "{FONT_FAMILY}";
+                font-size: 9px; padding: 2px; }}
+        QMenu::item {{ padding: 4px 18px 4px 10px; }}
+        QMenu::item:selected {{ background: {rgba(ink(COPPER, 60))}; color: {rgba(TEXT)}; }}
+        QMenu::item:checked {{ color: {rgba(ink(AMBER))}; }}
+        QMenu::separator {{ height: 1px; background: {rgba(RULE)}; margin: 5px 6px; }}
     """

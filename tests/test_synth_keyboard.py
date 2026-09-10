@@ -289,7 +289,10 @@ def test_pad_row_boxes_never_marked_black(app):
 def test_key_box_row_height_grew_to_fit_the_stagger(app):
     assert sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER > sk.KeyBoxRow.BOX_H
     row = sk.KeyBoxRow()
-    assert row.height() == sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER
+    # Ticket #184: equal top/bottom margin so the black+white contour
+    # centers in the row instead of sitting flush top/bottom.
+    expected = sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
+    assert row.height() == expected
 
 
 def test_key_box_row_set_boxes_stores_mixed_black_white_without_raising(app):
@@ -384,19 +387,174 @@ def test_assignment_pill_wheel_cycles_the_row(app):
     assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
 
 
-def test_assignment_pill_chevrons_step_forward_and_backward(app):
+def test_assignment_pill_click_opens_row_popup(app):
+    # Ticket #184 traded the chevrons for click-to-open-popup; wheel-to-step
+    # (tested above) remains the fast path. `_open_row_popup` builds and
+    # execs a real QMenu, which we can't drive headlessly -- so this checks
+    # only that a click routes to it rather than doing nothing, via a stub.
     band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
     pill, _ = band._row_widgets["upper"]
+    opened = []
+    band._open_row_popup = lambda row_key: opened.append(row_key)  # patched pre-build closure target
+
+    pill.clicked.emit()
+
+    assert opened == ["upper"]
+
+
+def test_assign_row_jumps_straight_to_the_named_patch_and_records_recent(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
     assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
 
-    pill._right.click()  # right chevron = +1 = next
+    band._assign_row("upper", "Gamma")
+
+    assert band.assignments.name_for("upper", band.layout_state) == "Gamma"
+    assert band.assignments.recents[0] == "Gamma"
+
+
+# -- per-key override (ticket #184) ------------------------------------------
+
+def test_key_override_wins_over_row_default_for_note_preview(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    received = []
+    band.notePreviewRequested.connect(received.append)
+    letter = PIANO_LOWER_ROW[0]
+
+    band._assign_key("lower", letter, "Beta")
+    _press(band, letter)
+
+    assert received[0].name == "Beta"
+    boxes = band._boxes_for_row("lower")
+    box = next(b for b in boxes if b["letter"] == letter)
+    assert box["overridden"] is True
+    other = next(b for b in boxes if b["letter"] != letter)
+    assert other["overridden"] is False
+
+
+def test_key_override_ignored_when_name_not_in_kind_list(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha"], kit_zone_names={})
+    letter = PIANO_LOWER_ROW[0]
+
+    band._assign_key("lower", letter, "Nonexistent")
+
+    assert ("lower", letter) not in band.assignments.key_override
+
+
+# -- recents (ticket #184) ----------------------------------------------------
+
+def test_cycling_and_assigning_records_recents_most_recent_first(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    band._cycle_row("upper", 1)   # -> Beta
+    band._assign_row("upper", "Gamma")
+
+    assert band.assignments.recents[:2] == ["Gamma", "Beta"]
+
+
+def test_recents_rail_reflects_current_tabs_recents(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    band._assign_row("upper", "Beta")
+
+    labels = [w.text() for w in band.recents_rail.findChildren(sk._RecentChip)]
+    assert labels == ["Beta"]
+
+
+# -- per-layout-tab persistence (ticket #184) ---------------------------------
+
+def test_each_layout_tab_keeps_its_own_row_assignment():
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    band._cycle_row("upper", 1)  # dual tab: upper -> Beta
+
+    band.set_layout(sk.LAYOUT_HYBRID)
+    assert band.assignments.name_for("upper", band.layout_state) == "Alpha"  # fresh tab
+    band._cycle_row("upper", 2)  # hybrid tab: upper -> Gamma
+
+    band.set_layout(sk.LAYOUT_DUAL)
+    assert band.assignments.name_for("upper", band.layout_state) == "Beta"  # restored
+
+    band.set_layout(sk.LAYOUT_HYBRID)
+    assert band.assignments.name_for("upper", band.layout_state) == "Gamma"  # restored
+
+
+def test_snapshot_and_restore_assignments_round_trips_every_tab():
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    band._cycle_row("upper", 1)  # dual tab: upper -> Beta
+    band.set_layout(sk.LAYOUT_HYBRID)
+    band._assign_row("upper", "Beta")  # hybrid's upper is synth-kind too
+    snapshot = band.snapshot_assignments()
+
+    fresh = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    fresh.restore_assignments(snapshot)
+
+    assert fresh._assignments_by_layout[sk.LAYOUT_DUAL].name_for(
+        "upper", sk.KeyboardLayoutState()) == "Beta"
+    hybrid_state = sk.KeyboardLayoutState()
+    hybrid_state.layout = sk.LAYOUT_HYBRID
+    assert fresh._assignments_by_layout[sk.LAYOUT_HYBRID].name_for("upper", hybrid_state) == "Beta"
+
+
+# -- popup folders (ticket #184) ----------------------------------------------
+
+def test_folders_for_kind_groups_by_supplied_patch_folder():
+    band = sk.SynthKeyboardBand(
+        synth_names=["Fat Bass", "Glass Keys", "808 Sub"], kit_zone_names={},
+        patch_folders={"Fat Bass": "Saw", "808 Sub": "Saw", "Glass Keys": "Sine"})
+
+    folders = band._folders_for_kind("synth")
+
+    assert folders == {"Saw": ["Fat Bass", "808 Sub"], "Sine": ["Glass Keys"]}
+
+
+def test_folders_for_kind_falls_back_to_other_when_unmapped():
+    band = sk.SynthKeyboardBand(synth_names=["Mystery"], kit_zone_names={})
+    assert band._folders_for_kind("synth") == {sk.OTHER_FOLDER: ["Mystery"]}
+
+
+# -- drag-and-drop assignment (ticket #184) -----------------------------------
+
+class _FakeMimeData:
+    def __init__(self, text):
+        self._text = text
+
+    def hasText(self):
+        return True
+
+    def text(self):
+        return self._text
+
+
+class _FakeDropEvent:
+    def __init__(self, text, x=0.0):
+        self._mime = _FakeMimeData(text)
+        self._x = x
+
+    def mimeData(self):
+        return self._mime
+
+    def position(self):
+        return QtCore.QPointF(self._x, 0.0)
+
+    def acceptProposedAction(self):
+        pass
+
+
+def test_pill_drop_assigns_the_row(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    pill, _ = band._row_widgets["upper"]
+
+    pill.dropEvent(_FakeDropEvent("Beta"))
+
     assert band.assignments.name_for("upper", band.layout_state) == "Beta"
 
-    pill._left.click()  # left chevron = -1 = previous
-    assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
 
-    pill._left.click()  # wraps backward
-    assert band.assignments.name_for("upper", band.layout_state) == "Gamma"
+def test_key_box_drop_assigns_just_that_key(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    _, key_box_row = band._row_widgets["lower"]
+    letter = PIANO_LOWER_ROW[0]
+    box_x = 0.5 * sk.KeyBoxRow.BOX_W  # inside the first box
+
+    key_box_row.dropEvent(_FakeDropEvent("Beta", x=box_x))
+
+    assert band.assignments.key_override[("lower", letter)] == "Beta"
 
 
 def test_shift_m_emits_panic_not_note_preview(app):

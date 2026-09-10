@@ -329,20 +329,45 @@ def test_splitter_between_canvas_and_keyboard_band_is_resizable(app):
     assert abs(footer.height() - 250) <= 40
 
 
-def test_footer_minimum_height_matches_its_own_size_hint(app):
-    # Regression: a hardcoded 140px floor predated the piano-key stagger
-    # increasing `KeyBoxRow`'s height, and went stale -- dragging the
-    # splitter to that old minimum clipped the lower row's boxes against
-    # the status bar. The floor must track the footer's actual required
-    # height instead of a guessed constant.
+def test_footer_playable_minimum_is_smaller_than_its_full_size_hint(app):
+    # Ticket #184: the floor used to equal the footer's full natural
+    # height (no play in the splitter handle at all -- see the test this
+    # replaces, from ticket #157). The floor is now a genuinely smaller
+    # "playable minimum" -- room for the rows and tabs but not the
+    # recents rail -- so the handle actually has somewhere to go before
+    # hitting the collapse point tested below.
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
-    assert footer.minimumHeight() == footer.sizeHint().height()
+    assert 0 < footer.minimumHeight() < footer.sizeHint().height()
+    assert footer.maximumHeight() < 16777215  # not Qt's unbounded default
 
+
+def test_footer_collapses_fully_below_its_playable_minimum(app):
+    # Dragging (or, here, programmatically requesting) the footer down to
+    # less than its playable minimum must snap it fully shut rather than
+    # clamp it at the minimum -- ticket #184's "shrinks to a sensible
+    # playable minimum, then collapses entirely" requirement.
+    view, _controller, _patch = _make_view()
+    footer = view.keyboard_band.parentWidget()
     view.resize(900, 700)
     total = sum(view.splitter.sizes())
-    view.splitter.setSizes([total, 1])  # try to starve the footer pane
+
+    view.splitter.setSizes([total - 1, 1])  # far below the playable minimum
     QtWidgets.QApplication.processEvents()
+
+    assert footer.height() == 0
+
+
+def test_footer_tracks_a_size_at_or_above_its_playable_minimum(app):
+    view, _controller, _patch = _make_view()
+    footer = view.keyboard_band.parentWidget()
+    view.resize(900, 700)
+    total = sum(view.splitter.sizes())
+    requested = footer.minimumHeight() + 20
+
+    view.splitter.setSizes([total - requested, requested])
+    QtWidgets.QApplication.processEvents()
+
     assert footer.height() >= footer.minimumHeight()
 
 

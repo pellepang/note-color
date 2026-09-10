@@ -175,6 +175,61 @@ ENGINE_PILLS = ("synth", "sampler", "sf2")
 
 STATUS_TIMER_MS = 200
 
+#: Generous but not literally unbounded ceiling for the footer pane
+#: (ticket #184) -- big enough that dragging for more room never feels
+#: capped in ordinary use, without handing the whole window to the
+#: keyboard band.
+_FOOTER_MAX_HEIGHT = 640
+
+
+class _CollapsingSplitter(QtWidgets.QSplitter):
+    """A splitter whose `collapse_index` pane snaps fully shut once
+    dragged below its own playable minimum, instead of clamping there
+    (ticket #184's "shrinks to a playable minimum, then collapses
+    entirely" footer behaviour). Plain `QSplitter` only auto-collapses a
+    pane during interactive dragging past its `minimumHeight`/`Width`;
+    `setSizes()` itself just clamps to that minimum, so both the live
+    drag (`splitterMoved`) and a direct `setSizes()` call are routed
+    through the same snap rule here."""
+
+    def __init__(self, orientation, collapse_index, playable_min, parent=None):
+        super().__init__(orientation, parent)
+        self._collapse_index = collapse_index
+        self._playable_min = playable_min
+        self.setChildrenCollapsible(True)
+        self.splitterMoved.connect(self._on_moved)
+
+    def _on_moved(self, _pos, _index):
+        QtWidgets.QSplitter.setSizes(self, self._snap(self.sizes()))
+
+    def setSizes(self, sizes):
+        super().setSizes(self._snap(list(sizes)))
+
+    def _snap(self, sizes):
+        """Below the playable minimum, snap the collapse pane fully to 0
+        instead of clamping there. `QSplitter.setSizes()` (unlike
+        interactive dragging) always honours a pane's real `minimumSize`,
+        so actually reaching 0 means relaxing that constraint on the
+        widget itself while collapsed, and restoring it once the pane is
+        asked to be playable-sized again -- `minimumHeight`/`Width`
+        depending on orientation."""
+        idx = self._collapse_index
+        if not (0 <= idx < len(sizes)):
+            return sizes
+        if 0 < sizes[idx] < self._playable_min:
+            deficit = sizes[idx]
+            sizes[idx] = 0
+            other = 1 - idx if len(sizes) == 2 else idx
+            sizes[other] += deficit
+        widget = self.widget(idx)
+        if widget is not None:
+            floor = 0 if sizes[idx] == 0 else self._playable_min
+            if self.orientation() == QtCore.Qt.Vertical:
+                widget.setMinimumHeight(floor)
+            else:
+                widget.setMinimumWidth(floor)
+        return sizes
+
 
 def _rotation_for(spec, value):
     """Knob-hand angle (-135..+135 degrees) for `value` on `spec`'s range
@@ -270,6 +325,7 @@ class SynthView(QtWidgets.QMainWindow):
         row.addWidget(self.canvas, 1)
 
         footer = QtWidgets.QWidget(central)
+        footer.setStyleSheet(f"background: {theme.rgba(theme.CHROME)};")
         footer_layout = QtWidgets.QVBoxLayout(footer)
         footer_layout.setContentsMargins(0, 0, 0, 0)
         footer_layout.setSpacing(0)
@@ -281,18 +337,22 @@ class SynthView(QtWidgets.QMainWindow):
         self.keyboard_band.layoutChanged.connect(self._on_layout_changed)
         self.keyboard_band.panicRequested.connect(self._on_panic_clicked)
         footer_layout.addWidget(self.keyboard_band)
-        #: A drag handle between the canvas and the footer (issue: user
-        #: feedback on ticket #157) -- same shape as `studio.py`'s
-        #: bottom-pane splitter (see its `__init__`, around line 647).
-        #: The floor is the footer's own natural `sizeHint()` rather than a
-        #: hand-picked number: none of its content (two rows of fixed-height
-        #: key boxes plus the layout-tabs bar) can compress below that, so a
-        #: hardcoded constant just goes stale the next time a row's height
-        #: changes (as happened when the piano-key stagger grew `KeyBoxRow`
-        #: past an earlier guessed minimum, clipping the lower row).
-        footer.setMinimumHeight(footer.sizeHint().height())
 
-        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical, central)
+        #: A drag handle between the canvas and the footer (issue: user
+        #: feedback on ticket #157). Ticket #184: rather than a hard floor
+        #: at the footer's full natural height (which left no play in the
+        #: handle at all), the floor is now a genuinely smaller "playable
+        #: minimum" -- the footer's own height minus just the recents
+        #: rail's -- so the rail is the first thing squeezed out; dragging
+        #: past that playable minimum collapses the footer fully rather
+        #: than clipping its rows. The ceiling is generous but bounded
+        #: (`_FOOTER_MAX_HEIGHT`), not the unbounded default.
+        playable_min = max(0, footer.sizeHint().height()
+                            - self.keyboard_band.recents_rail.sizeHint().height())
+        footer.setMinimumHeight(playable_min)
+        footer.setMaximumHeight(_FOOTER_MAX_HEIGHT)
+
+        self.splitter = _CollapsingSplitter(QtCore.Qt.Vertical, 1, playable_min, central)
         self.splitter.addWidget(main_row)
         self.splitter.addWidget(footer)
         self.splitter.setStretchFactor(0, 1)
@@ -601,8 +661,7 @@ class SynthView(QtWidgets.QMainWindow):
         keyboard = {
             "layout": kb.layout_state.layout,
             "split": dict(kb.layout_state.split),
-            "custom_kinds": dict(kb.assignments.custom_kinds),
-            "index": dict(kb.assignments._index),
+            "assignments": kb.snapshot_assignments(),
             "base_octave": kb.base_octave,
         }
         return {"modules": modules, "keyboard": keyboard}
@@ -620,8 +679,7 @@ class SynthView(QtWidgets.QMainWindow):
         keyboard = snapshot["keyboard"]
         kb.layout_state.layout = keyboard["layout"]
         kb.layout_state.split = dict(keyboard["split"])
-        kb.assignments.custom_kinds = dict(keyboard["custom_kinds"])
-        kb.assignments._index = dict(keyboard["index"])
+        kb.restore_assignments(keyboard.get("assignments", {}))
         kb.base_octave = keyboard["base_octave"]
         kb._rebuild_structure()
         self._refresh_layout_tabs(kb.layout_state.layout)

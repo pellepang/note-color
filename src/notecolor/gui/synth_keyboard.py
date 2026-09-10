@@ -47,6 +47,13 @@ NotePreview = namedtuple("NotePreview", "pitch name channel velocity")
 #: constants elsewhere in this repo take for a keyboard with no analog input.
 DEFAULT_VELOCITY = 1.0
 
+#: How many names the recents rail/popup "Recent" section remembers, per
+#: layout tab (ticket #184) -- an assignment (row pill pick, per-key
+#: override, or a rail drag-drop), not a mere note preview, is what counts
+#: as "used": previewing a note by playing is noisy signal, deliberately
+#: reassigning a sound is not.
+RECENTS_LIMIT = 8
+
 # --------------------------------------------------------------------------
 # Layout state
 # --------------------------------------------------------------------------
@@ -155,6 +162,14 @@ class RowAssignments:
         #: hybrid's split (upper synth, lower pad) -- a reasonable "already
         #: playable" starting point rather than both rows on the same kind.
         self.custom_kinds = {"upper": "synth", "lower": "pad"}
+        #: Per-key override, ticket #184: `(row_key, letter) -> name`,
+        #: consulted ahead of the row default by `name_for_key()`. A key
+        #: with no entry here just plays whatever its row plays.
+        self.key_override = {}
+        #: Most-recently-assigned names, most recent first -- capped at
+        #: `RECENTS_LIMIT`. Own state per `RowAssignments` instance, which
+        #: (per `SynthKeyboardBand`) means one recents list per layout tab.
+        self.recents = []
 
     def names_for_kind(self, kind):
         return self.synth_names if kind == "synth" else self.kit_names
@@ -166,6 +181,14 @@ class RowAssignments:
             return None
         return names[self._index[row_key] % len(names)]
 
+    def name_for_key(self, row_key, letter, layout_state):
+        """The name `letter` on `row_key` actually plays: its own
+        per-key override if one was set, else the row's default."""
+        override = self.key_override.get((row_key, letter))
+        if override is not None:
+            return override
+        return self.name_for(row_key, layout_state)
+
     def cycle_row(self, row_key, layout_state, direction=1):
         """Steps `row_key`'s index within whichever list its current kind
         selects into, wrapping at both ends. Returns the new name, or None
@@ -175,12 +198,56 @@ class RowAssignments:
         if not names:
             return None
         self._index[row_key] = (self._index[row_key] + direction) % len(names)
-        return names[self._index[row_key]]
+        name = names[self._index[row_key]]
+        self.record_recent(name)
+        return name
+
+    def assign_row(self, row_key, layout_state, name):
+        """Jumps `row_key` straight to `name` -- what a popup pick makes,
+        as opposed to `cycle_row()`'s relative step. A no-op if `name`
+        isn't in the list its current kind selects into."""
+        kind = kind_for_row_key(layout_state.layout, row_key, self.custom_kinds)
+        names = self.names_for_kind(kind)
+        if name not in names:
+            return
+        self._index[row_key] = names.index(name)
+        self.record_recent(name)
+
+    def set_key_override(self, row_key, letter, name):
+        self.key_override[(row_key, letter)] = name
+        self.record_recent(name)
+
+    def clear_key_override(self, row_key, letter):
+        self.key_override.pop((row_key, letter), None)
+
+    def record_recent(self, name):
+        if not name:
+            return
+        if name in self.recents:
+            self.recents.remove(name)
+        self.recents.insert(0, name)
+        del self.recents[RECENTS_LIMIT:]
 
     def toggle_custom_kind(self, base_row):
         self.custom_kinds[base_row] = (
             "pad" if self.custom_kinds.get(base_row) == "synth" else "synth"
         )
+
+    # -- snapshot/restore: per-layout-tab persistence (ticket #184) --------
+
+    def snapshot(self):
+        return {
+            "index": dict(self._index),
+            "custom_kinds": dict(self.custom_kinds),
+            "key_override": dict(self.key_override),
+            "recents": list(self.recents),
+        }
+
+    def restore(self, data):
+        self._index = {**self._index, **data.get("index", {})}
+        self.custom_kinds = dict(data.get("custom_kinds", self.custom_kinds))
+        self.key_override = dict(data.get("key_override", {}))
+        self.recents = list(data.get("recents", []))
 
 
 # --------------------------------------------------------------------------
@@ -191,16 +258,26 @@ class RowAssignments:
 _patch_cache = None
 
 
+#: The popup picker's "folders" (ticket #184) group patches by data the
+#: patch already carries, never an invented tag -- a kit is grouped under
+#: one bucket (a kit has no field to split further on cheaply), a synth
+#: patch under its own `osc1.waveform`, which is real, already-saved data
+#: that meaningfully clusters "what does this sound roughly like".
+KIT_FOLDER = "Kits"
+OTHER_FOLDER = "Other"
+
+
 def discover_patches():
     """(sorted synth-patch names, {kit name: [Zone, ...] sorted by
-    low_key}) -- scans `patch_paths()` and loads each patch once. A patch
-    that fails to load is skipped, same degrade-don't-crash posture
-    `patch_format.load_patch()` itself already takes for a malformed
-    file."""
+    low_key}, {patch name: folder label}) -- scans `patch_paths()` and
+    loads each patch once. A patch that fails to load is skipped, same
+    degrade-don't-crash posture `patch_format.load_patch()` itself
+    already takes for a malformed file."""
     from notecolor.settings import patch_format
 
     synth_names = []
     kit_zones = {}
+    folders = {}
     for path in patch_format.patch_paths():
         try:
             patch = patch_format.load_patch(path)
@@ -209,9 +286,11 @@ def discover_patches():
         name = patch_format.patch_name_for_path(path)
         if patch.is_kit():
             kit_zones[name] = sorted(patch.zones, key=lambda z: z.low_key)
+            folders[name] = KIT_FOLDER
         else:
             synth_names.append(name)
-    return sorted(synth_names), kit_zones
+            folders[name] = patch.osc1.waveform.title() if patch.osc1.waveform else OTHER_FOLDER
+    return sorted(synth_names), kit_zones, folders
 
 
 def cached_discover_patches(force=False):
@@ -254,25 +333,45 @@ def _pad_lit_colour(sample_name):
 class KeyBoxRow(QtWidgets.QWidget):
     """A row of flat key boxes: physical key letter on top, note/sample
     name below, coloured only while the key is held (idle boxes carry no
-    colour -- the app's "saturation means pitch" rule)."""
+    colour -- the app's "saturation means pitch" rule).
+
+    Also the click/drop surface for per-key assignment (ticket #184): a
+    left click on a box asks to open the popup picker scoped to that one
+    key (`boxClicked`); a drag-and-drop from the recents rail asks to
+    assign that key directly (`boxDropped`), reusing `synth_workspace.
+    Canvas`'s plain-text-`QMimeData` drag pattern."""
 
     BOX_W = 34
     BOX_H = 38
     GAP = 3
     #: Vertical raise for a black-key box, in pixels -- enough to read as a
     #: deliberate piano-style stagger at `BOX_H`'s scale without looking
-    #: broken. Black keys sit at `y = 0` (top of the taller row); white/pad
-    #: keys sit staggered down by this many pixels.
+    #: broken. Black keys sit above center; white/pad keys sit staggered
+    #: down by this many pixels below them.
     STAGGER = 10
+    #: Equal top/bottom breathing room so the black+white contour sits
+    #: centered in the row instead of flush top (black) / flush bottom
+    #: (white) the way an unmargined stagger reads (ticket #184).
+    MARGIN = STAGGER // 2
+
+    #: Small marker for a per-key override, drawn top-right of the box --
+    #: the "amber dot" idea from the accepted prototype.
+    OVERRIDE_DOT = 4
+
+    boxClicked = QtCore.Signal(str)
+    boxDropped = QtCore.Signal(str, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._boxes = []
-        self.setFixedHeight(self.BOX_H + self.STAGGER)
+        self.setFixedHeight(self.BOX_H + self.STAGGER + 2 * self.MARGIN)
+        self.setAcceptDrops(True)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
 
     def set_boxes(self, boxes):
         """`boxes`: list of {"letter", "label", "color" (QColor or None),
-        "is_black" (bool, synth rows only -- pad rows omit/default False)}."""
+        "is_black" (bool, synth rows only -- pad rows omit/default False),
+        "overridden" (bool, optional -- draws the per-key marker dot)}."""
         self._boxes = boxes
         width = len(boxes) * (self.BOX_W + self.GAP) - self.GAP if boxes else 0
         self.setFixedWidth(max(0, width))
@@ -283,7 +382,7 @@ class KeyBoxRow(QtWidgets.QWidget):
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
         x = 0.0
         for box in self._boxes:
-            y = 0.0 if box.get("is_black") else float(self.STAGGER)
+            y = float(self.MARGIN) if box.get("is_black") else float(self.MARGIN + self.STAGGER)
             rect = QtCore.QRectF(x, y, self.BOX_W, self.BOX_H)
             colour = box.get("color")
             if colour is not None:
@@ -305,41 +404,76 @@ class KeyBoxRow(QtWidgets.QWidget):
             painter.drawText(QtCore.QRectF(x, y + 17, self.BOX_W, self.BOX_H - 17),
                              QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
                              box.get("label", ""))
+
+            if box.get("overridden"):
+                dot = QtCore.QRectF(x + self.BOX_W - self.OVERRIDE_DOT - 2, y + 2,
+                                    self.OVERRIDE_DOT, self.OVERRIDE_DOT)
+                painter.setPen(QtCore.Qt.NoPen)
+                painter.setBrush(theme.AMBER)
+                painter.drawEllipse(dot)
+                painter.setBrush(QtCore.Qt.NoBrush)
+
             x += self.BOX_W + self.GAP
+
+    # -- per-key click / drag-drop -----------------------------------------
+
+    def _box_index_at(self, x):
+        if not self._boxes:
+            return None
+        index = int(x // (self.BOX_W + self.GAP))
+        if 0 <= index < len(self._boxes):
+            return index
+        return None
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            index = self._box_index_at(event.position().x())
+            if index is not None:
+                self.boxClicked.emit(self._boxes[index]["letter"])
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        index = self._box_index_at(event.position().toPoint().x())
+        if index is not None:
+            self.boxDropped.emit(self._boxes[index]["letter"], event.mimeData().text())
+            event.acceptProposedAction()
 
 
 class AssignmentPill(QtWidgets.QWidget):
-    """`‹ Name ›`: two chevron buttons plus a name label. Wheel-to-step is
-    the primary interaction (matches the terminal synth's "swept by ear"
-    convention); the chevrons are the click-target parity the prototype's
-    own arrows offered."""
+    """The row's current patch/kit name, click-to-open. Wheel-to-step
+    remains the fast path (matches the terminal synth's "swept by ear"
+    convention); a left click opens the popup picker instead of the old
+    chevron-click-to-step -- ticket #184 traded the chevrons for that
+    popup, since the popup now also groups patches into folders and
+    surfaces recents, which a plain step can't."""
 
     stepRequested = QtCore.Signal(int)
+    clicked = QtCore.Signal()
+    dropped = QtCore.Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background: {theme.rgba(theme.PANEL)};")
+        self.setAcceptDrops(True)
+        self.setCursor(QtCore.Qt.PointingHandCursor)
         layout = QtWidgets.QHBoxLayout(self)
-        layout.setContentsMargins(4, 1, 4, 1)
-        layout.setSpacing(2)
-
-        self._left = QtWidgets.QToolButton(self)
-        self._left.setText("‹")
-        self._left.setAutoRaise(True)
-        self._left.clicked.connect(lambda: self.stepRequested.emit(-1))
-        layout.addWidget(self._left)
+        layout.setContentsMargins(6, 3, 6, 3)
 
         self._label = QtWidgets.QLabel("--", self)
         self._label.setFont(theme.font(8, bold=True))
         self._label.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT)};")
         self._label.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(self._label, 1)
-
-        self._right = QtWidgets.QToolButton(self)
-        self._right.setText("›")
-        self._right.setAutoRaise(True)
-        self._right.clicked.connect(lambda: self.stepRequested.emit(1))
-        layout.addWidget(self._right)
 
     def set_text(self, text):
         self._label.setText(text or "--")
@@ -348,6 +482,82 @@ class AssignmentPill(QtWidgets.QWidget):
         direction = 1 if event.angleDelta().y() > 0 else -1
         self.stepRequested.emit(direction)
         event.accept()
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        self.dropped.emit(event.mimeData().text())
+        event.acceptProposedAction()
+
+
+class _RecentChip(QtWidgets.QLabel):
+    """One draggable recents-rail chip -- the same `QDrag`/plain-text-
+    `QMimeData` pattern `synth_workspace._DrawerRow` established for
+    drawer-to-canvas dragging (issue #167/#175), reused here for
+    rail-to-key/row dragging rather than inventing a second one."""
+
+    def __init__(self, name, parent=None):
+        super().__init__(name, parent)
+        self.name = name
+        self.setFont(theme.font(7))
+        self.setContentsMargins(7, 3, 7, 3)
+        self.setStyleSheet(
+            f"background: {theme.rgba(theme.ink(theme.AMBER, 30))}; "
+            f"color: {theme.rgba(theme.ink(theme.AMBER))}; "
+            f"border: 1px solid {theme.rgba(theme.RULE_STRONG)};")
+        self.setCursor(QtCore.Qt.OpenHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() != QtCore.Qt.LeftButton:
+            return super().mousePressEvent(event)
+        drag = QtGui.QDrag(self)
+        mime = QtCore.QMimeData()
+        mime.setText(self.name)
+        drag.setMimeData(mime)
+        drag.setPixmap(self.grab())
+        drag.setHotSpot(event.position().toPoint())
+        drag.exec(QtCore.Qt.CopyAction)
+
+
+class RecentsRail(QtWidgets.QWidget):
+    """The full-footer-width strip of recently-assigned patches/kits above
+    the keyboard rows -- prototype round 2's "variant 2" (the pinned
+    rail), the direction the user signed off on. Pure drag source: a
+    chip dragged onto an `AssignmentPill` or a `KeyBoxRow` box assigns it
+    there via those widgets' own drop handling, same division of labour
+    `synth_workspace.Drawer`/`Canvas` already use."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet(f"background: {theme.rgba(theme.CHROME)};")
+        self._layout = QtWidgets.QHBoxLayout(self)
+        self._layout.setContentsMargins(6, 4, 6, 4)
+        self._layout.setSpacing(6)
+        self._label = QtWidgets.QLabel("RECENT", self)
+        self._label.setFont(theme.font(7))
+        self._label.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};")
+        self._layout.addWidget(self._label)
+        self._layout.addStretch(1)
+
+    def set_names(self, names):
+        while self._layout.count() > 1:
+            _delete_layout_item(self._layout.takeAt(1))
+        for name in names:
+            self._layout.insertWidget(self._layout.count() - 1, _RecentChip(name, self))
+        self.setVisible(bool(names))
 
 
 # --------------------------------------------------------------------------
@@ -409,13 +619,29 @@ class SynthKeyboardBand(QtWidgets.QWidget):
     #: `m`, which is a live note-preview key (LOWER row) via `_PIANO_KEYS`.
     panicRequested = QtCore.Signal()
 
-    def __init__(self, synth_names=None, kit_zone_names=None, base_octave=None, parent=None):
+    def __init__(self, synth_names=None, kit_zone_names=None, base_octave=None, parent=None,
+                 patch_folders=None):
         super().__init__(parent)
         if synth_names is None and kit_zone_names is None:
-            synth_names, kit_zone_names = cached_discover_patches()
+            synth_names, kit_zone_names, discovered_folders = cached_discover_patches()
+            if patch_folders is None:
+                patch_folders = discovered_folders
         self._kit_zones = dict(kit_zone_names or {})
+        #: name -> folder label for the popup picker (ticket #184). Left
+        #: unmapped names fall back to `OTHER_FOLDER`/`KIT_FOLDER` in
+        #: `_folder_for()` rather than raising, so a name that's real but
+        #: wasn't handed a folder (tests, mostly) still groups sanely.
+        self._patch_folders = dict(patch_folders or {})
         self.layout_state = KeyboardLayoutState()
-        self.assignments = RowAssignments(synth_names or [], sorted(self._kit_zones.keys()))
+        #: One independent `RowAssignments` per layout tab (ticket #184):
+        #: Dual/Hybrid/AllPads/Custom each keep their own row/key
+        #: assignments and recents, exactly like separate workspaces.
+        #: `self.assignments` always points at the active tab's instance.
+        self._assignments_by_layout = {
+            layout: RowAssignments(synth_names or [], sorted(self._kit_zones.keys()))
+            for layout in LAYOUT_ORDER
+        }
+        self.assignments = self._assignments_by_layout[self.layout_state.layout]
         self.base_octave = clamp_base_octave(
             config.SYNTH_BASE_OCTAVE if base_octave is None else base_octave)
 
@@ -435,6 +661,9 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         hint.setFont(theme.font(7))
         hint.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};")
         self._body.addWidget(hint)
+
+        self.recents_rail = RecentsRail(self)
+        self._body.addWidget(self.recents_rail)
 
         self._rows_layout = QtWidgets.QVBoxLayout()
         self._rows_layout.setSpacing(4)
@@ -459,33 +688,10 @@ class SynthKeyboardBand(QtWidgets.QWidget):
 
         self._refresh_boxes()
 
-    def _row_chip_label(self, base_row):
-        layout = self.layout_state.layout
-        if layout == LAYOUT_DUAL:
-            return "Synth B" if base_row == "upper" else "Synth A"
-        if layout == LAYOUT_HYBRID:
-            return "Synth" if base_row == "upper" else "Pads"
-        if layout == LAYOUT_ALLPADS:
-            return "Pads Hi" if base_row == "upper" else "Pads Lo"
-        # LAYOUT_CUSTOM
-        base_label = "Upper" if base_row == "upper" else "Lower"
-        if self.layout_state.split.get(base_row, False):
-            return f"{base_label} lo"
-        return base_label
-
     def _build_base_row(self, base_row):
         row_box = QtWidgets.QHBoxLayout()
         row_box.setSpacing(6)
         row_box.insertStretch(0, 1)
-
-        chip_label = QtWidgets.QLabel(self._row_chip_label(base_row).upper(), self)
-        chip_label.setFont(theme.font(7))
-        chip_label.setStyleSheet(
-            f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};"
-        )
-        chip_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
-        chip_label.setMinimumWidth(52)
-        row_box.addWidget(chip_label)
 
         if self.layout_state.layout == LAYOUT_CUSTOM:
             kind_button = QtWidgets.QToolButton(self)
@@ -524,7 +730,12 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             pill = AssignmentPill(self)
             pill.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
             pill.stepRequested.connect(lambda direction, rk=row_key: self._cycle_row(rk, direction))
+            pill.clicked.connect(lambda rk=row_key: self._open_row_popup(rk))
+            pill.dropped.connect(lambda name, rk=row_key: self._assign_row(rk, name))
             key_box_row = KeyBoxRow(self)
+            key_box_row.boxClicked.connect(lambda letter, rk=row_key: self._open_key_popup(rk, letter))
+            key_box_row.boxDropped.connect(
+                lambda letter, name, rk=row_key: self._assign_key(rk, letter, name))
             half_box.addWidget(pill)
             half_box.setAlignment(pill, QtCore.Qt.AlignLeft)
             half_box.addWidget(key_box_row)
@@ -540,6 +751,7 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         for row_key, (pill, key_box_row) in self._row_widgets.items():
             pill.set_text(self.assignments.name_for(row_key, self.layout_state))
             key_box_row.set_boxes(self._boxes_for_row(row_key))
+        self.recents_rail.set_names(self.assignments.recents)
 
     def _boxes_for_row(self, row_key):
         base_row = row_key[: -len(HALF_SUFFIX)] if row_key.endswith(HALF_SUFFIX) else row_key
@@ -552,27 +764,29 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             letters = full_letters
 
         kind = kind_for_row_key(self.layout_state.layout, row_key, self.assignments.custom_kinds)
-        name = self.assignments.name_for(row_key, self.layout_state)
-        zones = self._kit_zones.get(name) if kind == "pad" else None
 
         boxes = []
         for position, letter in enumerate(letters):
             lit = letter in self._held
+            overridden = (row_key, letter) in self.assignments.key_override
             if kind == "synth":
                 pitch_class, octave = pitch_for_key(letter, self.base_octave)
                 label = f"{NOTE_NAMES_FIFTHS[pitch_class]}{octave}"
                 colour = _synth_lit_colour(pitch_class) if lit else None
                 is_black = pitch_class in {1, 3, 6, 8, 10}
                 boxes.append({"letter": letter, "label": label, "color": colour,
-                              "is_black": is_black})
+                              "is_black": is_black, "overridden": overridden})
             else:
+                name = self.assignments.name_for_key(row_key, letter, self.layout_state)
+                zones = self._kit_zones.get(name)
                 if zones:
                     sample = zones[position % len(zones)].sample or "--"
                 else:
                     sample = "--"
                 label = sample
                 colour = _pad_lit_colour(sample) if (lit and zones) else None
-                boxes.append({"letter": letter, "label": label, "color": colour})
+                boxes.append({"letter": letter, "label": label, "color": colour,
+                              "overridden": overridden})
         return boxes
 
     # -- layout switching ---------------------------------------------------
@@ -585,13 +799,86 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         if layout == self.layout_state.layout:
             return
         self.layout_state.layout = layout
+        self.assignments = self._assignments_by_layout[layout]
         self._rebuild_structure()
         self.layoutChanged.emit(self.layout_state.layout)
+
+    def snapshot_assignments(self):
+        """Every layout tab's own `RowAssignments` state, for
+        `synth_view.py`'s per-patch workspace snapshot (ticket #184)."""
+        return {layout: ra.snapshot() for layout, ra in self._assignments_by_layout.items()}
+
+    def restore_assignments(self, data):
+        for layout, ra in self._assignments_by_layout.items():
+            if layout in data:
+                ra.restore(data[layout])
+        self.assignments = self._assignments_by_layout[self.layout_state.layout]
 
     # -- row assignment / custom controls ---------------------------------
 
     def _cycle_row(self, row_key, direction):
         self.assignments.cycle_row(row_key, self.layout_state, direction)
+        self._refresh_boxes()
+
+    def _folder_for(self, name, kind):
+        return self._patch_folders.get(name) or (KIT_FOLDER if kind == "pad" else OTHER_FOLDER)
+
+    def _folders_for_kind(self, kind):
+        """`{folder label: [name, ...]}`, in first-seen order, over
+        whichever list `kind` selects into -- the popup picker's
+        "folders" grouping (ticket #184)."""
+        folders = {}
+        for name in self.assignments.names_for_kind(kind):
+            folders.setdefault(self._folder_for(name, kind), []).append(name)
+        return folders
+
+    def _build_popup(self, kind, current_name):
+        menu = QtWidgets.QMenu(self)
+        recents = [n for n in self.assignments.recents if n in self.assignments.names_for_kind(kind)]
+        if recents:
+            menu.addSection("Recent")
+            for name in recents:
+                action = menu.addAction(name)
+                action.setCheckable(True)
+                action.setChecked(name == current_name)
+        for folder, names in self._folders_for_kind(kind).items():
+            menu.addSection(folder)
+            for name in names:
+                action = menu.addAction(name)
+                action.setCheckable(True)
+                action.setChecked(name == current_name)
+        return menu
+
+    def _open_row_popup(self, row_key):
+        kind = kind_for_row_key(self.layout_state.layout, row_key, self.assignments.custom_kinds)
+        if not self.assignments.names_for_kind(kind):
+            return
+        pill, _ = self._row_widgets[row_key]
+        current = self.assignments.name_for(row_key, self.layout_state)
+        menu = self._build_popup(kind, current)
+        action = menu.exec(pill.mapToGlobal(QtCore.QPoint(0, pill.height())))
+        if action is not None:
+            self._assign_row(row_key, action.text())
+
+    def _open_key_popup(self, row_key, letter):
+        kind = kind_for_row_key(self.layout_state.layout, row_key, self.assignments.custom_kinds)
+        if not self.assignments.names_for_kind(kind):
+            return
+        current = self.assignments.name_for_key(row_key, letter, self.layout_state)
+        menu = self._build_popup(kind, current)
+        action = menu.exec(QtGui.QCursor.pos())
+        if action is not None:
+            self._assign_key(row_key, letter, action.text())
+
+    def _assign_row(self, row_key, name):
+        self.assignments.assign_row(row_key, self.layout_state, name)
+        self._refresh_boxes()
+
+    def _assign_key(self, row_key, letter, name):
+        kind = kind_for_row_key(self.layout_state.layout, row_key, self.assignments.custom_kinds)
+        if name not in self.assignments.names_for_kind(kind):
+            return
+        self.assignments.set_key_override(row_key, letter, name)
         self._refresh_boxes()
 
     def _toggle_kind(self, base_row):
@@ -631,6 +918,7 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         if key == QtCore.Qt.Key_Tab:
             if not event.isAutoRepeat():
                 self.layout_state.cycle()
+                self.assignments = self._assignments_by_layout[self.layout_state.layout]
                 self._rebuild_structure()
                 self.layoutChanged.emit(self.layout_state.layout)
             event.accept()
@@ -665,7 +953,7 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             return super().keyPressEvent(event)
         row_key, position = located
         kind = kind_for_row_key(self.layout_state.layout, row_key, self.assignments.custom_kinds)
-        name = self.assignments.name_for(row_key, self.layout_state)
+        name = self.assignments.name_for_key(row_key, letter, self.layout_state)
 
         if kind == "synth":
             pitch_class, octave = pitch_for_key(letter, self.base_octave)
