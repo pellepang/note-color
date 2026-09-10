@@ -449,8 +449,19 @@ class _TitleBar(QtWidgets.QWidget):
 
         # Budget: title bar width minus the dot, close button, stretch's
         # minimum, and layout margins/spacing -- everything but the two
-        # text labels.
-        reserved = 8 + 16 + 6 * 3 + 6 + 4
+        # text labels. The layout is [dot, title, (tag,) stretch, close]
+        # with `spacing` between every consecutive pair -- 3 gaps normally,
+        # or 4 when the tag label is also present. This used to hardcode 3
+        # gaps unconditionally, so with a tag row it handed `elidedText()`
+        # one `spacing`'s worth (6px) more room than the real layout had
+        # left over -- the elided string it produced legitimately fit the
+        # (wrong, too-generous) budget, but the title bar then had to
+        # squeeze it into a rect 6px narrower than that, clipping it
+        # mid-glyph instead of at the "..." (issue #164).
+        margins = self.layout().contentsMargins()
+        spacing = self.layout().spacing()
+        gaps = 4 if self._tag_label is not None else 3
+        reserved = 8 + 16 + spacing * gaps + margins.left() + margins.right()
         available = max(0, width - reserved)
 
         title_metrics = QtGui.QFontMetrics(self._title_label.font())
