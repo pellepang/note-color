@@ -698,7 +698,17 @@ class _DrawerRow(QtWidgets.QLabel):
         # vertically gives the font's ascent/descent equal headroom instead
         # of assuming top alignment has room to spare.
         self.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
-        self.setFixedHeight(22)
+        # Height derived from the label's own font metrics plus fixed
+        # vertical padding, rather than a hardcoded "22" -- issue #168: on
+        # the system where this actually rendered, the font's real
+        # (ascent + descent + internal leading) height was taller than 22,
+        # so AlignVCenter had no slack to center into and the label's paint
+        # rect clipped the glyphs' tops and bottoms. Deriving the height
+        # from `QFontMetrics` keeps this correct for whatever font a given
+        # system substitutes, instead of only whatever font this was last
+        # measured against.
+        metrics = QtGui.QFontMetrics(self.font())
+        self.setFixedHeight(metrics.height() + 10)
         self.setContentsMargins(6, 0, 6, 0)
         if enabled:
             self.setStyleSheet(f"color: {theme.rgba(theme.TEXT)}; background: {theme.rgba(theme.PANEL)};")
