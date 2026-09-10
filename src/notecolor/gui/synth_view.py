@@ -213,6 +213,43 @@ class _FooterSurface(QtWidgets.QWidget):
             y += spacing
 
 
+class _DragHandle(QtWidgets.QSplitterHandle):
+    """The one handle in `_CollapsingSplitter`: computes the footer's new
+    size itself, straight from the mouse's own on-screen movement, and
+    hands it to `_CollapsingSplitter.setSizes()` -- it never calls
+    `super().mousePressEvent()`/`mouseMoveEvent()`, so Qt's own native
+    splitter-drag math (`QSplitterPrivate::moveSplitter()`) never runs at
+    all for this handle (see the class docstring below for why that
+    native path, alone or paired with `childrenCollapsible`, can't do
+    this job)."""
+
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self._drag_start_y = None
+        self._drag_start_sizes = None
+
+    def mousePressEvent(self, event):
+        if event.button() == QtCore.Qt.LeftButton:
+            self._drag_start_y = event.globalPosition().y()
+            self._drag_start_sizes = list(self.splitter().sizes())
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if self._drag_start_y is None or not (event.buttons() & QtCore.Qt.LeftButton):
+            return
+        dy = event.globalPosition().y() - self._drag_start_y
+        top, bottom = self._drag_start_sizes
+        # Dragging down grows the top pane (canvas) and shrinks the
+        # bottom one (footer); dragging up does the reverse.
+        self.splitter().setSizes([top + dy, bottom - dy])
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_start_y = None
+        self._drag_start_sizes = None
+        event.accept()
+
+
 class _CollapsingSplitter(QtWidgets.QSplitter):
     """A splitter whose `collapse_index` pane snaps fully shut once
     dragged below its own playable minimum, instead of clamping there
@@ -238,24 +275,40 @@ class _CollapsingSplitter(QtWidgets.QSplitter):
 
     A second attempt at the fix (still same follow-up pass) tried keeping
     the pane's real Qt `minimumHeight` at a constant `0` and letting
-    `_snap()` alone push its requested size down to `0`. That still
-    couldn't reach `0`: a widget with a *layout* effectively floors at
-    `max(explicit minimumSize(), the layout's own computed minimum)`,
-    and `QLayout` always derives its minimum from each child's
-    `minimumSizeHint()` regardless of what `setMinimumHeight()` says --
-    `KeyBoxRow.minimumSizeHint()` (itself a deliberate, real floor so
-    keys never shrink to unplayable size) propagates straight up through
-    `SynthKeyboardBand`'s layout to the footer, so `setSizes()` requests
-    below that floor were silently clamped back up to it -- the footer
-    never visibly moved at all below that point.
+    `_snap()` alone push its requested size down to `0`, still wired
+    through Qt's own `splitterMoved` signal + `setChildrenCollapsible
+    (False)`. That looked right and passed every test in this file
+    (all of which drive it through `setSizes()`), but ticket #185's
+    direct-`QSplitterPrivate::moveSplitter()` probing -- the exact call
+    Qt's own `QSplitterHandle.mouseMoveEvent()` makes on every real drag
+    -- showed it never actually holds up under a *real* interactive drag:
+    with `childrenCollapsible(False)`, Qt's own position-clamping refuses
+    to ever report a handle position past the pane's real
+    `minimumSizeHint()` floor in the first place, so `splitterMoved`
+    never fires with a below-floor value and `_snap()`'s collapse branch
+    was simply unreachable by mouse -- only `setSizes()` (i.e. only the
+    test suite) could ever trigger it. Flipping to
+    `childrenCollapsible(True)` instead does let a real drag cross that
+    floor and collapse the pane to 0 -- but Qt's native collapse leaves
+    no way back: once collapsed, further `moveSplitter()` calls asking
+    for a perfectly valid, well-above-floor size are silently ignored,
+    because Qt excludes an already-hidden pane's own geometry from its
+    position math -- a long-documented `QSplitter` footgun, not an
+    artifact of this codebase. Neither native setting alone gives a
+    drag that both collapses *and* reopens.
 
-    The fix that actually works with a *laid-out* pane, rather than
-    fighting Qt's floor: below the playable minimum, hide the pane
-    outright (`QSplitter` gives a hidden child 0 space on its own,
-    without needing its minimum size to be 0) instead of asking for a
-    literal 0-pixel size; above it, show it again and let sizing proceed
-    normally. `_snap()` is run identically for both interactive dragging
-    (`splitterMoved`) and a direct `setSizes()` call."""
+    The fix that actually works: don't hand position math to Qt's native
+    splitter-drag code at all. `_DragHandle` above computes the requested
+    footer size directly from the raw mouse delta and calls this class's
+    own `setSizes()` -- the same call path, and the same `_snap()`, that
+    already worked correctly (collapse *and* reopen, symmetric in both
+    directions) for the test suite's direct `setSizes()` calls. With
+    `childrenCollapsible(False)` (native collapse logic off entirely) and
+    `_DragHandle` bypassing `super().mouse*Event()` (native drag-position
+    logic never invoked), there is exactly one thing computing sizes and
+    exactly one thing deciding collapse, for both interactive dragging
+    and programmatic `setSizes()` -- the "no fight" ticket #185 asks
+    for."""
 
     def __init__(self, orientation, collapse_index, playable_min, parent=None):
         super().__init__(orientation, parent)
@@ -265,10 +318,9 @@ class _CollapsingSplitter(QtWidgets.QSplitter):
         #: read this rather than recomputing it.
         self.playable_min = playable_min
         self.setChildrenCollapsible(False)
-        self.splitterMoved.connect(self._on_moved)
 
-    def _on_moved(self, _pos, _index):
-        QtWidgets.QSplitter.setSizes(self, self._snap(self.sizes()))
+    def createHandle(self):
+        return _DragHandle(self.orientation(), self)
 
     def setSizes(self, sizes):
         super().setSizes(self._snap(list(sizes)))
@@ -277,6 +329,15 @@ class _CollapsingSplitter(QtWidgets.QSplitter):
         idx = self._collapse_index
         if not (0 <= idx < len(sizes)):
             return sizes
+        # Clamp first: `_DragHandle` computes sizes straight from raw
+        # mouse delta with no bound of its own, so a fast/far drag can
+        # request a negative or over-total size.
+        total = sum(sizes)
+        sizes = [max(0, min(total, s)) for s in sizes]
+        deficit = total - sum(sizes)
+        if deficit:
+            other = 1 - idx if len(sizes) == 2 else idx
+            sizes[other] = max(0, sizes[other] + deficit)
         collapsed = sizes[idx] < self.playable_min
         if collapsed and sizes[idx] != 0:
             deficit = sizes[idx]

@@ -20,7 +20,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 scipy_signal = pytest.importorskip("scipy.signal")
 
-from PySide6 import QtCore, QtWidgets  # noqa: E402
+from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from notecolor.settings import patch_format  # noqa: E402
 from notecolor.tui import synth_params  # noqa: E402
@@ -423,6 +423,85 @@ def test_footer_expands_back_out_of_a_collapsed_state(app):
 
     assert footer.isVisible() is True
     assert footer.height() >= view.splitter.playable_min - 15  # nested-layout rounding slack
+
+
+def _drag_handle(handle, start_global_y, dy_steps):
+    """Drives `_DragHandle`'s own mouse*Event() methods directly -- ticket
+    #185's follow-up to #184: the earlier `_CollapsingSplitter` only ever
+    got exercised through `setSizes()` in this file (every test above this
+    point), which passed even though a *real* interactive drag through
+    Qt's native `QSplitterHandle` machinery could never actually reach the
+    collapse branch at all (see `_CollapsingSplitter`'s docstring). Calling
+    the handle's own event handlers with real `QMouseEvent`s -- rather
+    than `setSizes()` -- is what actually exercises the interactive path
+    `_DragHandle` now owns."""
+    def mk(etype, y, button, buttons):
+        local = QtCore.QPointF(5, 5)
+        return QtGui.QMouseEvent(etype, local, local, QtCore.QPointF(0, y),
+                                  button, buttons, QtCore.Qt.NoModifier)
+
+    handle.mousePressEvent(
+        mk(QtCore.QEvent.MouseButtonPress, start_global_y, QtCore.Qt.LeftButton, QtCore.Qt.LeftButton))
+    QtWidgets.QApplication.processEvents()
+    y = start_global_y
+    for dy in dy_steps:
+        y += dy
+        handle.mouseMoveEvent(mk(QtCore.QEvent.MouseMove, y, QtCore.Qt.NoButton, QtCore.Qt.LeftButton))
+        QtWidgets.QApplication.processEvents()
+    handle.mouseReleaseEvent(
+        mk(QtCore.QEvent.MouseButtonRelease, y, QtCore.Qt.LeftButton, QtCore.Qt.NoButton))
+    QtWidgets.QApplication.processEvents()
+
+
+def test_real_interactive_drag_collapses_and_reopens_the_footer(app):
+    # Ticket #185: a genuine mouse drag through the handle's own event
+    # handlers (not `setSizes()`) must be able to shrink the footer,
+    # collapse it fully, and then reopen it again -- all in one
+    # exercise, since #184's fix only had `setSizes()`-driven coverage
+    # and turned out not to hold up under a real drag (see
+    # `_CollapsingSplitter`'s docstring for what a direct
+    # `QSplitterPrivate.moveSplitter()` probe found).
+    view, _controller, _patch = _make_view()
+    footer = view.keyboard_band.parentWidget()
+    view.resize(900, 900)
+    handle = view.splitter.handle(1)
+
+    # Drag far down: shrinks the footer, then collapses it fully once
+    # past the playable minimum.
+    _drag_handle(handle, 400, [100] * 8)
+    assert footer.height() == 0
+    assert footer.isVisible() is False
+
+    # A fresh drag session back up must reopen it and track the new
+    # size, not stay stuck collapsed (the native-Qt failure mode this
+    # class exists to avoid).
+    _drag_handle(handle, 900, [-100] * 8)
+    assert footer.isVisible() is True
+    assert footer.height() >= view.splitter.playable_min - 15
+
+
+def test_real_interactive_drag_tracks_smoothly_above_the_minimum(app):
+    # A drag that never crosses the playable minimum should track the
+    # mouse roughly 1:1 rather than jumping or refusing to move. The
+    # footer starts at exactly its playable minimum on a fresh view
+    # (ticket #184's floor == its own sizeHint), so grow it first with
+    # one drag before shrinking it partway back with a second -- neither
+    # step should cross the collapse threshold.
+    view, _controller, _patch = _make_view()
+    footer = view.keyboard_band.parentWidget()
+    view.resize(900, 900)
+    handle = view.splitter.handle(1)
+
+    _drag_handle(handle, 400, [-30] * 5)  # -150px: grow footer by ~150
+    grown = footer.height()
+    assert footer.isVisible() is True
+    assert grown > view.splitter.playable_min + 100
+
+    _drag_handle(handle, 250, [20] * 3)  # +60px: shrink footer by ~60, still above the floor
+
+    assert footer.isVisible() is True
+    assert footer.height() < grown
+    assert abs(footer.height() - (grown - 60)) <= 15
 
 
 def test_per_patch_workspace_is_restored_on_switching_back(app):
