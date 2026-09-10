@@ -562,6 +562,103 @@ def test_key_override_ignored_when_name_not_in_kind_list(app):
     assert ("lower", letter) not in band.assignments.key_override
 
 
+def test_key_box_click_opens_the_same_popup_scoped_to_that_key(app):
+    # Ticket #188: a left click on an individual key box opens the exact
+    # same folder-grouped popup picker #187 fixed for the row pill, but
+    # scoped to overriding just that one key rather than the whole row.
+    # `.popup()` (not `.exec()`) is what makes this drivable at all -- see
+    # `_show_popup`'s docstring and #187's comment on this same repo class.
+    band = sk.SynthKeyboardBand(
+        synth_names=["Fat Bass", "Glass Keys", "808 Sub"], kit_zone_names={},
+        patch_folders={"Fat Bass": "Saw", "808 Sub": "Saw", "Glass Keys": "Sine"})
+    _, key_box_row = band._row_widgets["lower"]
+    letter = PIANO_LOWER_ROW[2]
+
+    key_box_row.boxClicked.emit(letter)
+
+    menu = band._active_popup
+    assert menu is not None
+    assert menu.isVisible()
+    actions = menu.actions()
+    headers = [a.defaultWidget().text() for a in actions if isinstance(a, QtWidgets.QWidgetAction)]
+    assert headers == ["SAW", "SINE"]
+    item_texts = [a.text() for a in actions
+                  if not isinstance(a, QtWidgets.QWidgetAction) and not a.isSeparator()]
+    assert item_texts == ["Fat Bass", "808 Sub", "Glass Keys"]
+    # Scoped to the row's default (no override set yet), same as the row
+    # popup's own "current" checkmark convention.
+    checked = next(a.text() for a in actions
+                   if not isinstance(a, QtWidgets.QWidgetAction) and a.isCheckable() and a.isChecked())
+    assert checked == "Fat Bass"
+    menu.close()
+
+
+def test_picking_a_key_popup_action_sets_only_that_key_override(app):
+    band = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    _, key_box_row = band._row_widgets["lower"]
+    letter = PIANO_LOWER_ROW[2]
+    other_letter = PIANO_LOWER_ROW[3]
+
+    key_box_row.boxClicked.emit(letter)
+    menu = band._active_popup
+    beta_action = next(a for a in menu.actions() if a.text() == "Beta")
+    menu.triggered.emit(beta_action)
+
+    assert band.assignments.key_override[("lower", letter)] == "Beta"
+    assert ("lower", other_letter) not in band.assignments.key_override
+    # Row default is untouched -- only the one key was overridden.
+    assert band.assignments.name_for("lower", band.layout_state) == "Alpha"
+
+    boxes = band._boxes_for_row("lower")
+    overridden_box = next(b for b in boxes if b["letter"] == letter)
+    plain_box = next(b for b in boxes if b["letter"] == other_letter)
+    assert overridden_box["overridden"] is True
+    assert plain_box["overridden"] is False
+
+
+def test_key_box_paints_a_visible_override_marker_dot(app):
+    # Real-pixel regression guard (companion to the pill's own
+    # WA_StyledBackground pixel test): an overridden key box's top-right
+    # corner should actually render the amber marker dot, and a plain
+    # neighbouring box's same corner should not.
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    band.resize(520, 260)
+    band.show()
+    QtWidgets.QApplication.processEvents()
+    _, key_box_row = band._row_widgets["lower"]
+    letter = PIANO_LOWER_ROW[2]
+    other_letter = PIANO_LOWER_ROW[3]
+
+    band._assign_key("lower", letter, "Beta")
+    QtWidgets.QApplication.processEvents()
+
+    box_side, gap, stagger, margin, x_offset, y_offset = key_box_row._geometry()
+    boxes = band._boxes_for_row("lower")
+
+    def corner_pixel(target_letter):
+        index = next(i for i, b in enumerate(boxes) if b["letter"] == target_letter)
+        box = boxes[index]
+        x = x_offset + index * (box_side + gap)
+        y = y_offset + (margin if box.get("is_black") else margin + stagger)
+        img = key_box_row.grab().toImage()
+        return img.pixelColor(int(x + box_side - 3), int(y + 3))
+
+    from notecolor.gui import theme
+    overridden_corner = corner_pixel(letter)
+    plain_corner = corner_pixel(other_letter)
+
+    amber = QtGui.QColor(theme.AMBER)
+    assert abs(overridden_corner.red() - amber.red()) <= 12
+    assert abs(overridden_corner.green() - amber.green()) <= 12
+    assert abs(overridden_corner.blue() - amber.blue()) <= 12
+    # The plain box's same corner must not read as amber.
+    assert not (abs(plain_corner.red() - amber.red()) <= 12
+                and abs(plain_corner.green() - amber.green()) <= 12
+                and abs(plain_corner.blue() - amber.blue()) <= 12)
+    band.close()
+
+
 # -- recents (ticket #184) ----------------------------------------------------
 
 def test_cycling_and_assigning_records_recents_most_recent_first(app):
