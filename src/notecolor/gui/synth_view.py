@@ -310,11 +310,11 @@ class SynthView(QtWidgets.QMainWindow):
         clap_pill.setStyleSheet(f"color: {theme.rgba(theme.TEXT_FAINT)}; background: {theme.rgba(theme.PANEL)};")
         layout.addWidget(clap_pill)
 
-        load_button = QtWidgets.QPushButton("Load", bar)
+        load_button = QtWidgets.QPushButton("⇩ Load", bar)
         load_button.clicked.connect(self._open_load_dialog)
         layout.addWidget(load_button)
 
-        save_button = QtWidgets.QPushButton("Save As…", bar)
+        save_button = QtWidgets.QPushButton("Save As", bar)
         save_button.clicked.connect(self._open_save_dialog)
         layout.addWidget(save_button)
 
@@ -717,6 +717,11 @@ class SynthView(QtWidgets.QMainWindow):
         self.controller.toggle_play()
 
     def _on_panic_clicked(self, _checked=False):
+        # Shared by both entry points: the Panic button connects here
+        # directly, and the keyboard band's Shift+M shortcut connects its
+        # panicRequested signal here too -- so releasing every held key
+        # before silencing audio covers both without duplicating the fix.
+        self.keyboard_band._release_all_held()
         self.controller.panic()
 
     # -- status bar ----------------------------------------------------------

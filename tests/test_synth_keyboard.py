@@ -130,6 +130,43 @@ def test_custom_split_creates_independent_left_right_assignment():
     assert assignments.name_for("upper", state) == "Beta"
 
 
+def _row_box(band, base_row):
+    """The `QHBoxLayout` `_build_base_row` built for `base_row`, found by
+    position in `band._rows_layout` (upper added first, then lower --
+    see `_rebuild_structure`)."""
+    index = 0 if base_row == "upper" else 1
+    return band._rows_layout.itemAt(index).layout()
+
+
+def _count_dividers(row_box):
+    count = 0
+    for i in range(row_box.count()):
+        widget = row_box.itemAt(i).widget()
+        if isinstance(widget, QtWidgets.QFrame) and widget.frameShape() == QtWidgets.QFrame.VLine:
+            count += 1
+    return count
+
+
+def test_unsplit_custom_row_has_no_divider(app):
+    band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
+    band.layout_state.layout = sk.LAYOUT_CUSTOM
+    band._rebuild_structure()
+
+    assert _count_dividers(_row_box(band, "upper")) == 0
+    assert _count_dividers(_row_box(band, "lower")) == 0
+
+
+def test_split_custom_row_has_exactly_one_divider(app):
+    band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
+    band.layout_state.layout = sk.LAYOUT_CUSTOM
+    band.layout_state.toggle_split("upper")
+    band._rebuild_structure()
+
+    assert _count_dividers(_row_box(band, "upper")) == 1
+    # The untouched (unsplit) lower row still has none.
+    assert _count_dividers(_row_box(band, "lower")) == 0
+
+
 # -- SynthKeyboardBand: live key handling ------------------------------------
 
 def test_synth_row_key_press_emits_correct_pitch_and_patch(app):
@@ -223,6 +260,12 @@ def test_tab_cycles_layout(app):
     assert band.layout_state.layout == sk.LAYOUT_DUAL
     band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Tab))
     assert band.layout_state.layout == sk.LAYOUT_HYBRID
+    band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Tab))
+    assert band.layout_state.layout == sk.LAYOUT_ALLPADS
+    band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Tab))
+    assert band.layout_state.layout == sk.LAYOUT_CUSTOM
+    band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Tab))
+    assert band.layout_state.layout == sk.LAYOUT_DUAL
 
 
 def test_up_down_shift_base_octave_within_bounds(app):
@@ -240,6 +283,50 @@ def test_up_down_shift_base_octave_within_bounds(app):
                                 base_octave=config.MIN_OCTAVE)
     band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Up))
     assert band.base_octave == config.MIN_OCTAVE + 1
+
+
+# -- AssignmentPill: wheel/chevron -> real row cycling ----------------------
+
+class _FakeWheel:
+    """Stands in for a `QWheelEvent`: `AssignmentPill.wheelEvent()` only
+    reads `angleDelta().y()` and calls `.accept()` (same shape as
+    `test_synth_workspace.py`'s own `_FakeWheel` for `Knob.wheelEvent()`)."""
+
+    def __init__(self, dy):
+        self._dy = dy
+
+    def angleDelta(self):
+        return QtCore.QPoint(0, self._dy)
+
+    def accept(self):
+        pass
+
+
+def test_assignment_pill_wheel_cycles_the_row(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    pill, _ = band._row_widgets["upper"]
+    assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
+
+    pill.wheelEvent(_FakeWheel(120))  # positive angleDelta.y() -> step forward
+    assert band.assignments.name_for("upper", band.layout_state) == "Beta"
+
+    pill.wheelEvent(_FakeWheel(-120))  # negative -> step back
+    assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
+
+
+def test_assignment_pill_chevrons_step_forward_and_backward(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    pill, _ = band._row_widgets["upper"]
+    assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
+
+    pill._right.click()  # right chevron = +1 = next
+    assert band.assignments.name_for("upper", band.layout_state) == "Beta"
+
+    pill._left.click()  # left chevron = -1 = previous
+    assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
+
+    pill._left.click()  # wraps backward
+    assert band.assignments.name_for("upper", band.layout_state) == "Gamma"
 
 
 def test_shift_m_emits_panic_not_note_preview(app):

@@ -168,6 +168,24 @@ def test_current_patch_is_registered_into_the_engines_patches_map(app):
     assert sound_engine.engine.patches[patch.name] is patch
 
 
+def test_knob_wheel_edit_is_reflected_in_the_engines_live_patch(app):
+    sound_engine = StubSoundEngine()
+    view, _controller, patch = _make_view(sound_engine=sound_engine)
+    window = next(w for w in view.canvas.windows() if w.type_key == "filter")
+    specs = view._specs_for_type("filter")
+    index = next(i for i, s in enumerate(specs) if s.attr == "cutoff")
+    spec = specs[index]
+    knob = window.knobs()[index]
+
+    before = patch.filter.cutoff
+    expected = synth_params.step_value(spec, before, 1, coarse=False)
+    knob.last_shift = False
+    knob.wheelStepped.emit(1)
+
+    assert sound_engine.engine.patches[patch.name].filter.cutoff == expected
+    assert sound_engine.engine.patches[patch.name] is patch
+
+
 # --- keyboard preview / release -----------------------------------------
 
 
@@ -236,6 +254,50 @@ def test_keyboard_band_panic_shortcut_calls_controllers_panic(app):
     view.keyboard_band.panicRequested.emit()
     assert controller.panicked is True
     assert sound_engine.all_notes_off_called is True
+
+
+def test_panic_button_releases_held_keys_and_records_note_off():
+    # Regression: holding a note key when Panic fires used to silence
+    # audio (controller.panic()) without clearing SynthKeyboardBand._held,
+    # leaving the key box "lit" and skipping record_note_off for any note
+    # in progress. Panic must release every held key the same way a real
+    # keyReleaseEvent would, for both the button and the Shift+M shortcut.
+    sound_engine = StubSoundEngine()
+    view, controller, patch = _make_view(sound_engine=sound_engine)
+    view.keyboard_band.assignments = sk.RowAssignments([patch.name], [])
+    view.keyboard_band._refresh_boxes()
+
+    letter = PIANO_LOWER_ROW[0]
+    view.keyboard_band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key(ord(letter.upper()))))
+    assert letter in view.keyboard_band._held
+
+    view._on_panic_clicked()
+
+    assert view.keyboard_band._held == {}
+    assert controller.panicked is True
+    assert sound_engine.all_notes_off_called is True
+    expected_pitch = midi_pitch(*pitch_for_key(letter, view.keyboard_band.base_octave))
+    assert controller.recorded_off == [expected_pitch]
+
+
+def test_shift_m_shortcut_releases_held_keys_and_records_note_off():
+    # Same regression as above, via the Shift+M path (panicRequested ->
+    # SynthView._on_panic_clicked, which both entry points share).
+    sound_engine = StubSoundEngine()
+    view, controller, patch = _make_view(sound_engine=sound_engine)
+    view.keyboard_band.assignments = sk.RowAssignments([patch.name], [])
+    view.keyboard_band._refresh_boxes()
+
+    letter = PIANO_LOWER_ROW[0]
+    view.keyboard_band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key(ord(letter.upper()))))
+    assert letter in view.keyboard_band._held
+
+    view.keyboard_band.panicRequested.emit()
+
+    assert view.keyboard_band._held == {}
+    assert controller.panicked is True
+    expected_pitch = midi_pitch(*pitch_for_key(letter, view.keyboard_band.base_octave))
+    assert controller.recorded_off == [expected_pitch]
 
 
 # --- per-patch workspace state -------------------------------------------

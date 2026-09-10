@@ -146,6 +146,16 @@ def test_drawer_contents_match_effects_registry(app):
     assert len(keys) == len(core_keys) + len(effects_module.EFFECT_TYPES) + 1
 
 
+def test_drawer_has_instruments_group_label_before_clap_row(app):
+    drawer = sw.Drawer()
+    children = drawer.findChildren(QtWidgets.QWidget)
+    labels = [w for w in children if isinstance(w, QtWidgets.QLabel) and w.text() == "Instruments"]
+    assert len(labels) == 1
+
+    clap_row = next(r for r in drawer.findChildren(sw._DrawerRow) if r.type_key == sw.CLAP_TYPE_KEY)
+    assert children.index(labels[0]) < children.index(clap_row)
+
+
 def test_drawer_toggle_collapses(app):
     drawer = sw.Drawer()
     assert drawer.expanded is True

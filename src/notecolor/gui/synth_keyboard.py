@@ -488,6 +488,15 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             row_keys.append(base_row + HALF_SUFFIX)
 
         for row_key in row_keys:
+            if len(row_keys) == 2 and row_key == row_keys[1]:
+                row_box.addSpacing(2)
+                divider = QtWidgets.QFrame(self)
+                divider.setFrameShape(QtWidgets.QFrame.VLine)
+                divider.setFixedWidth(1)
+                divider.setStyleSheet(f"background: {theme.rgba(theme.RULE)}; border: none;")
+                row_box.addWidget(divider)
+                row_box.addSpacing(2)
+
             half_box = QtWidgets.QVBoxLayout()
             half_box.setSpacing(2)
             pill = AssignmentPill(self)
@@ -652,6 +661,20 @@ class SynthKeyboardBand(QtWidgets.QWidget):
 
         self._refresh_boxes()
         event.accept()
+
+    def _release_all_held(self):
+        """Release every currently-held key as if each had been physically
+        released -- used by panic (both the Shift+M shortcut and the Panic
+        button, see `synth_view.SynthView._on_panic_clicked`) so silencing
+        audio also clears the visual "lit" state and, for a note in
+        progress, lets `noteReleased` reach `record_note_off` the same way
+        a real release does. Mirrors `keyReleaseEvent`'s per-key logic;
+        iterates over a copy of the keys since `noteReleased` handlers may
+        read `_held` (see `SynthView._infer_new_letter`)."""
+        for letter in list(self._held.keys()):
+            del self._held[letter]
+            self.noteReleased.emit(letter)
+        self._refresh_boxes()
 
     def keyReleaseEvent(self, event):
         if event.isAutoRepeat():

@@ -123,7 +123,7 @@ class Knob(QtWidgets.QWidget):
         angle_rad = math.radians(self._rotation - 90)
         hand_end = QtCore.QPointF(centre.x() + radius * 0.8 * math.cos(angle_rad),
                                   centre.y() + radius * 0.8 * math.sin(angle_rad))
-        p.setPen(QtGui.QPen(theme.ink(theme.COPPER), 2))
+        p.setPen(QtGui.QPen(theme.ink(theme.AMBER), 2))
         p.drawLine(centre, hand_end)
 
         p.setPen(theme.TEXT_DIM)
@@ -422,7 +422,7 @@ class Drawer(QtWidgets.QWidget):
     #: resize a splitter) without polling `isVisible()`.
     toggled = QtCore.Signal(bool)
 
-    WIDTH = 168
+    WIDTH = 178
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -443,6 +443,7 @@ class Drawer(QtWidgets.QWidget):
         for type_key, title in _effect_drawer_entries():
             layout.addWidget(_DrawerRow(type_key, title))
 
+        layout.addWidget(self._group_label("Instruments"))
         clap_row = _DrawerRow(CLAP_TYPE_KEY, "CLAP Plugin…", enabled=False)
         layout.addWidget(clap_row)
         layout.addStretch(1)
