@@ -261,7 +261,6 @@ class ModuleWindow(QtWidgets.QWidget):
 
         self._knobs = []
         self.set_knobs(knob_specs)
-        self.adjustSize()
 
     # -- content ------------------------------------------------------------
 
@@ -281,9 +280,33 @@ class ModuleWindow(QtWidgets.QWidget):
                 knob.wheelStepped.connect(on_wheel)
             self._flow.addWidget(knob)
             self._knobs.append(knob)
+        self._sync_content_height()
 
     def knobs(self):
         return list(self._knobs)
+
+    def _sync_content_height(self):
+        """Pin `_body`'s height to exactly what `_FlowLayout` needs at this
+        window's real (fixed) width, then resize the window to title bar +
+        that height (issue #163).
+
+        `adjustSize()`'s automatic height-for-width negotiation doesn't
+        work here: threading a height-for-width layout (`_FlowLayout`)
+        through a plain `QWidget` (`_body`) and then a `QVBoxLayout`
+        computes the *unconstrained* sizeHint's width first (the narrowest
+        the flow could wrap to, which packs far fewer knobs per row) and
+        reserves height for wrapping at *that* width, then only lays the
+        knobs out for real at the window's actual (wider) fixed width --
+        so the window ends up sized for a narrow-and-tall wrap it never
+        actually uses, leaving dead space below the last real knob row.
+        Asking the flow layout directly for `heightForWidth()` at the
+        width the window will really have sidesteps that negotiation
+        entirely.
+        """
+        width = self.width()
+        body_height = self._flow.heightForWidth(width)
+        self._body.setFixedHeight(body_height)
+        self.setFixedHeight(self.TITLE_H + body_height)
 
     # -- focus state ----------------------------------------------------
 
