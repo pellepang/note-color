@@ -440,9 +440,7 @@ def test_assignment_pill_wheel_cycles_the_row(app):
 
 def test_assignment_pill_click_opens_row_popup(app):
     # Ticket #184 traded the chevrons for click-to-open-popup; wheel-to-step
-    # (tested above) remains the fast path. `_open_row_popup` builds and
-    # execs a real QMenu, which we can't drive headlessly -- so this checks
-    # only that a click routes to it rather than doing nothing, via a stub.
+    # (tested above) remains the fast path.
     band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
     pill, _ = band._row_widgets["upper"]
     opened = []
@@ -451,6 +449,79 @@ def test_assignment_pill_click_opens_row_popup(app):
     pill.clicked.emit()
 
     assert opened == ["upper"]
+
+
+def test_assignment_pill_click_opens_a_real_visible_popup_with_folders(app):
+    # Ticket #187: #184's two prior passes both shipped a pill that opened
+    # nothing verifiable. `_open_row_popup` now uses `QMenu.popup()`
+    # (non-blocking) rather than `.exec()` (which runs its own nested event
+    # loop and blocks the caller until dismissed, making it undrivable
+    # here) specifically so this can be checked directly instead of via a
+    # stubbed-out `_open_row_popup`.
+    band = sk.SynthKeyboardBand(
+        synth_names=["Fat Bass", "Glass Keys", "808 Sub"], kit_zone_names={},
+        patch_folders={"Fat Bass": "Saw", "808 Sub": "Saw", "Glass Keys": "Sine"})
+    pill, _ = band._row_widgets["upper"]
+
+    pill.clicked.emit()
+
+    menu = band._active_popup
+    assert menu is not None
+    assert menu.isVisible()
+    actions = menu.actions()
+    # Folder headers are `QWidgetAction`s wrapping a plain `QLabel` (not
+    # `addSection()`) -- see `_add_popup_header`'s docstring for why a
+    # titled separator's text silently stopped rendering once this menu's
+    # QSS was applied, and this is what that regression check verifies:
+    # each header's actual label widget carries the folder name as real,
+    # visible text.
+    headers = [a.defaultWidget().text() for a in actions if isinstance(a, QtWidgets.QWidgetAction)]
+    assert headers == ["SAW", "SINE"]  # folder grouping from real patch_folders data
+    for a in actions:
+        if isinstance(a, QtWidgets.QWidgetAction):
+            assert a.defaultWidget().isVisible()
+    item_texts = [a.text() for a in actions
+                  if not isinstance(a, QtWidgets.QWidgetAction) and not a.isSeparator()]
+    assert item_texts == ["Fat Bass", "808 Sub", "Glass Keys"]
+    menu.close()
+
+
+def test_picking_a_popup_action_assigns_the_row(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    pill, _ = band._row_widgets["upper"]
+
+    pill.clicked.emit()
+    menu = band._active_popup
+    beta_action = next(a for a in menu.actions() if a.text() == "Beta")
+    menu.triggered.emit(beta_action)
+
+    assert band.assignments.name_for("upper", band.layout_state) == "Beta"
+
+
+def test_assignment_pill_paints_a_visible_panel_background(app):
+    # Root cause of #184's invisible pill: a plain QWidget subclass with
+    # only setStyleSheet("background: ...") never actually paints that
+    # background unless WA_StyledBackground is set -- Qt's stylesheet
+    # engine skips the fill entirely for a bare QWidget otherwise. Render
+    # the pill and confirm its fill colour comes through onscreen (a pixel
+    # inside its bounds, away from the centered label text, should match
+    # theme.PANEL rather than the parent's own background).
+    band = sk.SynthKeyboardBand(synth_names=["Alpha"], kit_zone_names={})
+    band.resize(300, 200)
+    band.show()
+    QtWidgets.QApplication.processEvents()
+    pill, _ = band._row_widgets["upper"]
+
+    assert pill.testAttribute(QtCore.Qt.WA_StyledBackground)
+
+    img = pill.grab().toImage()
+    corner = img.pixelColor(1, 1)  # top-left corner, off the centered label
+    from notecolor.gui import theme
+    expected = theme.PANEL
+    assert abs(corner.red() - expected.red()) <= 2
+    assert abs(corner.green() - expected.green()) <= 2
+    assert abs(corner.blue() - expected.blue()) <= 2
+    band.close()
 
 
 def test_assign_row_jumps_straight_to_the_named_patch_and_records_recent(app):

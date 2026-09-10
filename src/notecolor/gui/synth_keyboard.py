@@ -510,22 +510,53 @@ class AssignmentPill(QtWidgets.QWidget):
     clicked = QtCore.Signal()
     dropped = QtCore.Signal(str)
 
+    #: Matches the accepted prototype's `.pill{width:66px}` -- fixed rather
+    #: than text-driven, so every row's pill lines up regardless of how long
+    #: the assigned patch/kit name is (long names elide in `set_text()`
+    #: instead of stretching the pill).
+    WIDTH = 66
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(f"background: {theme.rgba(theme.PANEL)};")
+        # Required for a plain QWidget subclass to actually paint the
+        # background/border set via setStyleSheet() below -- without this,
+        # Qt never applies a bare QWidget's stylesheet background at all,
+        # which is why this pill rendered as invisible (just floating label
+        # text over the footer's own chrome) in both #184 passes. Same fix
+        # `synth_workspace.py`'s `_ModuleWindow` already applies for the
+        # identical reason (see its own comment there).
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"AssignmentPill {{ background: {theme.rgba(theme.PANEL)}; "
+            f"border: 1px solid {theme.rgba(theme.RULE)}; }}"
+            f"AssignmentPill:hover {{ border: 1px solid {theme.rgba(theme.FOCUS)}; }}")
         self.setAcceptDrops(True)
         self.setCursor(QtCore.Qt.PointingHandCursor)
+        self.setFixedWidth(self.WIDTH)
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(6, 3, 6, 3)
 
         self._label = QtWidgets.QLabel("--", self)
         self._label.setFont(theme.font(8, bold=True))
-        self._label.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT)};")
+        # `padding: 0` must be explicit here, not just omitted: an ordinary
+        # child QLabel (unlike a QMenu) does inherit `theme.main_stylesheet()`
+        # `QLabel { padding: 8px; }` rule from `SynthView`'s own stylesheet,
+        # and this instance's own stylesheet only overrides the properties it
+        # names -- leaving `padding` cascaded in from there widened the label
+        # past the pill's fixed width and got centre-clipped (an "Fat Bass"
+        # rendered as "at Bas"), independent of the WA_StyledBackground fix.
+        self._label.setStyleSheet(
+            f"background: transparent; color: {theme.rgba(theme.TEXT)}; padding: 0;")
         self._label.setAlignment(QtCore.Qt.AlignCenter)
         layout.addWidget(self._label, 1)
 
     def set_text(self, text):
-        self._label.setText(text or "--")
+        text = text or "--"
+        available = self.WIDTH - 12  # minus the layout's 6px left/right margins
+        metrics = QtGui.QFontMetrics(self._label.font())
+        elided = metrics.elidedText(text, QtCore.Qt.ElideRight, available)
+        self._label.setText(elided)
+        self._label.setToolTip(text if elided != text else "")
 
     def wheelEvent(self, event):
         direction = 1 if event.angleDelta().y() > 0 else -1
@@ -722,6 +753,10 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         self._row_widgets = {}   # row_key -> (AssignmentPill, KeyBoxRow)
         self._kind_buttons = {}  # base_row -> QToolButton, custom-only
         self._split_buttons = {}
+        #: Keeps whichever popup `_show_popup()` most recently opened alive
+        #: (see its own docstring for why) and gives tests/verification
+        #: scripts a handle to inspect the open popup.
+        self._active_popup = None
 
         self._body = QtWidgets.QVBoxLayout(self)
         self._body.setContentsMargins(4, 4, 4, 4)
@@ -912,22 +947,75 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             folders.setdefault(self._folder_for(name, kind), []).append(name)
         return folders
 
+    def _add_popup_header(self, menu, title, is_first):
+        # Deliberately *not* `menu.addSection(title)`: Qt's titled-separator
+        # rendering is style-dependent, and once a custom QSS is applied (as
+        # `theme.main_stylesheet()`'s `QMenu::separator { height: 1px; ...}`
+        # rule is, just below) a section's title text stopped painting at
+        # all -- verified by grabbing a real popup screenshot and finding
+        # the folder names silently missing, exactly the failure mode
+        # ticket #187 asked to be caught here rather than left for the
+        # user's live pass. A `QWidgetAction` wrapping a plain, explicitly
+        # styled `QLabel` renders identically regardless of the menu's QSS.
+        if not is_first:
+            menu.addSeparator()
+        header = QtWidgets.QLabel(title.upper(), menu)
+        header.setFont(theme.font(7))
+        header.setStyleSheet(
+            f"background: transparent; color: {theme.rgba(theme.ink(theme.COPPER_LIGHT))}; "
+            "padding: 4px 10px 2px;")
+        action = QtWidgets.QWidgetAction(menu)
+        action.setDefaultWidget(header)
+        action.setEnabled(False)
+        menu.addAction(action)
+
     def _build_popup(self, kind, current_name):
         menu = QtWidgets.QMenu(self)
+        # A QMenu is its own top-level window (`isWindow()` is true even
+        # though it's parented), and Qt stylesheet cascades stop at window
+        # boundaries -- so it does *not* pick up `SynthView`'s
+        # `theme.main_stylesheet()` automatically the way an ordinary child
+        # widget would. Applying that same stylesheet directly is what
+        # actually gets the popup its Copper-token look (border/background/
+        # selected-item colour) rather than the plain-Qt fallback that made
+        # earlier attempts read as "not really a popup" -- reuses the one
+        # `QMenu {...}` rule set already defined in `theme.py` instead of
+        # duplicating those tokens here.
+        menu.setStyleSheet(theme.main_stylesheet())
+        is_first = True
         recents = [n for n in self.assignments.recents if n in self.assignments.names_for_kind(kind)]
         if recents:
-            menu.addSection("Recent")
+            self._add_popup_header(menu, "Recent", is_first)
+            is_first = False
             for name in recents:
                 action = menu.addAction(name)
                 action.setCheckable(True)
                 action.setChecked(name == current_name)
         for folder, names in self._folders_for_kind(kind).items():
-            menu.addSection(folder)
+            self._add_popup_header(menu, folder, is_first)
+            is_first = False
             for name in names:
                 action = menu.addAction(name)
                 action.setCheckable(True)
                 action.setChecked(name == current_name)
         return menu
+
+    def _show_popup(self, menu, pos, on_pick):
+        # `.popup()` rather than `.exec()`: `.exec()` runs its own nested
+        # event loop and blocks the caller until the menu closes, which
+        # made this whole picker un-drivable from an automated/headless
+        # test (see the stale comment `.exec()` left on the old click
+        # test) -- a real click could never be verified to actually open
+        # anything, exactly the gap ticket #187 was opened to close.
+        # `.popup()` shows the menu and returns immediately; picking an
+        # item is handled via `triggered` instead of an `exec()` return
+        # value. Keeping a reference on `self` is required -- without it
+        # the menu (and its popup) would be garbage-collected the instant
+        # this method returns, since nothing else would hold it alive.
+        self._active_popup = menu
+        menu.triggered.connect(lambda action: on_pick(action.text()))
+        menu.aboutToHide.connect(menu.deleteLater)
+        menu.popup(pos)
 
     def _open_row_popup(self, row_key):
         kind = kind_for_row_key(self.layout_state.layout, row_key, self.assignments.custom_kinds)
@@ -936,9 +1024,9 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         pill, _ = self._row_widgets[row_key]
         current = self.assignments.name_for(row_key, self.layout_state)
         menu = self._build_popup(kind, current)
-        action = menu.exec(pill.mapToGlobal(QtCore.QPoint(0, pill.height())))
-        if action is not None:
-            self._assign_row(row_key, action.text())
+        self._show_popup(
+            menu, pill.mapToGlobal(QtCore.QPoint(0, pill.height())),
+            lambda name: self._assign_row(row_key, name))
 
     def _open_key_popup(self, row_key, letter):
         kind = kind_for_row_key(self.layout_state.layout, row_key, self.assignments.custom_kinds)
@@ -946,9 +1034,9 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             return
         current = self.assignments.name_for_key(row_key, letter, self.layout_state)
         menu = self._build_popup(kind, current)
-        action = menu.exec(QtGui.QCursor.pos())
-        if action is not None:
-            self._assign_key(row_key, letter, action.text())
+        self._show_popup(
+            menu, QtGui.QCursor.pos(),
+            lambda name: self._assign_key(row_key, letter, name))
 
     def _assign_row(self, row_key, name):
         self.assignments.assign_row(row_key, self.layout_state, name)
