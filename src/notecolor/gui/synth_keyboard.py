@@ -381,6 +381,9 @@ class SynthKeyboardBand(QtWidgets.QWidget):
     #: in sync. Not fired by `_toggle_kind()`/`_toggle_split()`, which also
     #: call `_rebuild_structure()` but never change `.layout` itself.
     layoutChanged = QtCore.Signal(str)
+    #: Fires on Shift+M -- the "Panic" shortcut. Kept distinct from plain
+    #: `m`, which is a live note-preview key (LOWER row) via `_PIANO_KEYS`.
+    panicRequested = QtCore.Signal()
 
     def __init__(self, synth_names=None, kit_zone_names=None, base_octave=None, parent=None):
         super().__init__(parent)
@@ -603,6 +606,12 @@ class SynthKeyboardBand(QtWidgets.QWidget):
             delta = 1 if key == QtCore.Qt.Key_Up else -1
             self.base_octave = clamp_base_octave(self.base_octave + delta)
             self._refresh_boxes()
+            event.accept()
+            return
+
+        if key == QtCore.Qt.Key_M and event.modifiers() & QtCore.Qt.ShiftModifier:
+            if not event.isAutoRepeat():
+                self.panicRequested.emit()
             event.accept()
             return
 

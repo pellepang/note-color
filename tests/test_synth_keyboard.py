@@ -44,17 +44,22 @@ def _kit(names):
 
 class _FakeKeyEvent:
     """Stands in for a `QKeyEvent`: `SynthKeyboardBand`'s handlers only
-    read `.key()` and `.isAutoRepeat()`, and call `.accept()`."""
+    read `.key()`, `.isAutoRepeat()`, and `.modifiers()`, and call
+    `.accept()`."""
 
-    def __init__(self, key, auto_repeat=False):
+    def __init__(self, key, auto_repeat=False, modifiers=QtCore.Qt.NoModifier):
         self._key = key
         self._auto_repeat = auto_repeat
+        self._modifiers = modifiers
 
     def key(self):
         return self._key
 
     def isAutoRepeat(self):
         return self._auto_repeat
+
+    def modifiers(self):
+        return self._modifiers
 
     def accept(self):
         pass
@@ -235,3 +240,26 @@ def test_up_down_shift_base_octave_within_bounds(app):
                                 base_octave=config.MIN_OCTAVE)
     band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Up))
     assert band.base_octave == config.MIN_OCTAVE + 1
+
+
+def test_shift_m_emits_panic_not_note_preview(app):
+    # 'm' is a live piano key on PIANO_LOWER_ROW, so Shift+M must be
+    # distinguished from a plain `m` note-preview keypress (ticket #157
+    # round 2) rather than also triggering a note preview.
+    band = sk.SynthKeyboardBand(synth_names=["Fat Bass"], kit_zone_names={})
+    panics = []
+    previews = []
+    band.panicRequested.connect(lambda: panics.append(True))
+    band.notePreviewRequested.connect(previews.append)
+
+    band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_M, modifiers=QtCore.Qt.ShiftModifier))
+
+    assert panics == [True]
+    assert previews == []
+    assert band._held == {}
+
+    # Regression check: plain `m` (no shift) still previews a note as before.
+    band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_M))
+
+    assert len(previews) == 1
+    assert panics == [True]

@@ -276,6 +276,7 @@ class SynthView(QtWidgets.QMainWindow):
         self.keyboard_band.notePreviewRequested.connect(self._on_note_preview)
         self.keyboard_band.noteReleased.connect(self._on_note_released)
         self.keyboard_band.layoutChanged.connect(self._on_layout_changed)
+        self.keyboard_band.panicRequested.connect(self._on_panic_clicked)
         outer.addWidget(self.keyboard_band)
 
         outer.addWidget(self._build_status_bar())

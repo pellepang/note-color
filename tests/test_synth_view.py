@@ -227,6 +227,17 @@ def test_panic_button_calls_controllers_panic_which_calls_all_notes_off(app):
     assert sound_engine.all_notes_off_called is True
 
 
+def test_keyboard_band_panic_shortcut_calls_controllers_panic(app):
+    # Shift+M on the keyboard band (synth_keyboard.py) must reach the same
+    # controller.panic() path as clicking the Panic button (ticket #157
+    # round 2).
+    sound_engine = StubSoundEngine()
+    view, controller, _patch = _make_view(sound_engine=sound_engine)
+    view.keyboard_band.panicRequested.emit()
+    assert controller.panicked is True
+    assert sound_engine.all_notes_off_called is True
+
+
 # --- per-patch workspace state -------------------------------------------
 
 
