@@ -341,11 +341,14 @@ class KeyBoxRow(QtWidgets.QWidget):
     assign that key directly (`boxDropped`), reusing `synth_workspace.
     Canvas`'s plain-text-`QMimeData` drag pattern."""
 
-    BOX_W = 34
-    BOX_H = 38
+    #: Reference side length for a box at its unscaled (minimum) size --
+    #: boxes are square (ticket #186: "the buttons should be square", not
+    #: just resized to an arbitrary aspect), so there is one size constant,
+    #: not an independent width/height pair.
+    BOX_SIZE = 36
     GAP = 3
     #: Vertical raise for a black-key box, in pixels -- enough to read as a
-    #: deliberate piano-style stagger at `BOX_H`'s scale without looking
+    #: deliberate piano-style stagger at `BOX_SIZE`'s scale without looking
     #: broken. Black keys sit above center; white/pad keys sit staggered
     #: down by this many pixels below them.
     STAGGER = 10
@@ -387,37 +390,48 @@ class KeyBoxRow(QtWidgets.QWidget):
 
     def minimumSizeHint(self):
         count = max(1, len(self._boxes))
-        width = count * (self.BOX_W + self.GAP) - self.GAP
-        height = self.BOX_H + self.STAGGER + 2 * self.MARGIN
+        width = count * (self.BOX_SIZE + self.GAP) - self.GAP
+        height = self.BOX_SIZE + self.STAGGER + 2 * self.MARGIN
         return QtCore.QSize(width, height)
 
     def _geometry(self):
-        """(box_w, box_h, gap, stagger, margin) actually drawn this paint:
-        the reference constants scaled up to fill `self.width()`/
-        `self.height()`, never scaled *down* below them (the widget's own
-        `minimumSizeHint()` is what keeps a layout from ever handing it
-        less room than that in the first place)."""
-        count = len(self._boxes)
-        ref_height = self.BOX_H + self.STAGGER + 2 * self.MARGIN
-        v_scale = max(1.0, self.height() / ref_height) if ref_height else 1.0
-        box_h = self.BOX_H * v_scale
-        stagger = self.STAGGER * v_scale
-        margin = self.MARGIN * v_scale
+        """(box_side, gap, stagger, margin, x_offset, y_offset) actually
+        drawn this paint. Ticket #186: boxes are square and scale together
+        (never independently in width vs. height, unlike the #184-era
+        version this replaced) to fill the available *height*, then are
+        centered both horizontally (in case the row is wider than the
+        squares need, e.g. a short/narrow-count row) and vertically (in
+        case the available width is the tighter constraint, e.g. many
+        boxes in a narrow footer) -- never scaled down below the reference
+        size (the widget's own `minimumSizeHint()` is what keeps a layout
+        from ever handing it less room than that in the first place)."""
+        count = max(1, len(self._boxes))
         gap = float(self.GAP)
-        if count:
-            box_w = max(float(self.BOX_W), (self.width() - (count - 1) * gap) / count)
-        else:
-            box_w = float(self.BOX_W)
-        return box_w, box_h, gap, stagger, margin
+
+        ref_height = self.BOX_SIZE + self.STAGGER + 2 * self.MARGIN
+        scale_h = max(1.0, self.height() / ref_height) if ref_height else 1.0
+        scale_w = max(1.0, (self.width() - (count - 1) * gap) / (count * self.BOX_SIZE))
+        scale = min(scale_h, scale_w)
+
+        box_side = self.BOX_SIZE * scale
+        stagger = self.STAGGER * scale
+        margin = self.MARGIN * scale
+
+        content_width = count * (box_side + gap) - gap
+        content_height = box_side + stagger + 2 * margin
+        x_offset = max(0.0, (self.width() - content_width) / 2)
+        y_offset = max(0.0, (self.height() - content_height) / 2)
+
+        return box_side, gap, stagger, margin, x_offset, y_offset
 
     def paintEvent(self, _event):
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing, False)
-        box_w, box_h, gap, stagger, margin = self._geometry()
-        x = 0.0
+        box_side, gap, stagger, margin, x_offset, y_offset = self._geometry()
+        x = x_offset
         for box in self._boxes:
-            y = margin if box.get("is_black") else margin + stagger
-            rect = QtCore.QRectF(x, y, box_w, box_h)
+            y = y_offset + (margin if box.get("is_black") else margin + stagger)
+            rect = QtCore.QRectF(x, y, box_side, box_side)
             colour = box.get("color")
             if colour is not None:
                 painter.fillRect(rect, colour)
@@ -429,33 +443,33 @@ class KeyBoxRow(QtWidgets.QWidget):
 
             painter.setFont(theme.font(7, bold=True))
             painter.setPen(theme.TEXT if colour is not None else theme.TEXT_FAINT)
-            painter.drawText(QtCore.QRectF(x, y + 2, box_w, 13),
+            painter.drawText(QtCore.QRectF(x, y + 2, box_side, 13),
                              QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
                              box.get("letter", "").upper())
 
             painter.setFont(theme.font(6))
             painter.setPen(theme.TEXT if colour is not None else theme.TEXT_DIM)
-            painter.drawText(QtCore.QRectF(x, y + 17, box_w, box_h - 17),
+            painter.drawText(QtCore.QRectF(x, y + 17, box_side, box_side - 17),
                              QtCore.Qt.AlignHCenter | QtCore.Qt.AlignTop,
                              box.get("label", ""))
 
             if box.get("overridden"):
-                dot = QtCore.QRectF(x + box_w - self.OVERRIDE_DOT - 2, y + 2,
+                dot = QtCore.QRectF(x + box_side - self.OVERRIDE_DOT - 2, y + 2,
                                     self.OVERRIDE_DOT, self.OVERRIDE_DOT)
                 painter.setPen(QtCore.Qt.NoPen)
                 painter.setBrush(theme.AMBER)
                 painter.drawEllipse(dot)
                 painter.setBrush(QtCore.Qt.NoBrush)
 
-            x += box_w + gap
+            x += box_side + gap
 
     # -- per-key click / drag-drop -----------------------------------------
 
     def _box_index_at(self, x):
         if not self._boxes:
             return None
-        box_w, _box_h, gap, _stagger, _margin = self._geometry()
-        index = int(x // (box_w + gap))
+        box_side, gap, _stagger, _margin, x_offset, _y_offset = self._geometry()
+        index = int((x - x_offset) // (box_side + gap))
         if 0 <= index < len(self._boxes):
             return index
         return None

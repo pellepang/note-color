@@ -297,26 +297,53 @@ def test_key_box_row_minimum_height_grew_to_fit_the_stagger(app):
     # via `_geometry()` at paint time) -- but it still reports a real
     # minimum, with equal top/bottom margin so the black+white contour
     # centers instead of sitting flush top/bottom.
-    assert sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER > sk.KeyBoxRow.BOX_H
+    assert sk.KeyBoxRow.BOX_SIZE + sk.KeyBoxRow.STAGGER > sk.KeyBoxRow.BOX_SIZE
     row = sk.KeyBoxRow()
-    expected = sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
+    expected = sk.KeyBoxRow.BOX_SIZE + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
     assert row.minimumSizeHint().height() == expected
     assert row.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Expanding
     assert row.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Expanding
 
 
-def test_key_box_row_geometry_scales_up_to_fill_extra_height(app):
+def test_key_box_row_geometry_scales_up_to_fill_extra_height_and_stays_square(app):
+    # Ticket #186: boxes must be square (width == height) at every scale,
+    # not just resized to fill height with an arbitrary width.
     row = sk.KeyBoxRow()
     row.set_boxes([{"letter": "a", "label": "C4", "color": None, "is_black": False}])
-    ref_height = sk.KeyBoxRow.BOX_H + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
+    ref_height = sk.KeyBoxRow.BOX_SIZE + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
+    # Wide enough that width is never the limiting dimension for one box.
+    wide = 4000
 
-    row.resize(row.width(), ref_height)
-    _box_w, box_h, *_ = row._geometry()
-    assert box_h == pytest.approx(sk.KeyBoxRow.BOX_H)
+    row.resize(wide, ref_height)
+    box_side, *_ = row._geometry()
+    assert box_side == pytest.approx(sk.KeyBoxRow.BOX_SIZE)
 
-    row.resize(row.width(), ref_height * 2)
-    _box_w, box_h_scaled, *_ = row._geometry()
-    assert box_h_scaled == pytest.approx(sk.KeyBoxRow.BOX_H * 2)
+    row.resize(wide, ref_height * 2)
+    box_side_scaled, *_ = row._geometry()
+    assert box_side_scaled == pytest.approx(sk.KeyBoxRow.BOX_SIZE * 2)
+
+
+def test_key_box_row_geometry_square_boxes_scale_down_to_fit_narrow_width(app):
+    # Ticket #186: when width is the tighter constraint (many boxes, a
+    # narrow footer), boxes shrink together and stay square rather than
+    # a height-only scale overflowing the available width.
+    row = sk.KeyBoxRow()
+    boxes = [{"letter": c, "label": c.upper(), "color": None, "is_black": False}
+              for c in PIANO_UPPER_ROW]
+    row.set_boxes(boxes)
+    tall = 4000
+    # Enough width for ~2x scale (comfortably above the unscaled minimum,
+    # so this exercises "width is the tighter constraint" rather than the
+    # unrelated "can't shrink below the reference size" floor).
+    narrow = 900
+
+    row.resize(narrow, tall)
+    box_side, gap, _stagger, _margin, x_offset, y_offset = row._geometry()
+    count = len(boxes)
+    content_width = count * (box_side + gap) - gap
+    assert content_width <= narrow + 1e-6
+    assert x_offset >= 0
+    assert y_offset >= 0
 
 
 def test_key_box_row_set_boxes_stores_mixed_black_white_without_raising(app):
@@ -574,7 +601,11 @@ def test_key_box_drop_assigns_just_that_key(app):
     band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
     _, key_box_row = band._row_widgets["lower"]
     letter = PIANO_LOWER_ROW[0]
-    box_x = 0.5 * sk.KeyBoxRow.BOX_W  # inside the first box
+    # Boxes are centered horizontally (ticket #186), so the first box no
+    # longer starts at x=0 -- ask `_geometry()` for the real offset rather
+    # than assuming one.
+    _box_side, _gap, _stagger, _margin, x_offset, _y_offset = key_box_row._geometry()
+    box_x = x_offset + 0.5 * sk.KeyBoxRow.BOX_SIZE  # inside the first box
 
     key_box_row.dropEvent(_FakeDropEvent("Beta", x=box_x))
 
