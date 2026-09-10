@@ -804,17 +804,21 @@ class Canvas(QtWidgets.QWidget):
         self._drop_hover = False
         self.update()
         type_key = event.mimeData().text()
-        # Derived from the event's global position rather than trusted
-        # from `event.position()`/`event.pos()` directly: those are
-        # supposed to already be canvas-local, but this is the one point
-        # in the drop path any stale/mismapped coordinate would silently
-        # survive all the way to `spawn_module()`. `mapFromGlobal()` is
-        # unambiguous -- wherever the cursor actually is on screen, mapped
-        # into this widget's own frame -- so if a mismapped local position
-        # was ever the reason a dropped module used to land somewhere
-        # other than the cursor (issue #167), this removes that path
-        # entirely rather than trusting the event to have gotten it right.
-        pos = self.mapFromGlobal(event.globalPosition().toPoint())
+        # `QDropEvent` in PySide6/Qt6 has no `globalPosition()` -- that
+        # accessor exists on `QMouseEvent`, not on drag/drop events -- so
+        # #167's attempt to re-derive the drop point via
+        # `self.mapFromGlobal(event.globalPosition().toPoint())` raised an
+        # `AttributeError` on every single drop, aborting `dropEvent()`
+        # before `spawn_module()` ever ran (issue #175: dropped modules
+        # never appeared at all, not "landed in the wrong place" -- the
+        # highlight/hover feedback still worked because that comes from
+        # `dragEnterEvent`/`dragMoveEvent`, which never touch this line).
+        # `position()` is the only local-position accessor `QDropEvent`
+        # actually has, and it already is canvas-local (Qt delivers it
+        # relative to the widget receiving the event) -- so use that
+        # directly rather than a global-position round-trip that doesn't
+        # exist on this event type.
+        pos = event.position().toPoint()
         self.spawn_module(type_key, pos)
         event.acceptProposedAction()
 
