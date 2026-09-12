@@ -1062,3 +1062,25 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - **CLAP still, on new grounds.** VST3 relicensed to MIT in Oct 2025, killing
   #145's licence argument; CLAP wins now on being plain C and `ctypes`-bindable.
   The newly explicit cost: no Python CLAP host exists.
+
+### 57 — the patch canvas's settled look (issue #210)
+
+- **The Mix boundary is a labelled stripe across the canvas** (Massive X), not a
+  discrete box. Kept a design call rather than a setting because it costs ~150px
+  of canvas permanently.
+- **Cables are objects with weight** — one particle per cable at its midpoint,
+  spring to a rest point below the chord plus gravity and damping, drawn as a
+  quadratic through the particle. They swing when a module is moved. Bézier only;
+  straight and orthogonal routing are gone.
+- **Cables rest faint and light up on touch** (hover the cable, hover its jack,
+  select its module, turn a knob it feeds), and stay drawn above the modules.
+  This replaced Reason's four graded hide modes wholesale.
+- **Sockets grow one at a time**: as many jacks as there are cables, plus one
+  dashed spare. Every cable owns a jack, and the Delay's dedicated feedback input
+  disappears.
+- **Every appearance value is a setting, not a fork.** Sag, swing, resting
+  brightness, colour scheme, loop marking, refusal placement. Defaults: bézier,
+  colour by meaning, cables on top.
+- **Settings are reached from a menu bar** (File / Edit / View / Transport /
+  Settings), which the app does not have yet — not from a panel on the canvas.
+
