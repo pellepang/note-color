@@ -711,6 +711,25 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   pre-handover self-check, never proof -- the user's verdict is ground
   truth.
 
+- **The Synth View footer clamps, never collapses** (#196, closes #162):
+  `_FooterSplitter` clamps to `[floor, ceiling]` and hides nothing,
+  replacing `_CollapsingSplitter`'s collapse-to-zero after three rounds
+  of tuning left the user's report unchanged. A hidden footer took the
+  key band, pill and recents rail with it -- the source of the
+  "rail/pill/keys are invisible" reports, which were never about those
+  widgets. Range runs from the header rows alone to filling the canvas;
+  the only cap is `_CANVAS_MIN_HEIGHT`.
+- **`theme.main_stylesheet()`'s `QLabel { padding: 8px }` is invisible to
+  `QFontMetrics`** (#197, closes #164/#168), so any label that sizes
+  itself from font metrics gets a box 16px smaller than it measured and
+  clips -- horizontally in module titles, vertically (cut descenders) in
+  drawer rows. State `padding` explicitly wherever geometry is computed.
+  The global rule is still there and still a hazard.
+- **GUI tests force `QT_QPA_PLATFORM=offscreen`**, they do not
+  `setdefault` it: a Wayland developer exports their own, and the suite
+  was opening real windows into the live session where a tiling WM
+  resized them, making the splitter tests fail like app bugs.
+
 ## Known limitations / things learned
 
 One-liners; full detail in `docs/DECISIONS.md`.
