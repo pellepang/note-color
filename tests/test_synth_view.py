@@ -520,3 +520,85 @@ def test_per_patch_workspace_is_restored_on_switching_back(app):
     view._apply_patch(patch_a)
     positions_restored = {w.type_key: (w.x(), w.y()) for w in view.canvas.windows()}
     assert positions_restored == positions_a
+
+
+# --- per-layout-tab independence through the real tab bar (ticket #190) ---
+
+
+def _stub_assignable_names(view, synth_names, kit_names):
+    """Point every one of the band's four per-tab `RowAssignments` at the
+    same hand-built name lists. `SynthView` builds its band with no
+    explicit names, so it scans the real patch directory -- which on a
+    test machine may be empty, making every `_assign_row()` a silent
+    no-op. Overriding the lists (rather than the band) keeps this test on
+    the real, fully-wired `SynthView` while staying off disk."""
+    for assignments in view.keyboard_band._assignments_by_layout.values():
+        assignments.synth_names = list(synth_names)
+        assignments.kit_names = list(kit_names)
+
+
+def test_clicking_layout_tabs_restores_each_tabs_assignments(app):
+    """Ticket #190 end-to-end: the per-tab state is reached here through
+    the actual `.layout-tabs` buttons `_build_layout_tabs()` creates, not
+    by calling `SynthKeyboardBand.set_layout()` directly -- so a tab
+    button wired to the wrong thing (or a highlight that desyncs from the
+    band's real layout) would show up too."""
+    view, _controller, _patch = _make_view()
+    band = view.keyboard_band
+    _stub_assignable_names(view, ["Alpha", "Beta", "Gamma"], ["KitA", "KitB"])
+
+    def click(layout_name):
+        view._layout_tab_buttons[layout_name].click()
+
+    click(sk.LAYOUT_DUAL)
+    band._assign_row("upper", "Beta")
+    band._assign_key("upper", "q", "Gamma")
+
+    click(sk.LAYOUT_ALLPADS)
+    assert band.layout_state.layout == sk.LAYOUT_ALLPADS
+    assert band.assignments.key_override == {}
+    band._assign_row("upper", "KitB")
+    band._assign_key("upper", "q", "KitA")
+
+    click(sk.LAYOUT_DUAL)
+    assert band.layout_state.layout == sk.LAYOUT_DUAL
+    assert band.assignments.name_for("upper", band.layout_state) == "Beta"
+    assert band.assignments.name_for_key("upper", "q", band.layout_state) == "Gamma"
+    assert band.assignments.recents == ["Gamma", "Beta"]
+
+    click(sk.LAYOUT_ALLPADS)
+    assert band.assignments.name_for("upper", band.layout_state) == "KitB"
+    assert band.assignments.name_for_key("upper", "q", band.layout_state) == "KitA"
+    assert band.assignments.recents == ["KitA", "KitB"]
+
+
+def test_per_patch_workspace_restores_every_tabs_assignments(app):
+    """Per-tab state has to survive a patch switch as well as a tab
+    switch: `_snapshot_workspace()` stores all four tabs' `RowAssignments`
+    and `_restore_workspace()` puts them all back."""
+    patch_a = patch_format.new_patch(name="A")
+    patch_b = patch_format.new_patch(name="B")
+    view, _controller, _patch = _make_view(patch=patch_a)
+    band = view.keyboard_band
+    _stub_assignable_names(view, ["Alpha", "Beta", "Gamma"], ["KitA", "KitB"])
+
+    band.set_layout(sk.LAYOUT_DUAL)
+    band._assign_row("upper", "Beta")
+    band._assign_key("upper", "q", "Gamma")
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    band._assign_row("upper", "KitB")
+    expected = band.snapshot_assignments()
+
+    # On patch B, move every tab's state somewhere else, so a restore
+    # that quietly did nothing would leave B's values behind and fail.
+    view._apply_patch(patch_b)
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    band._assign_row("upper", "KitA")
+    band._assign_key("upper", "w", "KitA")
+    band.set_layout(sk.LAYOUT_DUAL)
+    band._assign_row("upper", "Alpha")
+    band.assignments.clear_key_override("upper", "q")
+    assert band.snapshot_assignments() != expected
+
+    view._apply_patch(patch_a)
+    assert band.snapshot_assignments() == expected

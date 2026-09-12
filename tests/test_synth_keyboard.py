@@ -757,6 +757,177 @@ def test_snapshot_and_restore_assignments_round_trips_every_tab():
     assert fresh._assignments_by_layout[sk.LAYOUT_HYBRID].name_for("upper", hybrid_state) == "Beta"
 
 
+# -- per-layout-tab independence (ticket #190) --------------------------------
+#
+# The mechanism (one `RowAssignments` per `LAYOUT_ORDER` entry, with
+# `self.assignments` re-pointed on every layout change) predates #190 --
+# these tests pin down the *whole* surface it now has to cover after the
+# chain of fixes #185-#189 widened it: row assignments, per-key overrides
+# (#188) and the recents list plus its on-screen rail (#189). Each one was
+# checked to fail against a deliberately broken band that shares a single
+# `RowAssignments` across all four tabs.
+
+def _shared_kits():
+    return {"KitA": _kit(["kick", "snare"]), "KitB": _kit(["hat", "clap"])}
+
+
+def test_each_tab_keeps_its_own_row_assignments_and_key_overrides(app):
+    """The flagship #190 check: two tabs, each given its own row
+    assignments *and* its own per-key overrides, both restored exactly as
+    left after switching away and back."""
+    band = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names=_shared_kits())
+
+    # Dual: both rows synth-kind.
+    band._assign_row("upper", "Beta")
+    band._assign_row("lower", "Gamma")
+    band._assign_key("upper", "q", "Gamma")
+    band._assign_key("lower", "z", "Alpha")
+
+    # All-pads: both rows pad-kind, so the names in play are kit names --
+    # a different list entirely from dual's, which is exactly why a leak
+    # here would be unmistakable rather than a coincidence of indices.
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    assert band.assignments.key_override == {}, "a fresh tab starts with no overrides"
+    band._assign_row("upper", "KitB")
+    band._assign_key("upper", "q", "KitA")
+
+    band.set_layout(sk.LAYOUT_DUAL)
+    state = band.layout_state
+    assert band.assignments.name_for("upper", state) == "Beta"
+    assert band.assignments.name_for("lower", state) == "Gamma"
+    assert band.assignments.name_for_key("upper", "q", state) == "Gamma"
+    assert band.assignments.name_for_key("lower", "z", state) == "Alpha"
+    # An un-overridden key still falls through to its row's default.
+    assert band.assignments.name_for_key("upper", "w", state) == "Beta"
+    assert band.assignments.key_override == {
+        ("upper", "q"): "Gamma", ("lower", "z"): "Alpha"}
+
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    state = band.layout_state
+    assert band.assignments.name_for("upper", state) == "KitB"
+    assert band.assignments.name_for_key("upper", "q", state) == "KitA"
+    assert band.assignments.name_for_key("upper", "w", state) == "KitB"
+    assert band.assignments.key_override == {("upper", "q"): "KitA"}
+
+
+def test_tab_key_switching_keeps_each_tabs_state_independent(app):
+    """`Tab` (`keyPressEvent`) re-points `self.assignments` on its own
+    code path, separate from `set_layout()`'s -- a leak could live in
+    either one, so the round trip is driven here by a full four-tab
+    `Tab` cycle rather than direct jumps."""
+    band = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names=_shared_kits())
+
+    expected = {}
+    for step, name in enumerate(["Beta", "Gamma", "KitB", "Alpha"]):
+        layout = band.layout_state.layout
+        band._assign_row("upper", name)
+        band._assign_key("upper", "q", name)
+        expected[layout] = name
+        band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Tab))
+        assert band.layout_state.layout == sk.LAYOUT_ORDER[(step + 1) % 4]
+
+    # Back at dual after a full cycle; walk it again and check nothing
+    # moved.
+    for layout in sk.LAYOUT_ORDER:
+        assert band.layout_state.layout == layout
+        assert band.assignments.name_for("upper", band.layout_state) == expected[layout]
+        assert band.assignments.key_override == {("upper", "q"): expected[layout]}
+        band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key_Tab))
+
+
+def test_each_tab_keeps_its_own_recents_list(app):
+    band = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names=_shared_kits())
+
+    band._assign_row("upper", "Beta")
+    band._assign_key("upper", "q", "Gamma")
+    assert band.assignments.recents == ["Gamma", "Beta"]
+
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    assert band.assignments.recents == [], "a fresh tab starts with empty recents"
+    band._assign_row("upper", "KitB")
+    assert band.assignments.recents == ["KitB"]
+
+    band.set_layout(sk.LAYOUT_DUAL)
+    assert band.assignments.recents == ["Gamma", "Beta"]
+
+
+def test_recents_rail_repopulates_for_the_tab_switched_to(app):
+    """The rail is one shared widget across all four tabs, so per-tab
+    recents only actually *read* as per-tab if `_refresh_boxes()` re-fills
+    it on every layout change -- including back to the empty-state hint
+    for a tab nothing has been assigned on yet."""
+    band = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names=_shared_kits())
+    band.resize(900, 360)
+    band.show()
+
+    def visible_chips():
+        return [c.name for c in band.recents_rail.findChildren(sk._RecentChip)
+                if c.isVisible()]
+
+    band._assign_row("upper", "Beta")
+    assert visible_chips() == ["Beta"]
+    assert not band.recents_rail._empty_hint.isVisible()
+
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    assert visible_chips() == []
+    assert band.recents_rail._empty_hint.isVisible()
+    band._assign_row("upper", "KitB")
+    assert visible_chips() == ["KitB"]
+
+    band.set_layout(sk.LAYOUT_DUAL)
+    assert visible_chips() == ["Beta"]
+
+
+def test_custom_kind_toggle_does_not_leak_to_other_tabs(app):
+    """`custom_kinds` lives on `RowAssignments` too, so it is per-tab
+    state as well -- and a leak would be visible, since it decides which
+    of the two name lists a row selects into."""
+    band = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names=_shared_kits())
+    band.set_layout(sk.LAYOUT_CUSTOM)
+    band._toggle_kind("upper")   # custom's upper: synth -> pad
+    assert band.assignments.custom_kinds["upper"] == "pad"
+
+    band.set_layout(sk.LAYOUT_DUAL)
+    assert band.assignments.custom_kinds["upper"] == "synth"
+    assert band.assignments.name_for("upper", band.layout_state) == "Alpha"
+
+    band.set_layout(sk.LAYOUT_CUSTOM)
+    assert band.assignments.custom_kinds["upper"] == "pad"
+
+
+def test_snapshot_restore_round_trips_overrides_and_recents_per_tab(app):
+    """`snapshot()`/`restore()` carry the *whole* per-tab state, not just
+    the row indices the original #184 round-trip test covered -- this is
+    what makes per-tab state survive a patch switch in `SynthView`."""
+    band = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names=_shared_kits())
+    band._assign_row("upper", "Beta")
+    band._assign_key("upper", "q", "Gamma")
+    band.set_layout(sk.LAYOUT_ALLPADS)
+    band._assign_row("lower", "KitB")
+    band._assign_key("lower", "z", "KitA")
+    band.set_layout(sk.LAYOUT_CUSTOM)
+    band._toggle_kind("lower")   # -> synth
+
+    fresh = sk.SynthKeyboardBand(
+        synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names=_shared_kits())
+    fresh.restore_assignments(band.snapshot_assignments())
+
+    for layout in sk.LAYOUT_ORDER:
+        assert (fresh._assignments_by_layout[layout].snapshot()
+                == band._assignments_by_layout[layout].snapshot()), layout
+    # Spot-check the two fields the older round-trip test never touched.
+    assert fresh._assignments_by_layout[sk.LAYOUT_DUAL].key_override == {
+        ("upper", "q"): "Gamma"}
+    assert fresh._assignments_by_layout[sk.LAYOUT_ALLPADS].recents == ["KitA", "KitB"]
+    assert fresh._assignments_by_layout[sk.LAYOUT_CUSTOM].custom_kinds["lower"] == "synth"
+
+
 # -- popup folders (ticket #184) ----------------------------------------------
 
 def test_folders_for_kind_groups_by_supplied_patch_folder():
