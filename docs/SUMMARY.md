@@ -698,6 +698,19 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   (`staff_map.key_signature_accidental()`, `pitch_at_row(key_fifths=)`,
   `score_editor_display._legend_letter()`) instead of always-natural.
 
+- **GUI screenshots come from a nested headless compositor** (#194,
+  Phase 0 of #191): `scripts/uishot.py` runs a headless `sway` on its own
+  `WAYLAND_DISPLAY` at the user's real resolution/scale, shows one named
+  state from `scripts/ui_states.py`, and `grim`s it -- so an agent can see
+  a layout change before handing it over, without the window tiling into
+  the user's session. Rejected: shooting the live session; `offscreen`
+  alone (lies about fonts/DPI); Hyprland as the nested compositor (0.56
+  has no headless-only backend). The app now sets a stable app id
+  (`visualnote`, `visualnote-synth` reserved for the detached Synth View)
+  so window rules can target it. Standing limit: the shot is a
+  pre-handover self-check, never proof -- the user's verdict is ground
+  truth.
+
 ## Known limitations / things learned
 
 One-liners; full detail in `docs/DECISIONS.md`.

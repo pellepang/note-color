@@ -1,0 +1,149 @@
+"""Named UI states -- "show me `synth-view`" -- for the screenshot harness.
+
+This is the *inside* half of ticket #194. `scripts/uishot.py` starts a
+nested headless compositor and then runs this file inside it; this file
+knows how to stand one view up in a known state and hold it on screen.
+
+A state is a function that takes nothing and returns the top-level widget
+to shoot. Register it in `STATES` and a ticket can say "screenshot
+`drawer-expanded`" and get the same frame every time. Adding one is meant
+to be a short function and a dict entry, nothing more.
+
+Two rules keep the shots honest:
+
+* The `QApplication` comes from `notecolor.gui.app.build_app()`, so the
+  font and app id are the real ones. A harness that builds its own
+  application screenshots a program that does not exist.
+* Audio is never opened. Every state runs against a stub controller with
+  no `SoundEngine`, exactly as `tests/test_synth_view.py` does -- the
+  headless compositor has no sound device, and a view that needed one to
+  render would be a bug in the view.
+
+Run directly for a quick eyeball inside an existing compositor:
+
+    .venv/bin/python scripts/ui_states.py synth-view
+
+It prints `READY <name>` on stdout once the window has actually painted a
+frame, so the harness can capture on a signal rather than a guessed sleep.
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                os.pardir, "src"))
+
+
+class _NullController:
+    """The `SynthView` controller surface, wired to nothing.
+
+    Mirrors `tests/test_synth_view.py`'s `StubController`. Kept as its own
+    copy rather than imported from `tests/`: a screenshot harness that
+    breaks because a test file was refactored is a harness nobody trusts.
+    """
+
+    def __init__(self, patch):
+        self._patch = patch
+
+    def sound_engine_provider(self):
+        return None
+
+    def initial_patch(self):
+        return self._patch
+
+    def record_note_on(self, pitch, velocity=1.0):
+        pass
+
+    def record_note_off(self, pitch):
+        pass
+
+    def toggle_recording(self):
+        pass
+
+    def is_recording(self):
+        return False
+
+    def toggle_play(self):
+        pass
+
+    def panic(self):
+        pass
+
+
+def _synth_view():
+    """The Synth View as it opens: three default modules, drawer as saved."""
+    from notecolor.gui.synth_view import SynthView
+    from notecolor.settings import patch_format
+
+    return SynthView(_NullController(patch_format.new_patch(name="Init")))
+
+
+def _synth_view_drawer_expanded():
+    view = _synth_view()
+    view.drawer.set_expanded(True)
+    return view
+
+
+def _synth_view_drawer_collapsed():
+    view = _synth_view()
+    view.drawer.set_expanded(False)
+    return view
+
+
+#: name -> zero-argument builder returning the top-level widget to shoot.
+STATES = {
+    "synth-view": _synth_view,
+    "drawer-expanded": _synth_view_drawer_expanded,
+    "drawer-collapsed": _synth_view_drawer_collapsed,
+}
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="ui_states.py",
+        description="Show one named UI state and hold it (see scripts/uishot.py).")
+    parser.add_argument("state", nargs="?", choices=sorted(STATES),
+                        help="the state to show; omit with --list")
+    parser.add_argument("--list", action="store_true",
+                        help="print the known state names and exit")
+    parser.add_argument("--size", metavar="WxH",
+                        help="resize the window before showing it")
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if args.list:
+        for name in sorted(STATES):
+            print(name)
+        return 0
+    if not args.state:
+        build_parser().error("a state name is required (or --list)")
+
+    from PySide6 import QtCore
+
+    from notecolor.gui.app import build_app
+
+    app = build_app()
+    widget = STATES[args.state]()
+    if args.size:
+        width, _, height = args.size.partition("x")
+        widget.resize(int(width), int(height))
+    widget.show()
+
+    # `READY` goes out only after the window has actually painted, so the
+    # harness captures a drawn frame rather than whatever the compositor
+    # had up when a fixed sleep expired. Two zero-timers after the first
+    # exposure: the first returns to the event loop, the second runs after
+    # the frame it queued has been committed.
+    def announce():
+        QtCore.QTimer.singleShot(0, lambda: (
+            print(f"READY {args.state}", flush=True)))
+
+    QtCore.QTimer.singleShot(0, announce)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
