@@ -659,6 +659,7 @@ class SynthView(QtWidgets.QMainWindow):
         super().showEvent(event)
         if not self._shown_once:
             self._shown_once = True
+            self._claim_voice_budget(config.POLYPHONY_SYNTH_VIEW)
             self._apply_patch(self._initial_patch)
         # Nothing else in this window competes for keyboard focus (module
         # windows/knobs/drawer rows are all NoFocus), but nothing hands the
@@ -666,6 +667,30 @@ class SynthView(QtWidgets.QMainWindow):
         # widget's `keyPressEvent` exists to handle (note preview, Tab,
         # Shift+M, octave) never reaches it at all.
         self.keyboard_band.setFocus()
+
+    def closeEvent(self, event):
+        """Hands the voice budget back. The `SoundEngine` outlives this
+        window (one per process, `SessionState.ensure_sound_engine()`), so
+        a cap claimed on show and never released would quietly shrink
+        every other tool in the session to 16 voices."""
+        self._claim_voice_budget(None)
+        super().closeEvent(event)
+
+    def _claim_voice_budget(self, value):
+        """Points the shared engine's voice cap at `value` for as long as
+        this view is open, or back at its own context setting with `None`.
+
+        Sixteen rather than `POLYPHONY_STANDALONE`'s forty, because the
+        budget this gives back is what the effects bus spends -- see
+        `config.POLYPHONY_SYNTH_VIEW` for the measurements, and decision 55.
+        A missing engine (no audio device, or a stub in tests) is a silent
+        no-op, exactly as `_register_patch_live()` treats one."""
+        engine = self._sound_engine()
+        if engine is None:
+            return
+        override = getattr(engine, "set_polyphony_override", None)
+        if override is not None:
+            override(value)
 
     # -- module factory (Canvas's drop callback) ----------------------------
 
@@ -786,16 +811,21 @@ class SynthView(QtWidgets.QMainWindow):
 
     # -- patch switching / per-patch workspace state -------------------------
 
+    def _sound_engine(self):
+        """The process's one `SoundEngine`, or `None` if there isn't one
+        (no audio device, or a controller stub in tests). Every caller
+        treats `None` as a silent no-op rather than an error: the view is
+        usable without audio, and always has been."""
+        provider = getattr(self.controller, "sound_engine_provider", None)
+        return provider() if provider is not None else None
+
     def _register_patch_live(self, patch):
         """Writes `patch` into the live synth engine's name -> `Patch` map
         (`synth_engine.SynthEngine.patches`), so a preview note picks up an
         edit immediately -- no save required. A missing engine (no audio
         device) or an engine with no such map (a bare stub in tests, say)
         is a silent no-op."""
-        provider = getattr(self.controller, "sound_engine_provider", None)
-        if provider is None:
-            return
-        sound_engine = provider()
+        sound_engine = self._sound_engine()
         if sound_engine is None:
             return
         inner = getattr(sound_engine, "engine", None)

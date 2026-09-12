@@ -568,6 +568,17 @@ POLYPHONY_SYNTH_DUAL = 28        # voice cap while the synth tool's layout 2 has
                                   # because the same budget is now shared by two engines whose per-voice costs
                                   # differ, and a drum hit arriving to find every slot held by sustained synth
                                   # notes is the audible failure this margin buys off.
+POLYPHONY_SYNTH_VIEW = 16        # voice cap while the GUI Synth View is open (#180). Lower than every other
+                                  # context on purpose: the budget it gives back is what pays for the effects
+                                  # bus. Measured on the project owner's machine at 512/44100 (11.61ms per
+                                  # callback): 40 voices costs 10.87ms -- 93.6% of the budget, i.e. the cap
+                                  # #100 measured as safe leaves nothing for anything downstream of the mix.
+                                  # 16 costs ~3.6ms (~31%), and the whole shipped bus (delay + chorus) is
+                                  # ~0.28ms (~2.4%) however many notes are down, since it runs once on the
+                                  # summed mix rather than per voice (decision 40). Sixteen simultaneous
+                                  # voices is also more than a two-row key band can physically ask for; the
+                                  # figure is worth revisiting when MIDI input lands (#173), because a
+                                  # sustain pedal can hold far more notes than ten fingers can.
 SYNTH_KEY_DIM_LIGHTNESS = 0.20   # lightness of an idle key in the input layer -- the same "visible but plainly
                                   # off" floor DIM_LIGHTNESS gives the wheel view's inactive wedges.
 SYNTH_KEY_LIT_LIGHTNESS = 0.62   # lightness of a key while its note is sounding.

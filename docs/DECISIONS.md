@@ -59,3 +59,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The piano roll editing surface reversed into its own panel (issue #155 reopened by hands-on use)](decisions/52-the-piano-roll-editing-surface-reversed-into-its-own-panel-issue-155-reopened-by-hands-on-use.md)
 - [The GUI screenshot harness: a nested headless compositor (issue #194)](decisions/53-the-gui-screenshot-harness-a-nested-headless-compositor-issue-194.md)
 - [Synth View footer, Phase 1: collapse deleted, and a padding rule that had been clipping text (issues #195, #196, #197)](decisions/54-synth-view-footer-phase-1-collapse-deleted-padding-as-a-clipping-cause-issues-195-196-197.md)
+- [The Synth View's runtime: desktop-first, 16 voices, and the effects bus that was already there (issue #180, map #179)](decisions/55-synth-view-runtime-desktop-first-16-voices-and-the-bus-that-was-already-there-issue-180.md)

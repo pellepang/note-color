@@ -725,6 +725,27 @@ One-liners; full rationale in `docs/DECISIONS.md`.
   clips -- horizontally in module titles, vertically (cut descenders) in
   drawer rows. State `padding` explicitly wherever geometry is computed.
   The global rule is still there and still a hazard.
+- **The Synth View's effects bus was built in #114 and never wired up**
+  (#180, re-scoping #179): `audio/effects.py` has shipped `Delay`,
+  `Chorus` and an order-honouring `EffectsChain` all along, and
+  `sound_engine.py` runs it on the summed mix. Nothing installs it --
+  `set_effects()`'s only caller is `SoundEngine.__init__` -- so an effect
+  knob edits a `Patch` field nothing reads. #179 had concluded "no effect
+  bus at all" from a grep of `synth_engine.py`, the per-voice engine,
+  which correctly contains none.
+- **Per-voice effects are arithmetically impossible in Python**, which is
+  why decision 40's shared bus stands: 40 voices already cost 93.6% of
+  the 11.61ms callback budget, and one per-voice chorus would want 79.3%
+  more. The whole shared bus costs ~2.4% at any polyphony.
+- **The Synth View caps polyphony at 16** (`POLYPHONY_SYNTH_VIEW`),
+  claimed on show and released in `closeEvent` since the `SoundEngine` is
+  process-wide. The headroom is what pays for the effects bus, and a
+  two-row key band cannot ask for more than ten fingers plus tails.
+  Provisional against MIDI input (#173) and a sustain pedal.
+- **The Synth View is desktop-first**; CLAUDE.md's Raspberry Pi
+  constraint covers the *detector*, not a polysynth (a Pi is over budget
+  on voices alone). Every-OS portability is a later goal. Stated because
+  an unstated constraint vetoes decisions silently.
 - **GUI tests force `QT_QPA_PLATFORM=offscreen`**, they do not
   `setdefault` it: a Wayland developer exports their own, and the suite
   was opening real windows into the live session where a tiling WM

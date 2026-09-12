@@ -22,7 +22,7 @@ scipy_signal = pytest.importorskip("scipy.signal")
 
 from PySide6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
-from notecolor.settings import patch_format  # noqa: E402
+from notecolor.settings import config, patch_format  # noqa: E402
 from notecolor.tui import synth_params  # noqa: E402
 from notecolor.tui.synth_layout import NOTE_CHANNEL, PAD_CHANNEL  # noqa: E402
 from notecolor.notation.score_audition import PIANO_LOWER_ROW, pitch_for_key  # noqa: E402
@@ -105,6 +105,7 @@ class StubSoundEngine:
         self.note_on_calls = []
         self.released = []
         self.all_notes_off_called = False
+        self.polyphony_overrides = []
 
     def note_on(self, event):
         self.note_on_calls.append(event)
@@ -115,6 +116,9 @@ class StubSoundEngine:
 
     def all_notes_off(self):
         self.all_notes_off_called = True
+
+    def set_polyphony_override(self, value):
+        self.polyphony_overrides.append(value)
 
 
 class StubController:
@@ -164,6 +168,18 @@ def _make_view(patch=None, sound_engine=None):
 
 
 # --- default modules ---------------------------------------------------
+
+
+def test_the_view_claims_a_smaller_voice_budget_and_hands_it_back(app):
+    """#180: 16 voices while this view is open, so the effects bus has a
+    budget to spend. The engine outlives the window, so the release half
+    matters as much as the claim -- without it every other tool in the
+    session inherits the smaller cap."""
+    engine = StubSoundEngine()
+    view, _controller, _patch = _make_view(sound_engine=engine)
+    assert engine.polyphony_overrides == [config.POLYPHONY_SYNTH_VIEW]
+    view.close()
+    assert engine.polyphony_overrides == [config.POLYPHONY_SYNTH_VIEW, None]
 
 
 def test_default_modules_open_on_first_show(app):
