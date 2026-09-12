@@ -15,6 +15,15 @@ QtWebEngine, which arrives with `PySide6-Addons`.
 physics loop on `requestAnimationFrame` and need a moment to hang and stop
 swinging before the frame is worth looking at.
 
+`--js` runs script in the page before the settle, so a prototype's own controls
+can be driven — that is how a set of variant shots gets taken. `--clip` crops
+to one element. `--batch` does a whole set in one process, reloading the page
+between states so they cannot contaminate each other:
+
+    python scripts/htmlshot.py <file> --batch states.json --outdir shots/
+
+where `states.json` is `[{"name": "...", "js": "...", "settle": 2.5}, ...]`.
+
 This is a pre-handover self-check, never a verdict. #191 standing decision 8:
 an agent does not declare a GUI result correct from its own screenshot.
 """
@@ -48,7 +57,61 @@ from PySide6.QtWebEngineCore import QWebEngineSettings  # noqa: E402
 from PySide6.QtWebEngineWidgets import QWebEngineView   # noqa: E402
 
 
-def shoot(path, out, width, height, settle_ms, full_page):
+def _run_js(app, view, script, timeout_ms=5_000):
+    """Run script in the page and wait for its result."""
+    box = {}
+    view.page().runJavaScript(script, lambda v: box.setdefault("v", v))
+    spin = QtCore.QElapsedTimer(); spin.start()
+    while "v" not in box and spin.elapsed() < timeout_ms:
+        app.processEvents(QtCore.QEventLoop.AllEvents, 20)
+    return box.get("v")
+
+
+def _spin(app, ms):
+    spin = QtCore.QElapsedTimer(); spin.start()
+    while spin.elapsed() < ms:
+        app.processEvents(QtCore.QEventLoop.AllEvents, 30)
+
+
+def _load(app, view, url):
+    done = {}
+    view.loadFinished.connect(lambda ok: done.setdefault("ok", ok))
+    view.load(url)
+    spin = QtCore.QElapsedTimer(); spin.start()
+    while "ok" not in done and spin.elapsed() < 30_000:
+        app.processEvents(QtCore.QEventLoop.AllEvents, 50)
+    return done.get("ok", False)
+
+
+def _capture(app, view, out, clip):
+    pixmap = view.grab()
+    if pixmap.isNull() or pixmap.size().isEmpty():
+        raise SystemExit("htmlshot: grabbed an empty frame")
+    image = pixmap.toImage()
+    if clip:
+        # A JS Array does not marshal back through runJavaScript here (it
+        # arrives empty), so the rect comes over as a comma-joined string.
+        rect = _run_js(app, view, f"""(() => {{
+            const el = document.querySelector({clip!r});
+            if (!el) return "";
+            const r = el.getBoundingClientRect();
+            return [r.left, r.top, r.width, r.height].join(",");
+        }})()""")
+        if rect:
+            dpr = pixmap.devicePixelRatio() or 1
+            x, y, w, h = (int(float(v) * dpr) for v in str(rect).split(","))
+            image = image.copy(QtCore.QRect(max(0, x - 1), max(0, y - 1),
+                                            w + 2, h + 2))
+        else:
+            print(f"htmlshot: warning — no element matched {clip!r}",
+                  file=sys.stderr)
+    if not image.save(str(out)):
+        raise SystemExit(f"htmlshot: could not write {out}")
+    print(f"{out}  {image.width()}x{image.height()}")
+
+
+def shoot(path, out, width, height, settle_ms, full_page,
+          js=None, clip=None, batch=None, outdir=None):
     app = QtWidgets.QApplication(sys.argv[:1])
     if QtGui.QGuiApplication.platformName() != "offscreen":
         raise SystemExit("htmlshot: refusing to run on platform "
@@ -73,15 +136,26 @@ def shoot(path, out, width, height, settle_ms, full_page):
         done["loaded"] = True
         done["ok"] = ok
 
-    view.loadFinished.connect(on_load)
-    view.load(QtCore.QUrl.fromLocalFile(str(pathlib.Path(path).resolve())))
-
-    deadline = QtCore.QElapsedTimer()
-    deadline.start()
-    while not done["loaded"] and deadline.elapsed() < 30_000:
-        app.processEvents(QtCore.QEventLoop.AllEvents, 50)
-    if not done["ok"]:
+    url = QtCore.QUrl.fromLocalFile(str(pathlib.Path(path).resolve()))
+    if not _load(app, view, url):
         raise SystemExit(f"htmlshot: failed to load {path}")
+    done["ok"] = True
+
+    if batch:
+        import json
+        states = json.loads(pathlib.Path(batch).read_text())
+        base = pathlib.Path(outdir or ".")
+        base.mkdir(parents=True, exist_ok=True)
+        for i, st in enumerate(states):
+            if i:                       # reload so states cannot contaminate
+                if not _load(app, view, url):
+                    raise SystemExit("htmlshot: reload failed")
+            _spin(app, 900)             # let the physics find its rest pose
+            if st.get("js"):
+                _run_js(app, view, st["js"])
+            _spin(app, int(float(st.get("settle", 2.0)) * 1000))
+            _capture(app, view, base / f"{st['name']}.png", st.get("clip", clip))
+        return
 
     if full_page:
         # Grow the view to the document's own height so nothing is cut off.
@@ -96,29 +170,22 @@ def shoot(path, out, width, height, settle_ms, full_page):
             view.setFixedSize(width, min(int(got["h"]) + 8, 12_000))
             app.processEvents(QtCore.QEventLoop.AllEvents, 50)
 
-    # Let webfonts land and any animation settle.
-    spin = QtCore.QElapsedTimer()
-    spin.start()
-    while spin.elapsed() < settle_ms:
-        app.processEvents(QtCore.QEventLoop.AllEvents, 30)
-
-    pixmap = view.grab()
-    if pixmap.isNull() or pixmap.size().isEmpty():
-        raise SystemExit("htmlshot: grabbed an empty frame")
-    image = pixmap.toImage()
-    if image.allGray():
-        print("htmlshot: warning — frame is uniform; WebEngine may not have "
-              "painted", file=sys.stderr)
-    if not image.save(str(out)):
-        raise SystemExit(f"htmlshot: could not write {out}")
-    print(f"{out}  {image.width()}x{image.height()}")
+    if js:
+        _spin(app, 900)
+        _run_js(app, view, js)
+    _spin(app, settle_ms)               # webfonts land, animation settles
+    _capture(app, view, out, clip)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("html")
-    ap.add_argument("out")
+    ap.add_argument("out", nargs="?", default="out.png")
+    ap.add_argument("--js", help="script to run in the page before capture")
+    ap.add_argument("--clip", help="CSS selector to crop to")
+    ap.add_argument("--batch", help="JSON list of {name, js, settle, clip}")
+    ap.add_argument("--outdir", help="directory for --batch output")
     ap.add_argument("--width", type=int, default=1860)
     ap.add_argument("--height", type=int, default=1000)
     ap.add_argument("--settle", type=float, default=2.5,
@@ -127,7 +194,8 @@ def main():
                     help="do not grow the view to the document height")
     args = ap.parse_args()
     shoot(args.html, args.out, args.width, args.height,
-          int(args.settle * 1000), not args.viewport_only)
+          int(args.settle * 1000), not args.viewport_only,
+          js=args.js, clip=args.clip, batch=args.batch, outdir=args.outdir)
 
 
 if __name__ == "__main__":
