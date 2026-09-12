@@ -179,13 +179,21 @@ STATUS_TIMER_MS = 200
 #: (ticket #184) -- big enough that dragging for more room never feels
 #: capped in ordinary use, without handing the whole window to the
 #: keyboard band.
-_FOOTER_MAX_HEIGHT = 640
+#: Ceiling for the footer. Deliberately far larger than any real window:
+#: the user asked for the footer to go "so far up that it fills the module
+#: canvas", so the binding limit should be `_CANVAS_MIN_HEIGHT` below --
+#: an actual decision about how much canvas to leave -- and not a
+#: leftover constant. `_FooterSplitter.effective_ceiling()` takes the
+#: smaller of the two, so on every real window this one never binds.
+_FOOTER_MAX_HEIGHT = 1 << 16
 
 #: How little vertical room the canvas row (drawer + module canvas) may be
-#: squeezed to, so the footer has somewhere to grow into. Its natural
-#: `minimumSizeHint()` is the drawer's full height, which left the footer
-#: no travel at all (#196).
-_CANVAS_MIN_HEIGHT = 120
+#: squeezed to. This is what actually stops the footer, and it is a
+#: deliberately small sliver: "fills the module canvas" means the canvas
+#: keeps just enough to stay grabbable, not a comfortable working height.
+#: (Its natural `minimumSizeHint()` is the drawer's full 356px, which left
+#: the footer no travel at all -- the original #196 bug.)
+_CANVAS_MIN_HEIGHT = 24
 
 
 #: Same dot spacing `synth_workspace.Canvas.paintEvent` uses for its own

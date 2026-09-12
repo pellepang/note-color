@@ -385,14 +385,37 @@ class KeyBoxRow(QtWidgets.QWidget):
         self.updateGeometry()
         self.update()
 
-    def sizeHint(self):
-        return self.minimumSizeHint()
+    #: The smallest height a key row may be squeezed to before it stops
+    #: being drawn at all. Not zero: a row that can reach exactly 0 makes
+    #: the splitter's floor ambiguous and the last pixel of the drag
+    #: jumpy. Small enough that "only the upper footer rows are visible"
+    #: is reachable by dragging (#196, the user's own description of how
+    #: far down the footer should go).
+    MIN_HEIGHT = 6
 
-    def minimumSizeHint(self):
+    def sizeHint(self):
+        """The row's *natural* size -- the reference box size it is drawn
+        at when nothing is squeezing it."""
         count = max(1, len(self._boxes))
         width = count * (self.BOX_SIZE + self.GAP) - self.GAP
         height = self.BOX_SIZE + self.STAGGER + 2 * self.MARGIN
         return QtCore.QSize(width, height)
+
+    def minimumSizeHint(self):
+        """Deliberately *not* `sizeHint()` any more (#196).
+
+        It used to be the same value, which made the reference box size a
+        hard floor for the whole footer: the key rows could grow but never
+        shrink, so the footer could not be dragged down past them. The
+        user asked for it to "go so far down you only see the upper footer
+        rows", and this is the number that was preventing it.
+
+        Width still carries the real horizontal minimum; only the vertical
+        floor is given up.
+        """
+        count = max(1, len(self._boxes))
+        width = count * (self.BOX_SIZE + self.GAP) - self.GAP
+        return QtCore.QSize(width, self.MIN_HEIGHT)
 
     def _geometry(self):
         """(box_side, gap, stagger, margin, x_offset, y_offset) actually
@@ -409,9 +432,16 @@ class KeyBoxRow(QtWidgets.QWidget):
         gap = float(self.GAP)
 
         ref_height = self.BOX_SIZE + self.STAGGER + 2 * self.MARGIN
-        scale_h = max(1.0, self.height() / ref_height) if ref_height else 1.0
-        scale_w = max(1.0, (self.width() - (count - 1) * gap) / (count * self.BOX_SIZE))
-        scale = min(scale_h, scale_w)
+        # No `max(1.0, ...)` floor on the scale any more (#196). It was
+        # there because `minimumSizeHint()` guaranteed the row was never
+        # handed less than the reference height, so a scale below 1 could
+        # only mean a layout bug. That guarantee is deliberately gone --
+        # the footer is now draggable down past the keys -- so the row has
+        # to be able to draw itself smaller than its reference instead of
+        # overflowing the space it was actually given.
+        scale_h = (self.height() / ref_height) if ref_height else 1.0
+        scale_w = (self.width() - (count - 1) * gap) / (count * self.BOX_SIZE)
+        scale = max(0.0, min(scale_h, scale_w))
 
         box_side = self.BOX_SIZE * scale
         stagger = self.STAGGER * scale

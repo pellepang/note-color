@@ -500,15 +500,19 @@ def test_real_interactive_drag_tracks_smoothly_above_the_minimum(app):
     QtWidgets.QApplication.processEvents()
     handle = view.splitter.handle(1)
 
-    travel = view.splitter.effective_ceiling() - view.splitter.floor
-    assert travel >= 90, f"no room to test a drag in: {travel}px"
-    grow = int(travel * 0.6)
+    # Measured from where the footer actually starts, which is its
+    # natural `sizeHint()` -- above the floor since #196 gave the key
+    # rows a vertical minimum well below their reference size.
+    start = footer.height()
+    headroom = view.splitter.effective_ceiling() - start
+    assert headroom >= 90, f"no room to grow into: {headroom}px"
+    grow = int(headroom * 0.6)
     shrink = grow // 3
 
     _drag_handle(handle, 400, [-grow])
     grown = footer.height()
     assert footer.isVisible() is True
-    assert abs(grown - (view.splitter.floor + grow)) <= 15
+    assert abs(grown - (start + grow)) <= 15
 
     _drag_handle(handle, 250, [shrink])
 

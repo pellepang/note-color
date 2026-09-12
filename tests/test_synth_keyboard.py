@@ -291,16 +291,22 @@ def test_pad_row_boxes_never_marked_black(app):
 
 # -- KeyBoxRow: taller fixed height + is_black storage -----------------------
 
-def test_key_box_row_minimum_height_grew_to_fit_the_stagger(app):
+def test_key_box_row_natural_height_fits_the_stagger(app):
     # Ticket #184 bug #2: KeyBoxRow no longer pins itself to a fixed
     # pixel size (it resizes to fill whatever room its layout gives it,
-    # via `_geometry()` at paint time) -- but it still reports a real
-    # minimum, with equal top/bottom margin so the black+white contour
-    # centers instead of sitting flush top/bottom.
+    # via `_geometry()` at paint time) -- but its *natural* size still
+    # allows equal top/bottom margin, so the black+white contour centers
+    # instead of sitting flush top/bottom.
+    #
+    # This reads `sizeHint()`, not `minimumSizeHint()`. The two were the
+    # same number until #196, when the vertical minimum was given up so
+    # the footer could be dragged down past the keys; the natural size
+    # this test is actually about is unchanged.
     assert sk.KeyBoxRow.BOX_SIZE + sk.KeyBoxRow.STAGGER > sk.KeyBoxRow.BOX_SIZE
     row = sk.KeyBoxRow()
     expected = sk.KeyBoxRow.BOX_SIZE + sk.KeyBoxRow.STAGGER + 2 * sk.KeyBoxRow.MARGIN
-    assert row.minimumSizeHint().height() == expected
+    assert row.sizeHint().height() == expected
+    assert row.minimumSizeHint().height() < expected
     assert row.sizePolicy().verticalPolicy() == QtWidgets.QSizePolicy.Expanding
     assert row.sizePolicy().horizontalPolicy() == QtWidgets.QSizePolicy.Expanding
 
@@ -989,8 +995,11 @@ def test_key_box_drop_assigns_just_that_key(app):
     # Boxes are centered horizontally (ticket #186), so the first box no
     # longer starts at x=0 -- ask `_geometry()` for the real offset rather
     # than assuming one.
-    _box_side, _gap, _stagger, _margin, x_offset, _y_offset = key_box_row._geometry()
-    box_x = x_offset + 0.5 * sk.KeyBoxRow.BOX_SIZE  # inside the first box
+    box_side, _gap, _stagger, _margin, x_offset, _y_offset = key_box_row._geometry()
+    # Half a *drawn* box in, not half a `BOX_SIZE`: since #196 the row
+    # scales below its reference size when squeezed, so the reference
+    # width can overshoot the first box entirely.
+    box_x = x_offset + 0.5 * box_side  # inside the first box
 
     key_box_row.dropEvent(_FakeDropEvent("Beta", x=box_x))
 
