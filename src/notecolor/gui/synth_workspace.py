@@ -672,7 +672,24 @@ class Drawer(QtWidgets.QWidget):
         self._toggle_button.clicked.connect(self.toggle)
         self._outer_layout = outer
         outer.addWidget(self._toggle_button)
-        outer.addWidget(self._content, 1)
+
+        # The drawer scrolls rather than clips when it is given less height
+        # than its rows need (#196). Making the footer draggable means the
+        # canvas row above it can be squeezed well below the drawer's own
+        # natural height, and without this the bottom rows were simply cut
+        # off mid-row -- with the group labels sliced through the middle,
+        # which reads as a rendering bug rather than as "there is more
+        # below". A scroll area is the difference between running out of
+        # room and looking broken.
+        self._scroll = QtWidgets.QScrollArea(self)
+        self._scroll.setWidget(self._content)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self._scroll.setStyleSheet("background: transparent; border: none;")
+        self._scroll.viewport().setStyleSheet("background: transparent;")
+        outer.addWidget(self._scroll, 1)
 
     def _group_label(self, text):
         label = QtWidgets.QLabel(text, self)
@@ -685,7 +702,9 @@ class Drawer(QtWidgets.QWidget):
 
     def set_expanded(self, expanded):
         self._expanded = expanded
-        self._content.setVisible(expanded)
+        # The scroll area, not `_content`: `_content` is now its child, and
+        # hiding a scroll area's widget leaves the viewport itself showing.
+        self._scroll.setVisible(expanded)
         self.setFixedWidth(self.WIDTH if expanded else self.COLLAPSED_WIDTH)
         self.toggled.emit(expanded)
 

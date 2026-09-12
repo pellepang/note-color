@@ -36,21 +36,35 @@ def app():
     return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
+#: Every `SynthView` `_make_view()` has built in the current test, so
+#: teardown can close exactly those.
+_MADE_VIEWS = []
+
+
 @pytest.fixture(autouse=True)
 def _close_synth_view_windows():
     """Ticket #184 follow-up: `_make_view()` never closed the `SynthView`
     it created, so every test in this module left its `QMainWindow` (and
     its 200ms status-refresh `QTimer`) alive for the rest of the run.
     That pollution was harmless for the assertions this file used to
-    make, but the new splitter-collapse tests below hit real,
-    order-dependent Qt layout flakiness once enough leaked windows piled
-    up in the same offscreen `QApplication` -- closing each `SynthView`
-    (and letting Qt process the resulting deferred-delete events) after
-    every test removes that pollution instead of working around it."""
+    make, but the splitter tests below hit real, order-dependent Qt
+    layout flakiness once enough leaked windows piled up in the same
+    offscreen `QApplication`.
+
+    Closes only the views *this module* made. It used to close every
+    `QMainWindow` in the application, which reached into other modules'
+    leftovers -- and a `StudioWindow` left dirty by
+    `test_studio_window.py` answers `close()` with a modal
+    `QMessageBox.question()` that nothing in a test run will ever
+    dismiss. The whole suite hung there, forever, with no output: the
+    exact "modal dialog that never returned" failure `conftest.py`
+    warns about, reintroduced by an over-broad teardown.
+    """
+    _MADE_VIEWS.clear()
     yield
-    for widget in QtWidgets.QApplication.topLevelWidgets():
-        if isinstance(widget, QtWidgets.QMainWindow):
-            widget.close()
+    for view in _MADE_VIEWS:
+        view.close()
+    _MADE_VIEWS.clear()
     QtWidgets.QApplication.processEvents()
 
 
@@ -145,6 +159,7 @@ def _make_view(patch=None, sound_engine=None):
     controller = StubController(sound_engine=sound_engine, patch=patch)
     view = SynthView(controller)
     view.show()
+    _MADE_VIEWS.append(view)
     return view, controller, patch
 
 
@@ -339,7 +354,7 @@ def test_splitter_between_canvas_and_keyboard_band_is_resizable(app):
     assert total > 0
     before = view.keyboard_band.height()
 
-    target = view.splitter.playable_min + 60
+    target = view.splitter.floor + 60
     view.splitter.setSizes([total - target, target])
     QtWidgets.QApplication.processEvents()
 
@@ -350,79 +365,63 @@ def test_splitter_between_canvas_and_keyboard_band_is_resizable(app):
     assert abs(footer.height() - target) <= 15  # nested-layout rounding slack
 
 
-def test_footer_playable_minimum_is_smaller_than_its_full_size_hint(app):
-    # Ticket #184: the floor used to equal the footer's full natural
-    # height with no give at all (see the test this replaces, from
-    # ticket #157). The floor is now the footer's own real, Qt-computed
-    # `minimumSizeHint()` instead of a hand-picked number: `KeyBoxRow`'s
-    # `sizeHint()` deliberately equals its `minimumSizeHint()` (it has no
-    # "preferred" size distinct from its floor -- filling extra room is
-    # `Expanding` sizePolicy's job, not a bigger sizeHint), so this floor
-    # equals the footer's `sizeHint()` too. What actually gives the
-    # splitter handle room to move is growth *above* that floor, up to
-    # `_FOOTER_MAX_HEIGHT` -- checked by the "tracks" test below.
+def test_footer_floor_is_qt_s_own_minimum_and_below_the_ceiling(app):
+    # The floor is the footer's own real, Qt-computed `minimumSizeHint()`
+    # rather than a hand-picked number: `KeyBoxRow`'s `sizeHint()`
+    # deliberately equals its `minimumSizeHint()` (it has no "preferred"
+    # size distinct from its floor -- filling extra room is `Expanding`
+    # sizePolicy's job, not a bigger sizeHint), so this floor equals the
+    # footer's `sizeHint()` too. What gives the handle room to move is
+    # growth *above* that floor, up to `_FOOTER_MAX_HEIGHT`.
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
-    assert 0 < view.splitter.playable_min <= footer.sizeHint().height()
+    assert 0 < view.splitter.floor <= footer.sizeHint().height()
     assert footer.maximumHeight() < 16777215  # not Qt's unbounded default
-    assert view.splitter.playable_min < _FOOTER_MAX_HEIGHT
+    assert view.splitter.floor < _FOOTER_MAX_HEIGHT
 
 
-def test_footer_collapses_fully_below_its_playable_minimum(app):
-    # Dragging (or, here, programmatically requesting) the footer down to
-    # less than its playable minimum must snap it fully shut rather than
-    # clamp it at the minimum -- ticket #184's "shrinks to a sensible
-    # playable minimum, then collapses entirely" requirement. A laid-out
-    # widget can never actually be *sized* to 0 (its children's own
-    # `minimumSizeHint()` floors it), so the collapse is done by hiding
-    # it outright -- `QSplitter` gives a hidden pane zero space on its
-    # own, which is what makes the "0" here real rather than clamped.
+def test_footer_never_collapses_below_its_floor(app):
+    # Ticket #196, the behaviour that replaced collapse-to-zero: asking
+    # for less than the floor clamps there. It must never hide the
+    # footer -- a hidden footer takes the key band, the assignment pill
+    # and the recents rail (and every click target on them) with it, and
+    # the old collapse had no reliable way back.
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
     view.resize(900, 900)
     total = sum(view.splitter.sizes())
 
-    view.splitter.setSizes([total - 1, 1])  # far below the playable minimum
+    view.splitter.setSizes([total - 1, 1])  # far below the floor
     QtWidgets.QApplication.processEvents()
 
-    assert footer.height() == 0
-    assert footer.isVisible() is False
+    assert footer.isVisible() is True
+    assert footer.height() >= view.splitter.floor - 15
 
 
-def test_footer_tracks_a_size_at_or_above_its_playable_minimum(app):
+def test_footer_tracks_a_size_between_floor_and_ceiling(app):
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
     view.resize(900, 900)
     total = sum(view.splitter.sizes())
-    requested = view.splitter.playable_min + 20
+    requested = view.splitter.floor + 20
 
     view.splitter.setSizes([total - requested, requested])
     QtWidgets.QApplication.processEvents()
 
-    assert footer.height() >= view.splitter.playable_min - 15  # nested-layout rounding slack
+    assert footer.height() >= view.splitter.floor - 15  # nested-layout rounding slack
     assert footer.isVisible() is True
 
 
-def test_footer_expands_back_out_of_a_collapsed_state(app):
-    # The hide/show mechanics behind the collapse must also work in
-    # reverse: dragging back out past the playable minimum after having
-    # been fully collapsed must re-show the footer and size it, not
-    # leave it stuck hidden.
+def test_footer_has_real_travel_between_floor_and_ceiling(app):
+    # The other half of #196: the footer "doesn't change size". The pane
+    # above used to claim everything via its own `minimumSizeHint()` (the
+    # drawer's full 356px height), so there was nothing for the footer to
+    # grow into and a drag moved it 0px. There must be real room.
     view, _controller, _patch = _make_view()
-    footer = view.keyboard_band.parentWidget()
     view.resize(900, 900)
-    total = sum(view.splitter.sizes())
-
-    view.splitter.setSizes([total - 1, 1])
-    QtWidgets.QApplication.processEvents()
-    assert footer.height() == 0
-
-    requested = view.splitter.playable_min + 40
-    view.splitter.setSizes([total - requested, requested])
     QtWidgets.QApplication.processEvents()
 
-    assert footer.isVisible() is True
-    assert footer.height() >= view.splitter.playable_min - 15  # nested-layout rounding slack
+    assert view.splitter.effective_ceiling() > view.splitter.floor + 100
 
 
 def _drag_handle(handle, start_global_y, dy_steps):
@@ -453,55 +452,69 @@ def _drag_handle(handle, start_global_y, dy_steps):
     QtWidgets.QApplication.processEvents()
 
 
-def test_real_interactive_drag_collapses_and_reopens_the_footer(app):
-    # Ticket #185: a genuine mouse drag through the handle's own event
-    # handlers (not `setSizes()`) must be able to shrink the footer,
-    # collapse it fully, and then reopen it again -- all in one
-    # exercise, since #184's fix only had `setSizes()`-driven coverage
-    # and turned out not to hold up under a real drag (see
-    # `_CollapsingSplitter`'s docstring for what a direct
-    # `QSplitterPrivate.moveSplitter()` probe found).
+def test_real_interactive_drag_never_makes_the_footer_disappear(app):
+    # The user's report, verbatim: "it doesn't change size and suddenly
+    # just disappears". Driven through `_DragHandle`'s own mouse events
+    # rather than `setSizes()`, because the bug was specific to the drag
+    # path -- the old collapse branch was reachable by mouse and by
+    # nothing else, which is how three rounds of fixes passed their tests
+    # and shipped the bug anyway.
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
     view.resize(900, 900)
+    QtWidgets.QApplication.processEvents()
     handle = view.splitter.handle(1)
 
-    # Drag far down: shrinks the footer, then collapses it fully once
-    # past the playable minimum.
-    _drag_handle(handle, 400, [100] * 8)
-    assert footer.height() == 0
-    assert footer.isVisible() is False
+    travel = view.splitter.effective_ceiling() - view.splitter.floor
+    assert travel >= 90, f"no room to test a drag in: {travel}px"
 
-    # A fresh drag session back up must reopen it and track the new
-    # size, not stay stuck collapsed (the native-Qt failure mode this
-    # class exists to avoid).
-    _drag_handle(handle, 900, [-100] * 8)
+    # Drag far down -- well past where the old code snapped it shut.
+    _drag_handle(handle, 400, [100] * 8)
+
     assert footer.isVisible() is True
-    assert footer.height() >= view.splitter.playable_min - 15
+    assert footer.height() >= view.splitter.floor - 15
+
+    # And it comes straight back up in one drag -- no second drag needed
+    # to recover, which was the native-Qt footgun the old class fought.
+    _drag_handle(handle, 900, [-(travel // 2)])
+    assert footer.isVisible() is True
+    assert footer.height() > view.splitter.floor
 
 
 def test_real_interactive_drag_tracks_smoothly_above_the_minimum(app):
-    # A drag that never crosses the playable minimum should track the
-    # mouse roughly 1:1 rather than jumping or refusing to move. The
-    # footer starts at exactly its playable minimum on a fresh view
-    # (ticket #184's floor == its own sizeHint), so grow it first with
-    # one drag before shrinking it partway back with a second -- neither
-    # step should cross the collapse threshold.
+    # A drag that stays inside floor..ceiling tracks the mouse 1:1 rather
+    # than jumping or refusing to move. The footer starts at exactly its
+    # floor on a fresh view, so grow it first with one drag before
+    # shrinking it partway back with a second -- neither step leaves the
+    # range.
+    #
+    # The distances are derived from the splitter's own range rather than
+    # hardcoded: offscreen, `resize()` is a request, and how much height
+    # the window really ends up with varies with what ran before it. A
+    # hardcoded 150px drag silently became a clamp-to-floor in a full-suite
+    # run while passing on its own -- the test was measuring the window
+    # manager, not the drag.
     view, _controller, _patch = _make_view()
     footer = view.keyboard_band.parentWidget()
     view.resize(900, 900)
+    QtWidgets.QApplication.processEvents()
     handle = view.splitter.handle(1)
 
-    _drag_handle(handle, 400, [-30] * 5)  # -150px: grow footer by ~150
+    travel = view.splitter.effective_ceiling() - view.splitter.floor
+    assert travel >= 90, f"no room to test a drag in: {travel}px"
+    grow = int(travel * 0.6)
+    shrink = grow // 3
+
+    _drag_handle(handle, 400, [-grow])
     grown = footer.height()
     assert footer.isVisible() is True
-    assert grown > view.splitter.playable_min + 100
+    assert abs(grown - (view.splitter.floor + grow)) <= 15
 
-    _drag_handle(handle, 250, [20] * 3)  # +60px: shrink footer by ~60, still above the floor
+    _drag_handle(handle, 250, [shrink])
 
     assert footer.isVisible() is True
     assert footer.height() < grown
-    assert abs(footer.height() - (grown - 60)) <= 15
+    assert abs(footer.height() - (grown - shrink)) <= 15
 
 
 def test_per_patch_workspace_is_restored_on_switching_back(app):
@@ -602,3 +615,37 @@ def test_per_patch_workspace_restores_every_tabs_assignments(app):
 
     view._apply_patch(patch_a)
     assert band.snapshot_assignments() == expected
+
+
+def test_footer_keeps_its_height_when_the_window_is_resized(app):
+    # On a tiling WM the window is resized constantly and not by the
+    # user's choosing, so a footer that forgot its height on every resize
+    # would read as the same "it doesn't change size / it disappears"
+    # bug from the other direction. The canvas absorbs the change.
+    #
+    # Only grows the window: shrinking it far enough legitimately forces
+    # the footer down off its chosen height, which is not what this is
+    # about.
+    view, _controller, _patch = _make_view()
+    footer = view.keyboard_band.parentWidget()
+    # `setFixedHeight`, not `resize`: offscreen there is no window
+    # manager holding the window at a requested size, and a layout
+    # invalidation part-way through a drag snapped it back to its own
+    # minimum -- the drag then had nothing left to move and the test was
+    # measuring that, not the splitter.
+    view.resize(900, 900)
+    QtWidgets.QApplication.processEvents()
+
+    travel = view.splitter.effective_ceiling() - view.splitter.floor
+    assert travel >= 60, f"no room to test in: {travel}px"
+    target = view.splitter.floor + 60
+    total = sum(view.splitter.sizes())
+    view.splitter.setSizes([total - target, target])
+    QtWidgets.QApplication.processEvents()
+    assert footer.height() == target
+
+    for height in (950, 1000, 1100, 900):
+        view.resize(900, height)
+        QtWidgets.QApplication.processEvents()
+        assert footer.isVisible() is True
+        assert footer.height() == target, f"lost its height at window height {height}"

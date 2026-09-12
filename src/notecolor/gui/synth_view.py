@@ -181,6 +181,12 @@ STATUS_TIMER_MS = 200
 #: keyboard band.
 _FOOTER_MAX_HEIGHT = 640
 
+#: How little vertical room the canvas row (drawer + module canvas) may be
+#: squeezed to, so the footer has somewhere to grow into. Its natural
+#: `minimumSizeHint()` is the drawer's full height, which left the footer
+#: no travel at all (#196).
+_CANVAS_MIN_HEIGHT = 120
+
 
 #: Same dot spacing `synth_workspace.Canvas.paintEvent` uses for its own
 #: background grid (`CANVAS_GRID_SPACING`) -- reused rather than picked
@@ -214,9 +220,9 @@ class _FooterSurface(QtWidgets.QWidget):
 
 
 class _DragHandle(QtWidgets.QSplitterHandle):
-    """The one handle in `_CollapsingSplitter`: computes the footer's new
+    """The one handle in `_FooterSplitter`: computes the footer's new
     size itself, straight from the mouse's own on-screen movement, and
-    hands it to `_CollapsingSplitter.setSizes()` -- it never calls
+    hands it to `_FooterSplitter.setSizes()` -- it never calls
     `super().mousePressEvent()`/`mouseMoveEvent()`, so Qt's own native
     splitter-drag math (`QSplitterPrivate::moveSplitter()`) never runs at
     all for this handle (see the class docstring below for why that
@@ -250,103 +256,104 @@ class _DragHandle(QtWidgets.QSplitterHandle):
         event.accept()
 
 
-class _CollapsingSplitter(QtWidgets.QSplitter):
-    """A splitter whose `collapse_index` pane snaps fully shut once
-    dragged below its own playable minimum, instead of clamping there
-    (ticket #184's "shrinks to a playable minimum, then collapses
-    entirely" footer behaviour).
+def _effective_minimum_height(widget):
+    """The height `QSplitter` will actually refuse to shrink `widget` past.
 
-    Bug-report root cause (follow-up pass on #184): the first version of
-    this class kept the collapse pane's real Qt `minimumHeight` at
-    `playable_min` and flipped it down to `0` (then back up) on every
-    snap, so it could actually *reach* 0 through `setSizes()` (which
-    always honours a pane's declared minimum, unlike interactive
-    dragging). But `setChildrenCollapsible(True)` left Qt's *own* native
-    collapse-on-drag logic active at the same time, and that logic reads
-    the pane's *current* minimum too -- so the two collapse mechanisms
-    fought over the same mutating value: whichever one saw `minimumHeight
-    == 0` first would treat the entire remaining drag as "past the
-    collapse point", snapping the footer shut (or wide open) after a
-    pixel or two of movement. That one shared cause is what produced the
-    "resize range is way too short" report *and*, once the footer
-    collapsed on the first stray drag, the "rail/pill/keys are invisible,
-    no popup opens" reports -- there was nothing wrong with those widgets
-    themselves, their parent's height had just been squeezed to ~0.
+    An explicit `setMinimumHeight()` *overrides* `minimumSizeHint()` -- so
+    reading the hint alone reports a floor Qt is not enforcing. That
+    distinction is not academic here: `main_row`'s natural hint is the
+    drawer's full 356px while its set minimum is `_CANVAS_MIN_HEIGHT`, and
+    using the hint left the footer with a computed ceiling *equal to its
+    floor* on any window shorter than ~840px -- i.e. no travel at all on
+    the 768px-tall screen this is actually used on, which is the very bug
+    #196 is about.
+    """
+    if widget is None:
+        return 0
+    explicit = widget.minimumHeight()
+    return explicit if explicit > 0 else widget.minimumSizeHint().height()
 
-    A second attempt at the fix (still same follow-up pass) tried keeping
-    the pane's real Qt `minimumHeight` at a constant `0` and letting
-    `_snap()` alone push its requested size down to `0`, still wired
-    through Qt's own `splitterMoved` signal + `setChildrenCollapsible
-    (False)`. That looked right and passed every test in this file
-    (all of which drive it through `setSizes()`), but ticket #185's
-    direct-`QSplitterPrivate::moveSplitter()` probing -- the exact call
-    Qt's own `QSplitterHandle.mouseMoveEvent()` makes on every real drag
-    -- showed it never actually holds up under a *real* interactive drag:
-    with `childrenCollapsible(False)`, Qt's own position-clamping refuses
-    to ever report a handle position past the pane's real
-    `minimumSizeHint()` floor in the first place, so `splitterMoved`
-    never fires with a below-floor value and `_snap()`'s collapse branch
-    was simply unreachable by mouse -- only `setSizes()` (i.e. only the
-    test suite) could ever trigger it. Flipping to
-    `childrenCollapsible(True)` instead does let a real drag cross that
-    floor and collapse the pane to 0 -- but Qt's native collapse leaves
-    no way back: once collapsed, further `moveSplitter()` calls asking
-    for a perfectly valid, well-above-floor size are silently ignored,
-    because Qt excludes an already-hidden pane's own geometry from its
-    position math -- a long-documented `QSplitter` footgun, not an
-    artifact of this codebase. Neither native setting alone gives a
-    drag that both collapses *and* reopens.
 
-    The fix that actually works: don't hand position math to Qt's native
-    splitter-drag code at all. `_DragHandle` above computes the requested
-    footer size directly from the raw mouse delta and calls this class's
-    own `setSizes()` -- the same call path, and the same `_snap()`, that
-    already worked correctly (collapse *and* reopen, symmetric in both
-    directions) for the test suite's direct `setSizes()` calls. With
-    `childrenCollapsible(False)` (native collapse logic off entirely) and
-    `_DragHandle` bypassing `super().mouse*Event()` (native drag-position
-    logic never invoked), there is exactly one thing computing sizes and
-    exactly one thing deciding collapse, for both interactive dragging
-    and programmatic `setSizes()` -- the "no fight" ticket #185 asks
-    for."""
+class _FooterSplitter(QtWidgets.QSplitter):
+    """A splitter that resizes the footer between a hard floor and a hard
+    ceiling. It does not collapse, and that is the whole point.
 
-    def __init__(self, orientation, collapse_index, playable_min, parent=None):
+    This replaces `_CollapsingSplitter` (tickets #162, #184, #185-#190,
+    #196). That class snapped the footer shut once dragged below
+    `playable_min`, and its docstring was a long account of trying to make
+    Qt's native collapse logic and a hand-rolled one agree -- the two
+    could never both collapse *and* reopen, because Qt excludes an
+    already-hidden pane from its position math and there is no way back.
+    Three rounds of tuning later the user's report was unchanged: "it
+    doesn't change size and suddenly just disappears."
+
+    The fix was not a fourth round. Collapse is gone. The user asked for
+    the footer to "go down and up", not to vanish -- and a footer that can
+    hide itself on a stray drag takes the key band, the assignment pill
+    and the recents rail (and every click target on them) with it, which
+    is what generated the "rail/pill/keys are invisible" reports that were
+    never about those widgets at all. If the footer should ever be
+    hideable, that is a toggle with a way back, not a drag gesture.
+
+    What is left is deliberately boring: clamp the footer to
+    `[floor, ceiling]`, give the remainder to the pane above, never hide
+    anything. `_DragHandle` still computes sizes straight from the mouse
+    delta and calls `setSizes()`, so interactive dragging and programmatic
+    sizing run through this one clamp -- the "no fight" #185 asked for,
+    now with nothing left to fight about.
+
+    The floor has to be Qt's own `minimumSizeHint()` rather than a
+    hand-picked smaller number: `QLayout` never lets a laid-out widget
+    size below its children's own minimum, so a smaller floor is silently
+    clamped back up and only produces a dead zone at the bottom of the
+    drag.
+    """
+
+    def __init__(self, orientation, footer_index, floor, ceiling, parent=None):
         super().__init__(orientation, parent)
-        self._collapse_index = collapse_index
-        #: Public: `SynthView`'s own splitter-collapse tests, and anyone
-        #: else who needs to know where the snap point actually is,
-        #: read this rather than recomputing it.
-        self.playable_min = playable_min
+        self._footer_index = footer_index
+        #: Public: the smallest the footer is ever allowed to be. Read by
+        #: `SynthView`'s tests rather than recomputed.
+        self.floor = floor
+        #: Public: the largest, before the pane above claims its own
+        #: minimum -- see `_clamp`, which lowers it when there isn't room.
+        self.ceiling = ceiling
         self.setChildrenCollapsible(False)
 
     def createHandle(self):
         return _DragHandle(self.orientation(), self)
 
     def setSizes(self, sizes):
-        super().setSizes(self._snap(list(sizes)))
+        super().setSizes(self._clamp(list(sizes)))
 
-    def _snap(self, sizes):
-        idx = self._collapse_index
-        if not (0 <= idx < len(sizes)):
+    def effective_ceiling(self, total=None):
+        """The real upper bound right now.
+
+        `ceiling` is the design limit; the pane above also has its own
+        `minimumSizeHint()`, and on a short window that is the binding
+        constraint. Returned as one number so the drag, the tests and any
+        caller asking "how far can this go" all read the same value
+        instead of each rediscovering the second limit.
+        """
+        if total is None:
+            total = sum(self.sizes()) or self.height()
+        other = self.widget(1 - self._footer_index)
+        headroom = total - _effective_minimum_height(other)
+        return max(self.floor, min(self.ceiling, headroom))
+
+    def _clamp(self, sizes):
+        idx = self._footer_index
+        if not (0 <= idx < len(sizes)) or len(sizes) != 2:
             return sizes
-        # Clamp first: `_DragHandle` computes sizes straight from raw
-        # mouse delta with no bound of its own, so a fast/far drag can
-        # request a negative or over-total size.
         total = sum(sizes)
-        sizes = [max(0, min(total, s)) for s in sizes]
-        deficit = total - sum(sizes)
-        if deficit:
-            other = 1 - idx if len(sizes) == 2 else idx
-            sizes[other] = max(0, sizes[other] + deficit)
-        collapsed = sizes[idx] < self.playable_min
-        if collapsed and sizes[idx] != 0:
-            deficit = sizes[idx]
-            sizes[idx] = 0
-            other = 1 - idx if len(sizes) == 2 else idx
-            sizes[other] += deficit
+        other = 1 - idx
+        sizes[idx] = max(self.floor, min(self.effective_ceiling(total), sizes[idx]))
+        sizes[other] = max(0, total - sizes[idx])
+        # Never hidden -- the previous class's collapse left these widgets
+        # invisible with no reliable way back.
         widget = self.widget(idx)
-        if widget is not None:
-            widget.setVisible(not collapsed)
+        if widget is not None and not widget.isVisible():
+            widget.setVisible(True)
         return sizes
 
 
@@ -461,32 +468,34 @@ class SynthView(QtWidgets.QMainWindow):
         # letting the key rows fill/recenter in it (ticket #184 bug #1).
         footer_layout.addWidget(self.keyboard_band, 1)
 
-        #: A drag handle between the canvas and the footer (issue: user
-        #: feedback on ticket #157). Ticket #184: rather than a hard floor
-        #: at the footer's full natural height (which left no play in the
-        #: handle at all), the floor is now the footer's own real,
-        #: Qt-computed `minimumSizeHint()` -- with the key boxes now
-        #: Expanding rather than fixed-size (bug #2 below), that floor is
-        #: well short of the footer's natural `sizeHint()`, so there is
-        #: real 1:1-tracking room between it and `_FOOTER_MAX_HEIGHT`
-        #: before the collapse point. (A hand-picked value smaller than
-        #: this floor was tried first and rejected: `QLayout` never lets
-        #: a laid-out widget size below its children's own
-        #: `minimumSizeHint()`, visible or not, so requesting anything
-        #: between 0 and that real floor just got silently clamped back
-        #: up to it -- the floor has to be Qt's own number, not ours.)
+        #: A drag handle between the canvas and the footer (user feedback
+        #: on #157; #162, #184, #185-#190, and finally #196).
         #:
-        #: `footer`'s own Qt `minimumHeight` stays at 0 permanently --
-        #: see `_CollapsingSplitter`'s docstring for why a *second*,
-        #: mutating notion of "minimum" here previously fought Qt's own
-        #: native collapse-on-drag logic and made the whole footer
-        #: (recents rail, pill, keys, and their click targets) collapse
-        #: to ~0 height on the first stray drag.
-        playable_min = footer.minimumSizeHint().height()
-        footer.setMinimumHeight(0)
+        #: The floor is the footer's own Qt-computed `minimumSizeHint()`.
+        #: It has to be Qt's number, not a hand-picked smaller one:
+        #: `QLayout` never lets a laid-out widget size below its
+        #: children's own minimum, so a smaller floor is silently clamped
+        #: back up and only buys a dead zone at the bottom of the drag.
+        #:
+        #: The footer no longer collapses at that floor -- see
+        #: `_FooterSplitter`. It stops there.
+        floor = footer.minimumSizeHint().height()
+        footer.setMinimumHeight(floor)
         footer.setMaximumHeight(_FOOTER_MAX_HEIGHT)
 
-        self.splitter = _CollapsingSplitter(QtCore.Qt.Vertical, 1, playable_min, central)
+        # The pane above must be allowed to give room back, or the footer
+        # cannot grow at all: `main_row`'s own `minimumSizeHint()` is the
+        # drawer's full natural height (356px), and `QSplitter` honours
+        # it, so on any normal window height it claimed everything the
+        # footer wanted. That -- not the collapse logic -- is the "it
+        # doesn't change size" half of #196; a 150px drag moved the
+        # footer exactly 0px. The canvas scrolls and the drawer clips
+        # gracefully, so a smaller explicit minimum costs nothing and is
+        # what gives the handle real travel.
+        main_row.setMinimumHeight(_CANVAS_MIN_HEIGHT)
+
+        self.splitter = _FooterSplitter(QtCore.Qt.Vertical, 1, floor,
+                                        _FOOTER_MAX_HEIGHT, central)
         self.splitter.addWidget(main_row)
         self.splitter.addWidget(footer)
         self.splitter.setStretchFactor(0, 1)

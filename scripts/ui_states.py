@@ -91,11 +91,38 @@ def _synth_view_drawer_collapsed():
     return view
 
 
+def _footer_at(fraction):
+    """The Synth View with the footer sized `fraction` of floor..ceiling.
+
+    Sized through `splitter.setSizes()`, which is the same clamp a real
+    drag goes through (`_DragHandle` computes a size and calls it) -- so
+    these shots show the real endpoints rather than a state only a test
+    can reach. `show()` first: the ceiling depends on the window's actual
+    height, which is not known until the compositor has given it one.
+    """
+    def build():
+        view = _synth_view()
+        view.show()
+        from PySide6 import QtWidgets
+
+        QtWidgets.QApplication.processEvents()
+        splitter = view.splitter
+        floor = splitter.floor
+        target = round(floor + (splitter.effective_ceiling() - floor) * fraction)
+        splitter.setSizes([sum(splitter.sizes()) - target, target])
+        return view
+
+    return build
+
+
 #: name -> zero-argument builder returning the top-level widget to shoot.
 STATES = {
     "synth-view": _synth_view,
     "drawer-expanded": _synth_view_drawer_expanded,
     "drawer-collapsed": _synth_view_drawer_collapsed,
+    "footer-floor": _footer_at(0.0),
+    "footer-mid": _footer_at(0.5),
+    "footer-ceiling": _footer_at(1.0),
 }
 
 
