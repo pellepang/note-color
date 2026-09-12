@@ -55,7 +55,7 @@ body{
 .masthead h1{margin:0;font-size:17px;font-weight:700;color:var(--linen)}
 .masthead .ticket{font-size:10px;letter-spacing:.16em;text-transform:uppercase;
                   color:var(--copper)}
-.masthead p{margin:0;flex:1 1 400px;min-width:280px;font-size:11px;
+.masthead p{margin:0;flex:1 1 560px;min-width:300px;font-size:11px;
             color:var(--linen-faint);max-width:70ch}
 .tryline{display:flex;flex-wrap:wrap;gap:6px 8px;font-size:10.5px;color:var(--ember)}
 .tryline b{color:var(--linen-dim);font-weight:600}
@@ -90,7 +90,7 @@ body{
 .drawer .row.off:hover{border-color:transparent;color:var(--ember)}
 
 .canvas-scroll{flex:1;min-width:0;overflow:auto}
-.canvas{position:relative;width:1240px;height:640px;background:var(--ink-1);
+.canvas{position:relative;width:1200px;height:640px;background:var(--ink-1);
         background-image:radial-gradient(var(--rule-1) 1px,transparent 1px);
         background-size:22px 22px;background-position:11px 11px;
         user-select:none;cursor:default}
@@ -99,7 +99,7 @@ body{
 .region{position:absolute;top:0;bottom:0;pointer-events:none;display:none}
 .canvas[data-mix="band"] .region,
 .canvas[data-mix="hybrid"] .region{display:block}
-#regionPoly{left:0;right:600px;background:rgba(90,138,154,.055)}
+#regionPoly{left:0;width:640px;background:rgba(90,138,154,.055)}
 #regionMono{left:790px;right:0;background:rgba(240,168,85,.05)}
 .area-label{position:absolute;top:8px;font-size:9.5px;letter-spacing:.18em;
             text-transform:uppercase;color:var(--ember);pointer-events:none;
@@ -360,11 +360,8 @@ body{
             <div class="region" id="regionMono"></div>
             <div class="area-label" id="labelPoly">Per-note area · ×16 voices</div>
             <div class="area-label" id="labelMono">Once-only area</div>
-            <div id="band">
-              <div class="band-tick t">mix</div>
-              <div class="band-tick b">16 → 1</div>
-            </div>
-            <svg id="cables" width="1240" height="640" viewBox="0 0 1240 640"
+            <div id="band"></div>
+            <svg id="cables" width="1200" height="640" viewBox="0 0 1200 640"
                  aria-hidden="true"></svg>
             <div class="loopbadge" id="loopBadge">↺ feedback · 1 block · 11.6 ms</div>
             <div class="cable-tip" id="cableTip"></div>
@@ -495,7 +492,7 @@ const callout   = document.getElementById("callout");
 const statusMsg = document.getElementById("statusMsg");
 const loopBadge = document.getElementById("loopBadge");
 const NS = "http://www.w3.org/2000/svg";
-const CW = 1240, CH = 640;
+const CW = 1200, CH = 640;
 
 const S = {
   mix:"band", colour:"role", loop:"cables", explain:"inline",
@@ -549,9 +546,9 @@ const MODULES = [
    knobs:[K("Delay","0ms",-135),K("Hold","0ms",-135),K("Attack","5ms",-120),
           K("Decay","100ms",-30),K("Sustain","0.80",84),K("Release","200ms",0)]},
 
-  {id:"lfo1", title:"LFO 1", tag:"sine", dot:"var(--amber)", side:"poly",
+  {id:"lfo1", title:"LFO 1", tag:"", dot:"var(--amber)", side:"poly",
    x:444, y:300, canIn:false, canOut:true, outKind:"mod",
-   homePoly:[444,300], homeMono:[1032,392], polyswitch:true,
+   homePoly:[444,300], homeMono:[992,392], polyswitch:true,
    knobs:[K("Rate","3.20Hz",-24),K("Depth","0.45",-16),K("Shape","sine",-135),
           K("Phase","0",-135)]},
 
@@ -569,7 +566,7 @@ const MODULES = [
           K("Spread","0.80",84)]},
 
   {id:"out", title:"OUTPUT", tag:"stereo", dot:"var(--linen-dim)", side:"mono",
-   x:1032, y:190, canIn:true, canOut:false,
+   x:992, y:190, canIn:true, canOut:false,
    knobs:[K("Master","0.85",90)]},
 ];
 const byId = {};
@@ -620,10 +617,11 @@ function buildModule(m){
     sw.addEventListener("mousedown", e => {
       e.stopPropagation(); e.preventDefault(); toggleLfoSide(m);
     });
-    title.appendChild(sw);
+    m.pendingSwitch = sw;
   }
-  title.insertAdjacentHTML("beforeend",
-    `<span class="grow"></span><span class="x">×</span>`);
+  title.insertAdjacentHTML("beforeend", `<span class="grow"></span>`);
+  if (m.pendingSwitch) title.appendChild(m.pendingSwitch);
+  title.insertAdjacentHTML("beforeend", `<span class="x">×</span>`);
 
   if (m.mixNode){
     el.id = "mix";
@@ -894,10 +892,13 @@ function draw(){
     w.style.setProperty("--ringop", (S.idle * 0.85).toFixed(2));
   });
 
-  const badgeAt = CABLES.find(c => c.inLoop);
-  if (badgeAt && badgeAt.px !== undefined){
-    loopBadge.style.left = Math.max(4, Math.min(CW - 190, badgeAt.px - 80)) + "px";
-    loopBadge.style.top  = Math.min(CH - 22, badgeAt.py + 8) + "px";
+  const loopMods = MODULES.filter(m => inLoop.has(m.id) && !m.mixNode);
+  if (loopMods.length){
+    const l = Math.min(...loopMods.map(m => m.el.offsetLeft));
+    const r = Math.max(...loopMods.map(m => m.el.offsetLeft + m.el.offsetWidth));
+    const b = Math.max(...loopMods.map(m => m.el.offsetTop + m.el.offsetHeight));
+    loopBadge.style.left = Math.max(4, Math.min(CW - 190, (l + r) / 2 - 88)) + "px";
+    loopBadge.style.top  = Math.max(2, Math.min(CH - 20, b + 10)) + "px";
   }
   document.getElementById("winCount").textContent = "windows=" + MODULES.length;
 }
@@ -1244,7 +1245,6 @@ function toggleLfoSide(m){
   m.x = home[0]; m.y = home[1];
   m.el.classList.add("gliding");
   m.el.style.left = m.x + "px"; m.el.style.top = m.y + "px";
-  m.el.querySelector(".tag").textContent = global ? "sine · global" : "sine";
   setStatus(global
     ? "LFO 1 is global — one locked wobble, right of the line. It may now grab a once-only knob."
     : "LFO 1 is per-note — sixteen out-of-phase copies, left of the line. A once-only knob will refuse it.",
