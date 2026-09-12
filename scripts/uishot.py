@@ -155,9 +155,17 @@ class NestedCompositor:
                 f"output {DEFAULT_OUTPUT} resolution {self.resolution}"
                 f" scale {self.scale}\n"
                 "default_border none\n"
-                "titlebar_padding 0 0\n"
+                "titlebar_border_thickness 0\n"
+                "gaps inner 0\n"
+                "gaps outer 0\n"
                 "focus_follows_mouse no\n")
         self._config = config
+
+        # Sockets that exist *before* sway starts, so `_await_socket` can
+        # recognise sway's by its appearance rather than by guessing. The
+        # guess is how an early version connected the app to the user's
+        # own compositor -- the one outcome this must never have.
+        self._sockets_before = self._sockets()
 
         env = dict(os.environ)
         env.pop("WAYLAND_DISPLAY", None)
@@ -182,24 +190,30 @@ class NestedCompositor:
         self.env["XDG_CURRENT_DESKTOP"] = "sway"
         return self
 
-    def _await_socket(self, timeout=15.0):
+    @staticmethod
+    def _sockets():
         runtime = os.environ.get("XDG_RUNTIME_DIR",
                                  "/run/user/%d" % os.getuid())
-        before = set(os.listdir(runtime))
+        return {name for name in os.listdir(runtime)
+                if name.startswith("wayland-") and not name.endswith(".lock")}
+
+    def _await_socket(self, timeout=15.0):
+        """sway's own socket, identified by having appeared just now.
+
+        Strictly the new one, with no "any other socket" fallback: the
+        fallback picked the user's *live* compositor on a slow start, so
+        the app opened a real window in their session and `grim` shot
+        their desktop. Timing out is the correct outcome instead.
+        """
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
                 raise RuntimeError(
                     f"sway exited with {self.proc.returncode} before it "
                     f"came up; rerun with -v to see why")
-            for name in sorted(set(os.listdir(runtime)) - before):
-                if name.startswith("wayland-") and not name.endswith(".lock"):
-                    return name
-            for name in sorted(os.listdir(runtime)):
-                if (name.startswith("wayland-")
-                        and not name.endswith(".lock")
-                        and name != os.environ.get("WAYLAND_DISPLAY")):
-                    return name
+            new = sorted(self._sockets() - self._sockets_before)
+            if new:
+                return new[0]
             time.sleep(0.1)
         raise RuntimeError("sway never created a wayland socket")
 
