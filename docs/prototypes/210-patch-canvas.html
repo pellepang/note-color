@@ -1,0 +1,1182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patch Canvas Prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap">
+<style>
+/* ------------------------------------------------------------------ *
+ * Ticket #210 - HTML prototype of the Synth View patch canvas.
+ * Every colour below is a literal from src/notecolor/gui/theme.py.
+ * Nothing here is a new palette; the point is that the canvas that
+ * exists today grows sockets and cables, not that it gets restyled.
+ * Single-theme on purpose: this is a mock of a dark Qt window.
+ * ------------------------------------------------------------------ */
+:root{
+  --ink-0:#16100E; --ink-1:#1A1412; --ink-2:#221A17; --ink-3:#2A211D;
+  --rule-1:#3D2F27; --rule-2:#4A3428;
+  --linen:#E8D5C4; --linen-dim:#C4AA96; --linen-faint:#8A7565; --ember:#6B5647;
+  --copper:#FF7034; --copper-light:#FF8F5F; --amber:#F0A855; --coral:#F77C4F;
+  --teal:#5A8A9A; --teal-pale:#9BB3B8; --clay:#E65C4F;
+
+  /* cable roles - the "by role" colour mode */
+  --cable-poly:#5A8A9A;   /* per-note audio  (teal)      */
+  --cable-mono:#F0A855;   /* once-only audio (amber)     */
+  --cable-mod:#E65C4F;    /* modulation      (clay red)  */
+
+  --mono-face:"JetBrains Mono","JetBrainsMono Nerd Font Mono",ui-monospace,
+              "DejaVu Sans Mono",monospace;
+}
+*{box-sizing:border-box}
+html{color-scheme:dark}
+body{
+  margin:0; background:var(--ink-0); color:var(--linen);
+  font-family:var(--mono-face); font-size:12px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+:focus-visible{outline:1px solid var(--copper); outline-offset:2px}
+
+/* ---------- page header (scaffolding, not the app) ----------------- */
+.sheet{max-width:1780px;margin:0 auto;padding:22px 22px 40px;display:flex;
+       flex-direction:column;gap:18px}
+.masthead{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 18px;
+          border-bottom:1px solid var(--rule-1);padding-bottom:14px}
+.masthead h1{margin:0;font-size:17px;font-weight:700;letter-spacing:.01em;
+             color:var(--linen)}
+.masthead .ticket{font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+                  color:var(--copper)}
+.masthead p{margin:0;flex:1 1 420px;min-width:280px;font-size:11px;
+            color:var(--linen-faint);max-width:72ch}
+.tryline{display:flex;flex-wrap:wrap;gap:6px 10px;font-size:10.5px;
+         color:var(--ember)}
+.tryline b{color:var(--linen-dim);font-weight:600}
+.tryline span{border:1px solid var(--rule-1);padding:2px 7px;background:var(--ink-1)}
+
+/* ---------- the app frame ------------------------------------------ */
+.stage{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
+.app{
+  flex:1 1 900px;min-width:0;
+  border:1px solid var(--rule-2);background:var(--ink-1);
+  display:flex;flex-direction:column;
+}
+.topbar{
+  height:34px;flex:none;display:flex;align-items:center;gap:8px;padding:0 10px;
+  background:var(--ink-2);border-bottom:1px solid var(--rule-1);
+}
+.topbar .patch{color:var(--linen-dim);font-size:11px;margin-right:8px}
+.topbar .patch em{color:var(--copper);font-style:normal}
+.pill{
+  font:600 10px/1 var(--mono-face);letter-spacing:.06em;color:var(--linen-faint);
+  background:var(--ink-1);border:1px solid var(--rule-1);padding:6px 10px;
+}
+.pill.on{color:var(--linen);background:var(--ink-3);border-color:var(--rule-2)}
+.topbar .spacer{flex:1}
+
+.mid{display:flex;min-height:0;flex:1}
+.drawer{
+  width:176px;flex:none;background:var(--ink-0);
+  border-right:1px solid var(--rule-1);padding:8px 0;overflow:hidden;
+}
+.drawer .grp{font-size:9.5px;color:var(--ember);padding:8px 10px 4px;
+             letter-spacing:.08em}
+.drawer .row{
+  margin:0 8px 4px;padding:5px 9px;background:var(--ink-3);color:var(--linen-dim);
+  font-size:11px;border:1px solid transparent;cursor:grab;
+}
+.drawer .row:hover{border-color:var(--rule-2);color:var(--linen)}
+.drawer .row.off{color:var(--ember);cursor:not-allowed}
+.drawer .row.off:hover{border-color:transparent;color:var(--ember)}
+
+.canvas-scroll{flex:1;min-width:0;overflow:auto}
+.canvas{
+  position:relative;width:1240px;height:620px;
+  background:var(--ink-1);
+  background-image:radial-gradient(var(--rule-1) 1px,transparent 1px);
+  background-size:22px 22px;background-position:11px 11px;
+  user-select:none;
+}
+
+/* ---------- poly / mono regions + the Mix band --------------------- */
+.region{position:absolute;top:0;bottom:0;pointer-events:none;display:none}
+.canvas[data-mix="band"] .region,
+.canvas[data-mix="hybrid"] .region{display:block}
+#regionPoly{left:0;right:600px;background:rgba(90,138,154,.055)}
+#regionMono{left:790px;right:0;background:rgba(240,168,85,.05)}
+.area-label{
+  position:absolute;top:8px;font-size:9.5px;letter-spacing:.18em;
+  text-transform:uppercase;color:var(--ember);pointer-events:none;display:none;
+}
+.canvas[data-mix="band"] .area-label,
+.canvas[data-mix="hybrid"] .area-label{display:block}
+#labelPoly{left:12px}
+#labelMono{right:12px}
+
+#band{
+  position:absolute;left:640px;top:0;width:150px;bottom:0;display:none;
+  background:var(--ink-0);
+  border-left:1px solid var(--rule-2);border-right:1px solid var(--rule-2);
+  pointer-events:none;
+}
+.canvas[data-mix="band"] #band{display:block}
+#band::before,#band::after{
+  content:"";position:absolute;top:0;bottom:0;width:1px;background:var(--rule-1);
+}
+#band::before{left:14px} #band::after{right:14px}
+.band-tick{
+  position:absolute;left:0;right:0;text-align:center;font-size:9px;
+  letter-spacing:.2em;color:var(--ember);text-transform:uppercase;
+}
+.band-tick.t{top:10px} .band-tick.b{bottom:10px}
+
+/* ---------- module windows ----------------------------------------- */
+.mod{
+  position:absolute;width:176px;background:var(--ink-2);
+  border:1px solid var(--rule-1);z-index:3;
+  transition:left .4s cubic-bezier(.3,.8,.3,1),top .4s cubic-bezier(.3,.8,.3,1);
+}
+.mod.focused{border-color:var(--copper)}
+.mod.refuse{animation:refuse .62s steps(1,end) 3}
+@keyframes refuse{
+  0%,49%{border-color:var(--clay);box-shadow:0 0 0 1px rgba(230,92,79,.55)}
+  50%,100%{border-color:var(--rule-1);box-shadow:none}
+}
+.canvas .title{
+  height:26px;display:flex;align-items:center;gap:6px;padding:0 4px 0 6px;
+  background:var(--ink-2);cursor:default;
+}
+.canvas .dot{width:8px;height:8px;border-radius:4px;flex:none;background:var(--copper)}
+.canvas .name{font-size:12px;font-weight:700;color:var(--linen);white-space:nowrap}
+.canvas .tag{font-size:9.5px;color:var(--ember);white-space:nowrap;
+             overflow:hidden;text-overflow:ellipsis}
+.canvas .grow{flex:1}
+.canvas .x{color:var(--ember);font-size:13px;line-height:1;padding:0 3px;cursor:pointer}
+.canvas .x:hover{color:var(--linen)}
+.mod .body{
+  background:var(--ink-3);padding:8px;display:flex;flex-wrap:wrap;gap:10px;
+}
+
+/* the per-note / global switch on LFO 1 (decision 56 sec.5) */
+.polyswitch{display:flex;border:1px solid var(--rule-2);margin-left:2px;cursor:pointer}
+.polyswitch span{font-size:8.5px;letter-spacing:.06em;padding:2px 5px;
+                 color:var(--ember);background:var(--ink-1)}
+.polyswitch span.on{color:var(--ink-0);background:var(--linen-dim);font-weight:700}
+
+/* ---------- knobs: a 1:1 port of Knob.paintEvent ------------------- */
+.knob-wrap{width:40px;text-align:center;position:relative}
+.knob{
+  position:relative;width:40px;height:40px;border-radius:50%;
+  border:1.5px solid var(--rule-2);background:var(--ink-0);
+}
+.knob i{
+  position:absolute;left:calc(50% - 1px);bottom:50%;width:2px;height:14.4px;
+  background:var(--amber);transform-origin:50% 100%;transform:rotate(var(--rot,0deg));
+}
+.knob-label{font-size:9px;color:var(--linen-dim);margin-top:2px;line-height:11px}
+.knob-val{font-size:9px;font-weight:700;color:var(--linen);line-height:11px}
+/* a knob that is a modulation destination wears a dashed ring */
+.knob-wrap.modulated .knob::after{
+  content:"";position:absolute;inset:-4px;border-radius:50%;
+  border:1px dashed var(--cable-mod);opacity:.85;
+}
+.knob-wrap.modtarget .knob::after{
+  content:"";position:absolute;inset:-4px;border-radius:50%;
+  border:1px solid var(--cable-mod);opacity:1;
+}
+.knob-wrap.badtarget .knob::after{
+  content:"";position:absolute;inset:-4px;border-radius:50%;
+  border:1px solid var(--clay);opacity:1;
+}
+
+/* ---------- sockets: squares carry audio, circles carry modulation -- */
+.sock{
+  position:absolute;width:10px;height:10px;background:var(--ink-0);
+  border:1px solid var(--rule-2);z-index:4;cursor:crosshair;
+}
+.sock.mod{border-radius:50%}
+.sock[data-io="in"]{left:-6px}
+.sock[data-io="out"]{right:-6px}
+.sock::after{
+  content:"";position:absolute;inset:2px;background:var(--pip,transparent);
+}
+.sock.mod::after{border-radius:50%}
+.sock:hover{border-color:var(--linen-dim)}
+.sock.armed{border-color:var(--copper);box-shadow:0 0 0 2px rgba(255,112,52,.25)}
+.sock.oktarget{border-color:var(--linen);box-shadow:0 0 0 2px rgba(232,213,196,.2)}
+.sock.badtarget{
+  border-color:var(--clay);background:rgba(230,92,79,.35);
+  box-shadow:0 0 0 3px rgba(230,92,79,.28);
+}
+.sock.flash{animation:sockflash .62s steps(1,end) 3}
+@keyframes sockflash{
+  0%,49%{border-color:var(--clay);background:rgba(230,92,79,.5);
+         box-shadow:0 0 0 4px rgba(230,92,79,.3)}
+  50%,100%{border-color:var(--rule-2);background:var(--ink-0);box-shadow:none}
+}
+
+/* ---------- the Mix node ------------------------------------------- *
+ * One element, two treatments. The sockets live on `.mixcore`, so they
+ * follow the core block wherever the treatment puts it.                */
+#mix{position:absolute;z-index:3}
+#mix .mixcore{position:relative}
+#mix .mixbody{position:relative;display:flex;align-items:center;
+              justify-content:center;min-height:78px;background:var(--ink-3);
+              padding:12px 8px}
+#mix .sigma{font-size:22px;color:var(--linen-dim);line-height:1}
+#mix .sublabel{position:absolute;bottom:4px;left:0;right:0;text-align:center;
+               font-size:8.5px;color:var(--ember);letter-spacing:.1em}
+
+/* -- box treatment: an ordinary module window in the middle -- */
+.canvas[data-mix="box"] #mix,
+.canvas[data-mix="hybrid"] #mix{left:655px;top:236px;width:140px}
+.canvas[data-mix="box"] #mix .mixcore,
+.canvas[data-mix="hybrid"] #mix .mixcore{
+  background:var(--ink-2);border:1px solid var(--rule-2);
+}
+/* -- band treatment: the divider itself is the node -- */
+.canvas[data-mix="band"] #mix{
+  left:640px;top:0;width:150px;height:100%;
+  display:flex;flex-direction:column;justify-content:center;
+}
+.canvas[data-mix="band"] #mix .mixcore{
+  border-top:1px solid var(--rule-2);border-bottom:1px solid var(--rule-2);
+  background:var(--ink-2);
+}
+.canvas[data-mix="band"] #mix .title{justify-content:center}
+.canvas[data-mix="band"] #mix .x{display:none}
+
+/* ---------- cables -------------------------------------------------- */
+#cables{position:absolute;inset:0;z-index:6;pointer-events:none;overflow:visible}
+#cables path{fill:none;stroke-linecap:round;stroke-linejoin:miter}
+#cables .hit{stroke:transparent;stroke-width:12;pointer-events:stroke;cursor:pointer}
+.canvas.dragging #cables .hit{pointer-events:none}
+.canvas[data-hide="behind"] #cables{z-index:2}
+.canvas[data-hide="dots"] #cables .wire,
+.canvas[data-hide="dots"] #cables .hit{display:none}
+.canvas[data-hide="dots"] #cables .wire.reveal{display:block}
+#cables .wire.dim{opacity:.12 !important}
+#cables .wire.reveal{opacity:1 !important;stroke-width:3.5}
+#cables .wire.loop{filter:drop-shadow(0 0 4px rgba(255,112,52,.75))}
+
+.cable-tip{
+  position:absolute;z-index:8;pointer-events:none;background:var(--ink-0);
+  border:1px solid var(--rule-2);padding:2px 6px;font-size:9.5px;
+  color:var(--linen-dim);white-space:nowrap;display:none;
+}
+
+/* the feedback badge */
+.loopbadge{
+  position:absolute;z-index:7;display:none;pointer-events:none;
+  border:1px solid var(--copper);background:var(--ink-0);color:var(--copper-light);
+  font-size:9px;letter-spacing:.1em;padding:2px 6px;
+}
+.canvas[data-loop="cables"] .loopbadge,
+.canvas[data-loop="full"] .loopbadge{display:block}
+.canvas[data-loop="full"] .mod.inloop{
+  border-color:var(--copper);box-shadow:0 0 0 1px rgba(255,112,52,.35)
+}
+
+/* ---------- refusal explanation, variant A: inline callout ---------- */
+.callout{
+  position:absolute;z-index:9;max-width:250px;display:none;
+  background:var(--ink-0);border:1px solid var(--clay);
+  border-left-width:3px;padding:7px 9px;
+}
+.callout.show{display:block}
+.callout b{display:block;color:var(--clay);font-size:10px;letter-spacing:.06em;
+           text-transform:uppercase;margin-bottom:3px;font-weight:700}
+.callout span{font-size:10.5px;color:var(--linen-dim);line-height:1.45}
+
+/* ---------- status bar (refusal explanation, variant B) ------------- */
+.statusbar{
+  height:26px;flex:none;display:flex;align-items:center;gap:16px;padding:0 10px;
+  background:var(--ink-0);border-top:1px solid var(--rule-1);
+  font-size:10px;color:var(--ember);
+}
+.statusbar .msg{flex:1;color:var(--linen-faint)}
+.statusbar .msg.err{color:var(--clay)}
+.statusbar .msg.err::before{content:"■ ";color:var(--clay)}
+.statusbar .hint{color:var(--ember)}
+
+/* ---------- the control rail (explicitly not part of the app) ------- */
+.rail{
+  flex:0 0 320px;border:1px dashed var(--rule-2);background:var(--ink-0);
+  padding:12px 14px 16px;display:flex;flex-direction:column;gap:16px;
+}
+.rail>header{border-bottom:1px solid var(--rule-1);padding-bottom:8px}
+.rail>header b{display:block;font-size:11px;color:var(--linen);letter-spacing:.04em}
+.rail>header span{font-size:9.5px;color:var(--ember)}
+.ctl{display:flex;flex-direction:column;gap:7px}
+.ctl>h3{
+  margin:0;font-size:9.5px;font-weight:600;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--copper);
+}
+.ctl>p{margin:0;font-size:10px;color:var(--ember);line-height:1.45}
+.seg{display:flex;flex-wrap:wrap;gap:4px}
+.seg button{
+  font:400 10px/1 var(--mono-face);color:var(--linen-faint);background:var(--ink-1);
+  border:1px solid var(--rule-1);padding:5px 8px;cursor:pointer;
+}
+.seg button:hover{border-color:var(--rule-2);color:var(--linen)}
+.seg button[aria-pressed="true"]{
+  color:var(--linen);background:var(--ink-3);border-color:var(--copper);
+}
+.slide{display:grid;grid-template-columns:1fr auto;gap:4px 8px;align-items:center;
+       font-size:10px;color:var(--linen-faint)}
+.slide input{width:100%;accent-color:var(--copper);margin:0}
+.slide output{font-variant-numeric:tabular-nums;color:var(--linen-dim)}
+.legend{display:flex;flex-direction:column;gap:5px;font-size:10px;
+        color:var(--linen-faint)}
+.legend div{display:flex;align-items:center;gap:8px}
+.legend i{width:26px;height:0;border-top:2.5px solid var(--c);flex:none}
+.legend i.d{border-top:1.25px dashed var(--c)}
+.legend em{font-style:normal;color:var(--ember)}
+.note{font-size:10px;color:var(--ember);line-height:1.5;border-left:1px solid
+      var(--rule-1);padding-left:9px}
+.note b{color:var(--linen-dim);font-weight:600}
+
+@media (prefers-reduced-motion:reduce){
+  *{animation-duration:.001ms !important;transition-duration:.001ms !important}
+}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <header class="masthead">
+    <span class="ticket">#210 · prototype</span>
+    <h1>Synth View patch canvas</h1>
+    <p>The canvas that ships today, grown sockets and cables — same Copper
+       palette, same knob, same window chrome. Everything on the right rail is
+       scaffolding for this conversation; none of it is proposed UI. Eleven
+       modules, sixteen cables, one legal feedback loop.</p>
+    <div class="tryline">
+      <b>Try:</b>
+      <span>drag OSC 1 <em>Out</em> → DELAY <em>In</em> (refused)</span>
+      <span>drag LFO 1 <em>Mod</em> → any knob</span>
+      <span>hover a cable or a socket</span>
+      <span>flip LFO 1 to <em>glob</em></span>
+    </div>
+  </header>
+
+  <div class="stage">
+
+    <!-- ============================ the app ========================= -->
+    <div class="app">
+      <div class="topbar">
+        <span class="patch"><em>♪</em> Init</span>
+        <span class="pill on">SYNTH</span>
+        <span class="pill">SAMPLER</span>
+        <span class="pill">SF2</span>
+        <span class="pill">⇅ Load</span>
+        <span class="pill">Save As</span>
+        <span class="pill">⊞ Tidy</span>
+        <span class="spacer"></span>
+        <span class="pill">● Rec ⇧S → new track</span>
+        <span class="pill">Play</span>
+        <span class="pill">Panic ⌥M</span>
+      </div>
+
+      <div class="mid">
+        <div class="drawer">
+          <div class="grp">Synth core</div>
+          <div class="row">Osc 1</div>
+          <div class="row">Osc 2</div>
+          <div class="row">Noise</div>
+          <div class="row">LFO</div>
+          <div class="row">Filter Env</div>
+          <div class="row">Amp Env</div>
+          <div class="grp">Routing</div>
+          <div class="row">Mix</div>
+          <div class="row">Output</div>
+          <div class="grp">Effects</div>
+          <div class="row">Delay</div>
+          <div class="row">Chorus</div>
+          <div class="grp">Instruments</div>
+          <div class="row off">CLAP Plugin…</div>
+        </div>
+
+        <div class="canvas-scroll">
+          <div class="canvas" id="canvas"
+               data-mix="band" data-hide="all" data-loop="cables"
+               data-style="bezier" data-colour="role">
+            <div class="region" id="regionPoly"></div>
+            <div class="region" id="regionMono"></div>
+            <div class="area-label" id="labelPoly">Per-note area · ×16 voices</div>
+            <div class="area-label" id="labelMono">Once-only area</div>
+            <div id="band">
+              <div class="band-tick t">mix</div>
+              <div class="band-tick b">16 → 1</div>
+            </div>
+            <svg id="cables" width="1240" height="620" viewBox="0 0 1240 620"
+                 aria-hidden="true"></svg>
+            <div class="loopbadge" id="loopBadge">↺ feedback · 1 block · 11.6 ms</div>
+            <div class="cable-tip" id="cableTip"></div>
+            <div class="callout" id="callout">
+              <b>Refused</b><span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="statusbar">
+        <span>oct=3</span><span>rec=off</span><span>windows=11</span>
+        <span class="msg" id="statusMsg">cables=16 · 1 feedback loop</span>
+        <span class="hint">drag a title bar to move · drag a socket to patch</span>
+      </div>
+    </div>
+
+    <!-- ======================= control rail ========================= -->
+    <aside class="rail">
+      <header>
+        <b>Prototype scaffolding</b>
+        <span>Not proposed UI. These switches exist so you can compare the
+              contested choices in one patch.</span>
+      </header>
+
+      <section class="ctl">
+        <h3>1 · Mix node treatment</h3>
+        <div class="seg" data-set="mix">
+          <button data-v="band" aria-pressed="true">Labelled band</button>
+          <button data-v="box" aria-pressed="false">Discrete box</button>
+          <button data-v="hybrid" aria-pressed="false">Box + wash</button>
+        </div>
+        <p><b>Band</b> is Massive X: the boundary is a place on the canvas.
+           <b>Box</b> is a plain module — the boundary exists only where the
+           cables meet it. <b>Box + wash</b> keeps the tinted halves and the
+           edge labels but not the physical divider.</p>
+      </section>
+
+      <section class="ctl">
+        <h3>2 · Cable style</h3>
+        <div class="seg" data-set="style">
+          <button data-v="bezier" aria-pressed="true">Bezier</button>
+          <button data-v="straight" aria-pressed="false">Straight</button>
+          <button data-v="ortho" aria-pressed="false">Orthogonal</button>
+        </div>
+        <div class="slide">
+          <label for="tension">Tension (VCV: 0 hangs, 1 straight)</label>
+          <output id="tensionOut">0.50</output>
+          <input id="tension" type="range" min="0" max="100" value="50">
+        </div>
+      </section>
+
+      <section class="ctl">
+        <h3>3 · Clutter controls</h3>
+        <div class="slide">
+          <label for="opacity">Cable opacity (VCV default 50%)</label>
+          <output id="opacityOut">0.85</output>
+          <input id="opacity" type="range" min="8" max="100" value="85">
+        </div>
+        <div class="seg" data-set="hide">
+          <button data-v="all" aria-pressed="true">All visible</button>
+          <button data-v="focus" aria-pressed="false">Dim unselected</button>
+          <button data-v="behind" aria-pressed="false">Behind modules</button>
+          <button data-v="dots" aria-pressed="false">Dots only</button>
+        </div>
+        <p>Reason's three graded hide modes, plus VCV's global opacity.
+           Hover-to-reveal works in every mode, including <b>Dots only</b> —
+           hover a jack or a knob. <b>Dim unselected</b> needs a click on a
+           module first.</p>
+      </section>
+
+      <section class="ctl">
+        <h3>4 · Cable colour</h3>
+        <div class="seg" data-set="colour">
+          <button data-v="role" aria-pressed="true">By role</button>
+          <button data-v="vcv" aria-pressed="false">Cycle 5 (VCV)</button>
+        </div>
+        <div class="legend" id="legend">
+          <div><i style="--c:var(--cable-poly)"></i>per-note audio
+               <em>— left of Mix</em></div>
+          <div><i style="--c:var(--cable-mono)"></i>once-only audio
+               <em>— right of Mix</em></div>
+          <div><i class="d" style="--c:var(--cable-mod)"></i>modulation
+               <em>— ends on a knob</em></div>
+        </div>
+        <p>Squares carry audio, circles carry modulation — so a jack's shape
+           says what may plug into it before you drag.</p>
+      </section>
+
+      <section class="ctl">
+        <h3>5 · Feedback loop</h3>
+        <div class="seg" data-set="loop">
+          <button data-v="off" aria-pressed="false">No marking</button>
+          <button data-v="cables" aria-pressed="true">Glow the cables</button>
+          <button data-v="full" aria-pressed="false">Reaktor: whole loop</button>
+        </div>
+        <p>CHORUS → DELAY closes the cycle. Legal because a Delay module sits
+           in it (Bitwig's rule, decision 56 §4).</p>
+      </section>
+
+      <section class="ctl">
+        <h3>6 · Refusal explanation</h3>
+        <div class="seg" data-set="explain">
+          <button data-v="inline" aria-pressed="true">At the socket</button>
+          <button data-v="status" aria-pressed="false">Status bar</button>
+          <button data-v="both" aria-pressed="false">Both</button>
+        </div>
+        <div class="seg">
+          <button id="replay">▶ Replay the refusal</button>
+        </div>
+        <p>Drag OSC 1's <b>Out</b> onto DELAY's <b>In</b>: per-note into
+           once-only. The input flashes; this switch decides where the sentence
+           explaining it lands.</p>
+      </section>
+
+      <div class="note">
+        <b>Also live:</b> LFO 1's <em>note/glob</em> switch moves it across the
+        boundary and changes what it is allowed to modulate — per-note LFO onto
+        CHORUS's Rate is refused, global is not. Click a module to focus it
+        (copper border, as today).
+      </div>
+    </aside>
+
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ==================================================================== *
+ * State                                                                *
+ * ==================================================================== */
+const canvas  = document.getElementById("canvas");
+const svg     = document.getElementById("cables");
+const tipEl   = document.getElementById("cableTip");
+const callout = document.getElementById("callout");
+const statusMsg = document.getElementById("statusMsg");
+const loopBadge = document.getElementById("loopBadge");
+const NS = "http://www.w3.org/2000/svg";
+
+const S = {
+  mix:"band", style:"bezier", hide:"all", colour:"role", loop:"cables",
+  explain:"inline", tension:0.5, opacity:0.85, focused:null,
+};
+
+/* VCV Rack's five hardcoded cable colours, settings::resetCables() */
+const VCV = ["#f3374b","#ffb437","#00b56e","#3695ef","#8b4ade"];
+const ROLE = {poly:"#5A8A9A", mono:"#F0A855", mod:"#E65C4F"};
+const COPPER = "#FF7034";
+
+/* -------------------------------------------------------------------- *
+ * The patch. `side` is which half of the Mix node a module runs on:     *
+ * poly = once per held note, mono = once. That single field is what     *
+ * makes a connection legal or refused.                                  *
+ * -------------------------------------------------------------------- */
+const K = (label,val,rot)=>({label,val,rot});
+
+const MODULES = [
+  {id:"osc1", title:"OSC 1", tag:"saw", dot:"var(--amber)", side:"poly",
+   x:24, y:34,
+   ins:[["in","FM"]], outs:[["out","Out"]],
+   knobs:[K("Wave","saw",-118),K("Octave","0",0),K("Semis","0",0),
+          K("Fine","0.0c",6),K("PW","0.50",0),K("Level","1.00",96)]},
+
+  {id:"osc2", title:"OSC 2", tag:"square", dot:"var(--teal-pale)", side:"poly",
+   x:24, y:236,
+   ins:[["in","Sync"]], outs:[["out","Out"]],
+   knobs:[K("Wave","sqr",-40),K("Octave","-1",-52),K("Semis","+7",70),
+          K("Fine","-3.0c",-14),K("PW","0.35",-46),K("Level","0.72",44)]},
+
+  {id:"noise", title:"NOISE", tag:"white", dot:"var(--ember)", side:"poly",
+   x:24, y:438,
+   ins:[], outs:[["out","Out"]],
+   knobs:[K("Colour","white",0),K("Level","0.18",-96)]},
+
+  {id:"filter", title:"FILTER", tag:"lp", dot:"var(--teal)", side:"poly",
+   x:236, y:112,
+   ins:[["in","In"]], outs:[["out","Out"]],
+   knobs:[K("Type","lp",-120),K("Cutoff","4.20kHz",26),K("Reso","0.34",-38),
+          K("EnvAmt","0.62",58),K("KeyTrk","0.50",0)]},
+
+  {id:"fenv", title:"FILTER ENV", tag:"ADSR", dot:"var(--clay)", side:"poly",
+   x:236, y:352,
+   ins:[["in","Gate"]], outs:[["out","Mod","mod"]],
+   knobs:[K("Attack","2ms",-124),K("Decay","180ms",-8),K("Sustain","0.30",-58),
+          K("Release","240ms",12),K("Amount","0.62",58),K("Curve","exp",-90)]},
+
+  {id:"ampenv", title:"AMP ENV", tag:"ADSR", dot:"var(--coral)", side:"poly",
+   x:444, y:34,
+   ins:[["in","In"]], outs:[["out","Out"]],
+   knobs:[K("Delay","0ms",-135),K("Hold","0ms",-135),K("Attack","5ms",-120),
+          K("Decay","100ms",-30),K("Sustain","0.80",84),K("Release","200ms",0)]},
+
+  {id:"lfo1", title:"LFO 1", tag:"sine", dot:"var(--amber)", side:"poly",
+   x:444, y:300, homePoly:[444,300], homeMono:[1032,392], polyswitch:true,
+   ins:[], outs:[["out","Mod","mod"]],
+   knobs:[K("Rate","3.20Hz",-24),K("Depth","0.45",-16),K("Shape","sine",-135),
+          K("Phase","0°",-135)]},
+
+  {id:"delay", title:"DELAY", tag:"1/8 dot", dot:"var(--amber)", side:"mono",
+   x:824, y:84, loop:true,
+   ins:[["in","In"],["fb","Fdbk In"]], outs:[["out","Out"]],
+   knobs:[K("Time","375ms",18),K("Fdbk","0.42",-22),K("Mix","0.30",-46),
+          K("Tone","6.0kHz",40)]},
+
+  {id:"chorus", title:"CHORUS", tag:"detune", dot:"var(--teal-pale)", side:"mono",
+   x:824, y:330, loop:true,
+   ins:[["in","In"]], outs:[["out","Out"]],
+   knobs:[K("Rate","0.60Hz",-70),K("Depth","0.28",-52),K("Mix","0.45",-14),
+          K("Spread","0.80",84)]},
+
+  {id:"out", title:"OUTPUT", tag:"stereo", dot:"var(--linen-dim)", side:"mono",
+   x:1032, y:196,
+   ins:[["in","In"]], outs:[],
+   knobs:[K("Master","0.85",90)]},
+];
+
+/* MIX is authored in the markup rather than generated: it is the one node
+   whose two treatments are a CSS question, not a data question. */
+const MIX = {id:"mix", title:"MIX", side:"boundary"};
+
+const CABLES = [
+  {from:["osc1","out"],   to:["filter","in"]},
+  {from:["osc2","out"],   to:["filter","in"]},
+  {from:["noise","out"],  to:["filter","in"]},
+  {from:["filter","out"], to:["ampenv","in"]},
+  {from:["ampenv","out"], to:["mix","inA"]},
+  {from:["osc1","out"],   to:["mix","inB"]},
+  {from:["mix","out"],    to:["delay","in"]},
+  {from:["delay","out"],  to:["chorus","in"]},
+  {from:["chorus","out"], to:["out","in"]},
+  {from:["chorus","out"], to:["delay","fb"], loop:true},
+  {from:["mix","out"],    to:["out","in"]},
+  {from:["fenv","out"],   knob:["filter","Cutoff"], kind:"mod"},
+  {from:["fenv","out"],   knob:["osc1","PW"],       kind:"mod"},
+  {from:["lfo1","out"],   knob:["osc1","Fine"],     kind:"mod"},
+  {from:["lfo1","out"],   knob:["osc2","Fine"],     kind:"mod"},
+  {from:["lfo1","out"],   knob:["filter","Cutoff"], kind:"mod"},
+];
+
+const byId = {};
+MODULES.forEach(m => byId[m.id] = m);
+byId.mix = MIX;
+
+/* ==================================================================== *
+ * Build the module windows                                             *
+ * ==================================================================== */
+function socketEl(mid, port, label, io, kind){
+  const s = document.createElement("span");
+  s.className = "sock" + (kind === "mod" ? " mod" : "");
+  s.dataset.node = mid; s.dataset.port = port; s.dataset.io = io;
+  s.dataset.kind = kind || "audio"; s.dataset.label = label;
+  s.title = label + (kind === "mod" ? " · modulation" : " · audio");
+  return s;
+}
+
+function buildModule(m){
+  const el = document.createElement("div");
+  el.className = "mod";
+  el.id = "m-" + m.id;
+  el.dataset.node = m.id;
+  el.style.left = m.x + "px";
+  el.style.top  = m.y + "px";
+  if (m.loop) el.classList.add("inloop");
+
+  const title = document.createElement("div");
+  title.className = "title";
+  title.innerHTML =
+    `<span class="dot" style="background:${m.dot}"></span>` +
+    `<span class="name">${m.title}</span>` +
+    `<span class="tag">${m.tag}</span>`;
+  if (m.polyswitch){
+    const sw = document.createElement("span");
+    sw.className = "polyswitch";
+    sw.innerHTML = `<span class="p on">note</span><span class="g">glob</span>`;
+    sw.title = "per-note / global (decision 56 §5)";
+    sw.addEventListener("click", e => { e.stopPropagation(); toggleLfoSide(m); });
+    title.appendChild(sw);
+  }
+  const grow = document.createElement("span"); grow.className = "grow";
+  title.appendChild(grow);
+  const x = document.createElement("span"); x.className = "x"; x.textContent = "×";
+  title.appendChild(x);
+  el.appendChild(title);
+
+  const body = document.createElement("div");
+  body.className = "body";
+  m.knobs.forEach(k => {
+    const w = document.createElement("div");
+    w.className = "knob-wrap";
+    w.dataset.node = m.id; w.dataset.knob = k.label;
+    w.innerHTML =
+      `<div class="knob"><i style="--rot:${k.rot}deg"></i></div>` +
+      `<div class="knob-label">${k.label}</div>` +
+      `<div class="knob-val">${k.val}</div>`;
+    body.appendChild(w);
+  });
+  el.appendChild(body);
+
+  m.ins.forEach((p, i) => {
+    const s = socketEl(m.id, p[0], p[1], "in", p[2]);
+    s.style.top = (34 + i * 18) + "px";
+    el.appendChild(s);
+  });
+  m.outs.forEach((p, i) => {
+    const s = socketEl(m.id, p[0], p[1], "out", p[2]);
+    s.style.top = (34 + i * 18) + "px";
+    el.appendChild(s);
+  });
+
+  el.addEventListener("mousedown", () => focusModule(m.id));
+  canvas.appendChild(el);
+  return el;
+}
+MODULES.forEach(buildModule);
+
+/* the Mix node, in both treatments, from one element */
+const mixEl = document.createElement("div");
+mixEl.id = "mix";
+mixEl.dataset.node = "mix";
+mixEl.innerHTML =
+  `<div class="mixcore">` +
+  `<div class="title"><span class="dot" style="background:var(--linen-dim)"></span>` +
+  `<span class="name">MIX</span><span class="tag">16 → 1</span>` +
+  `<span class="grow"></span><span class="x">×</span></div>` +
+  `<div class="mixbody"><span class="sigma">Σ</span>` +
+  `<span class="sublabel">per note → once</span></div></div>`;
+const mixCore = mixEl.querySelector(".mixcore");
+[["inA","Voices A"],["inB","Voices B"],["inC","Voices C"]].forEach((p,i) => {
+  const s = socketEl("mix", p[0], p[1], "in");
+  s.style.top = (30 + i * 18) + "px";
+  mixCore.appendChild(s);
+});
+const mixOut = socketEl("mix","out","Sum","out");
+mixOut.style.top = "48px";
+mixCore.appendChild(mixOut);
+canvas.appendChild(mixEl);
+
+/* ==================================================================== *
+ * Geometry                                                             *
+ * ==================================================================== */
+function rectIn(el){
+  const a = el.getBoundingClientRect(), b = canvas.getBoundingClientRect();
+  return {x:a.left - b.left, y:a.top - b.top, w:a.width, h:a.height};
+}
+function sockPoint(node, port){
+  const el = canvas.querySelector(`.sock[data-node="${node}"][data-port="${port}"]`);
+  if (!el) return null;
+  const r = rectIn(el);
+  return {x:r.x + r.w/2, y:r.y + r.h/2, el};
+}
+function knobPoint(node, knob){
+  const el = canvas.querySelector(
+    `.knob-wrap[data-node="${node}"][data-knob="${knob}"] .knob`);
+  if (!el) return null;
+  const r = rectIn(el);
+  return {x:r.x + r.w/2, y:r.y + r.h/2, r:r.w/2 + 5, el};
+}
+
+/* Bezier with VCV's tension semantics: 0 hangs loose, 1 is taut. */
+function pathBezier(a, b){
+  const dx = b.x - a.x, dist = Math.hypot(dx, b.y - a.y);
+  const back = dx < 0 ? 110 : 0;
+  const hx = 34 + Math.abs(dx) * 0.34 + back;
+  const droop = (1 - S.tension) * (34 + dist * 0.16);
+  return `M${a.x},${a.y} C${a.x+hx},${a.y+droop} ${b.x-hx},${b.y+droop} ${b.x},${b.y}`;
+}
+function pathStraight(a, b){ return `M${a.x},${a.y} L${b.x},${b.y}`; }
+function pathOrtho(a, b, lane){
+  const stub = 16;
+  if (b.x - a.x > 2 * stub + 8){
+    const mx = a.x + (b.x - a.x) / 2;
+    return `M${a.x},${a.y} H${mx} V${b.y} H${b.x}`;
+  }
+  /* backwards (the feedback cable): out to the right, around under, back in */
+  const y = Math.max(a.y, b.y) + 34 + lane * 8;
+  return `M${a.x},${a.y} H${a.x+stub} V${y} H${b.x-stub} V${b.y} H${b.x}`;
+}
+
+/* ==================================================================== *
+ * Cable rendering                                                      *
+ * ==================================================================== */
+function endpoints(c){
+  const a = sockPoint(c.from[0], c.from[1]);
+  if (!a) return null;
+  if (c.knob){
+    const k = knobPoint(c.knob[0], c.knob[1]);
+    if (!k) return null;
+    const ang = Math.atan2(a.y - k.y, a.x - k.x);
+    return [a, {x:k.x + Math.cos(ang) * k.r, y:k.y + Math.sin(ang) * k.r}, k];
+  }
+  const b = sockPoint(c.to[0], c.to[1]);
+  return b ? [a, b, null] : null;
+}
+function cableKind(c){
+  if (c.kind === "mod") return "mod";
+  return byId[c.from[0]].side === "mono" || c.from[0] === "mix" ? "mono" : "poly";
+}
+function cableColour(c, i){
+  return S.colour === "vcv" ? VCV[i % 5] : ROLE[cableKind(c)];
+}
+function cableLabel(c){
+  const src = byId[c.from[0]].title;
+  const dst = c.knob ? `${byId[c.knob[0]].title} · ${c.knob[1]}`
+                     : `${byId[c.to[0]].title} · ${
+                         (byId[c.to[0]].ins || []).concat([["out","Out"],
+                         ["inA","Voices A"],["inB","Voices B"],["inC","Voices C"]])
+                         .filter(p => p[0] === c.to[1]).map(p => p[1])[0] || c.to[1]}`;
+  return `${src} → ${dst}`;
+}
+
+function renderCables(){
+  svg.textContent = "";
+  document.querySelectorAll(".knob-wrap.modulated")
+          .forEach(k => k.classList.remove("modulated"));
+  const pips = {};
+
+  CABLES.forEach((c, i) => {
+    const e = endpoints(c);
+    if (!e) return;
+    const [a, b, knob] = e;
+    const kind = cableKind(c), colour = cableColour(c, i);
+    const lane = i % 4;
+    const d = S.style === "straight" ? pathStraight(a, b)
+            : S.style === "ortho"    ? pathOrtho(a, b, lane)
+            : pathBezier(a, b);
+
+    const hit = document.createElementNS(NS, "path");
+    hit.setAttribute("d", d); hit.setAttribute("class", "hit");
+    hit.dataset.idx = i;
+    svg.appendChild(hit);
+
+    const p = document.createElementNS(NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("stroke", colour);
+    p.setAttribute("stroke-width", kind === "mod" ? 1.25 : 2.5);
+    if (kind === "mod") p.setAttribute("stroke-dasharray", "5 4");
+    p.setAttribute("opacity", S.opacity);
+    let cls = "wire";
+    if (c.loop && S.loop !== "off") cls += " loop";
+    if (S.hide === "focus" && S.focused &&
+        ![c.from[0], c.to && c.to[0], c.knob && c.knob[0]].includes(S.focused))
+      cls += " dim";
+    p.setAttribute("class", cls);
+    p.dataset.idx = i;
+    if (c.loop && S.loop !== "off") p.setAttribute("stroke", COPPER);
+    svg.appendChild(p);
+
+    /* the pip in the jack — this is also Reason's "dots only" mode */
+    const key = n => n.join("|");
+    pips[key(c.from)] = colour;
+    if (c.to) pips[key(c.to)] = colour;
+    if (knob) knob.el.parentElement.classList.add("modulated");
+  });
+
+  canvas.querySelectorAll(".sock").forEach(s => {
+    const col = pips[s.dataset.node + "|" + s.dataset.port];
+    s.style.setProperty("--pip", col || "transparent");
+  });
+
+  /* park the feedback badge beside the loop's return cable */
+  const fb = sockPoint("delay", "fb"), co = sockPoint("chorus", "out");
+  if (fb && co){
+    loopBadge.style.left = Math.min(fb.x, co.x) - 10 + "px";
+    loopBadge.style.top  = (Math.max(fb.y, co.y) + 40) + "px";
+  }
+}
+
+/* ==================================================================== *
+ * Hover-to-reveal (works in every hide mode, VCV's behaviour)          *
+ * ==================================================================== */
+function reveal(pred){
+  svg.querySelectorAll(".wire").forEach(p => {
+    p.classList.toggle("reveal", pred(CABLES[+p.dataset.idx]));
+  });
+}
+function clearReveal(){
+  svg.querySelectorAll(".wire.reveal").forEach(p => p.classList.remove("reveal"));
+  tipEl.style.display = "none";
+}
+function showTip(text, x, y){
+  tipEl.textContent = text;
+  tipEl.style.display = "block";
+  tipEl.style.left = Math.max(4, x - tipEl.offsetWidth / 2) + "px";
+  tipEl.style.top  = (y - 26) + "px";
+}
+
+canvas.addEventListener("mouseover", e => {
+  const sock = e.target.closest(".sock");
+  if (sock){
+    const key = sock.dataset.node + "|" + sock.dataset.port;
+    reveal(c => [c.from, c.to].filter(Boolean).some(p => p.join("|") === key));
+    const r = rectIn(sock);
+    showTip(`${byId[sock.dataset.node].title} · ${sock.dataset.label}`,
+            r.x + r.w / 2, r.y);
+    return;
+  }
+  const knob = e.target.closest(".knob-wrap");
+  if (knob && knob.classList.contains("modulated")){
+    reveal(c => c.knob && c.knob[0] === knob.dataset.node
+                       && c.knob[1] === knob.dataset.knob);
+    const r = rectIn(knob);
+    showTip(`${knob.dataset.knob} · modulated`, r.x + r.w / 2, r.y);
+    return;
+  }
+  const hit = e.target.closest(".hit");
+  if (hit){
+    const i = +hit.dataset.idx;
+    reveal((c, j) => CABLES.indexOf(c) === i);
+    const r = canvas.getBoundingClientRect();
+    showTip(cableLabel(CABLES[i]), e.clientX - r.left, e.clientY - r.top);
+  }
+});
+canvas.addEventListener("mouseout", e => {
+  if (e.target.closest(".sock, .knob-wrap, .hit")) clearReveal();
+});
+
+/* ==================================================================== *
+ * Focus                                                                *
+ * ==================================================================== */
+function focusModule(id){
+  S.focused = id;
+  canvas.querySelectorAll(".mod").forEach(
+    el => el.classList.toggle("focused", el.dataset.node === id));
+  renderCables();
+}
+
+/* ==================================================================== *
+ * The connect rules — decision 56 §3 and §5                            *
+ * ==================================================================== */
+function judge(src, dst){
+  const from = byId[src.node];
+  const srcMod = src.kind === "mod";
+
+  if (dst.type === "knob"){
+    if (!srcMod) return {ok:false,
+      msg:`${from.title}'s Out carries audio. A knob takes modulation only — ` +
+          `drop audio on a square socket.`};
+    if (from.side === "poly" && byId[dst.node].side === "mono") return {ok:false,
+      msg:`${from.title} runs once per held note; ${byId[dst.node].title} runs ` +
+          `once, so there is no single value to send it. Switch ${from.title} ` +
+          `to Global.`};
+    return {ok:true};
+  }
+
+  /* dst is a socket */
+  if (srcMod) return {ok:false,
+    msg:`${from.title} is a modulation source. It snaps to the knob you want ` +
+        `to move, not to a socket.`};
+  if (dst.node === src.node) return {ok:false,
+    msg:`${from.title} cannot feed itself. A loop needs a Delay module in it.`};
+  const dstSide = dst.node === "mix" ? "poly" : byId[dst.node].side;
+  if (from.side === "poly" && dstSide === "mono" && src.node !== "mix")
+    return {ok:false,
+      msg:`${from.title} runs once per held note; ${byId[dst.node].title} runs ` +
+          `once. Route it through MIX first — that is what MIX is for.`};
+  return {ok:true};
+}
+
+/* ==================================================================== *
+ * Dragging a cable                                                     *
+ * ==================================================================== */
+let drag = null;
+const ghost = document.createElementNS(NS, "path");
+ghost.setAttribute("class", "wire");
+ghost.setAttribute("fill", "none");
+
+canvas.addEventListener("mousedown", e => {
+  const sock = e.target.closest(".sock[data-io='out']");
+  if (!sock) return;
+  e.preventDefault();
+  clearReveal();
+  hideRefusal();
+  sock.classList.add("armed");
+  canvas.classList.add("dragging");
+  drag = {node:sock.dataset.node, port:sock.dataset.port,
+          kind:sock.dataset.kind, el:sock, target:null};
+  const a = sockPoint(drag.node, drag.port);
+  ghost.setAttribute("stroke", drag.kind === "mod"
+    ? ROLE.mod : ROLE[byId[drag.node].side === "mono" ? "mono" : "poly"]);
+  ghost.setAttribute("stroke-width", drag.kind === "mod" ? 1.25 : 2.5);
+  ghost.setAttribute("stroke-dasharray", drag.kind === "mod" ? "5 4" : "");
+  ghost.setAttribute("d", pathBezier(a, a));
+  svg.appendChild(ghost);
+});
+
+window.addEventListener("mousemove", e => {
+  if (!drag) return;
+  const r = canvas.getBoundingClientRect();
+  const pt = {x:e.clientX - r.left, y:e.clientY - r.top};
+  const a = sockPoint(drag.node, drag.port);
+  ghost.setAttribute("d", S.style === "straight" ? pathStraight(a, pt)
+                        : pathBezier(a, pt));
+
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const sock = under && under.closest(".sock[data-io='in']");
+  const knob = under && under.closest(".knob-wrap");
+  clearTargets();
+  drag.target = null;
+  if (sock){
+    drag.target = {type:"socket", node:sock.dataset.node,
+                   port:sock.dataset.port, el:sock};
+  } else if (knob){
+    drag.target = {type:"knob", node:knob.dataset.node,
+                   knob:knob.dataset.knob, el:knob};
+  }
+  if (drag.target){
+    const v = judge(drag, drag.target);
+    drag.target.el.classList.add(v.ok ? (drag.target.type === "knob"
+      ? "modtarget" : "oktarget") : "badtarget");
+  }
+});
+
+function clearTargets(){
+  canvas.querySelectorAll(".oktarget,.badtarget,.modtarget")
+        .forEach(el => el.classList.remove("oktarget","badtarget","modtarget"));
+}
+
+window.addEventListener("mouseup", () => {
+  if (!drag) return;
+  drag.el.classList.remove("armed");
+  canvas.classList.remove("dragging");
+  ghost.remove();
+  const t = drag.target;
+  clearTargets();
+  if (t){
+    const v = judge(drag, t);
+    if (v.ok){
+      if (t.type === "knob")
+        CABLES.push({from:[drag.node, drag.port], knob:[t.node, t.knob], kind:"mod"});
+      else
+        CABLES.push({from:[drag.node, drag.port], to:[t.node, t.port]});
+      setStatus(`patched · ${byId[drag.node].title} → ` +
+                `${byId[t.node].title}${t.type === "knob" ? " · " + t.knob : ""}`, false);
+    } else {
+      refuse(t, v.msg);
+    }
+  }
+  drag = null;
+  renderCables();
+});
+
+/* ==================================================================== *
+ * Refusal: the flash, and where the sentence goes                      *
+ * ==================================================================== */
+let refuseTimer = null;
+function refuse(target, msg){
+  const el = target.el;
+  el.classList.remove("flash","badtarget");
+  void el.offsetWidth;
+  el.classList.add(target.type === "knob" ? "badtarget" : "flash");
+  const mod = el.closest(".mod");
+  if (mod){ mod.classList.remove("refuse"); void mod.offsetWidth;
+            mod.classList.add("refuse"); }
+
+  if (S.explain === "inline" || S.explain === "both"){
+    const r = rectIn(el);
+    callout.querySelector("span").textContent = msg;
+    callout.classList.add("show");
+    const left = Math.min(r.x + 22, 1240 - 262);
+    callout.style.left = Math.max(6, left) + "px";
+    callout.style.top  = Math.max(6, r.y - 12) + "px";
+  }
+  if (S.explain === "status" || S.explain === "both") setStatus(msg, true);
+
+  clearTimeout(refuseTimer);
+  refuseTimer = setTimeout(hideRefusal, 5200);
+}
+function hideRefusal(){
+  callout.classList.remove("show");
+  canvas.querySelectorAll(".flash").forEach(e => e.classList.remove("flash"));
+  canvas.querySelectorAll(".badtarget").forEach(e => e.classList.remove("badtarget"));
+  canvas.querySelectorAll(".refuse").forEach(e => e.classList.remove("refuse"));
+  setStatus(`cables=${CABLES.length} · 1 feedback loop`, false);
+}
+function setStatus(text, isErr){
+  statusMsg.textContent = text;
+  statusMsg.classList.toggle("err", !!isErr);
+}
+canvas.addEventListener("mousedown", e => {
+  if (!e.target.closest(".sock")) hideRefusal();
+});
+
+/* the scripted refusal, for someone who does not know the gesture yet */
+document.getElementById("replay").addEventListener("click", () => {
+  hideRefusal();
+  const a = sockPoint("osc1","out");
+  const bEl = canvas.querySelector('.sock[data-node="delay"][data-port="in"]');
+  const b = sockPoint("delay","in");
+  ghost.setAttribute("stroke", ROLE.poly);
+  ghost.setAttribute("stroke-width", 2.5);
+  ghost.setAttribute("stroke-dasharray","");
+  svg.appendChild(ghost);
+  const t0 = performance.now(), dur = 620;
+  (function step(now){
+    const k = Math.min(1, (now - t0) / dur);
+    const e = 1 - Math.pow(1 - k, 3);
+    ghost.setAttribute("d", pathBezier(a, {x:a.x + (b.x-a.x)*e, y:a.y + (b.y-a.y)*e}));
+    if (k < 1) requestAnimationFrame(step);
+    else {
+      bEl.classList.add("badtarget");
+      setTimeout(() => {
+        ghost.remove();
+        bEl.classList.remove("badtarget");
+        refuse({type:"socket", node:"delay", el:bEl},
+               judge({node:"osc1", port:"out", kind:"audio"},
+                     {type:"socket", node:"delay", port:"in", el:bEl}).msg);
+      }, 260);
+    }
+  })(t0);
+});
+
+/* ==================================================================== *
+ * LFO 1's per-note / global switch                                     *
+ * ==================================================================== */
+function toggleLfoSide(m){
+  const el = document.getElementById("m-" + m.id);
+  const sw = el.querySelector(".polyswitch");
+  m.side = m.side === "poly" ? "mono" : "poly";
+  const global = m.side === "mono";
+  sw.querySelector(".p").classList.toggle("on", !global);
+  sw.querySelector(".g").classList.toggle("on", global);
+  const home = global ? m.homeMono : m.homePoly;
+  m.x = home[0]; m.y = home[1];
+  el.style.left = m.x + "px"; el.style.top = m.y + "px";
+  el.querySelector(".tag").textContent = global ? "sine · global" : "sine";
+  setStatus(global
+    ? "LFO 1 is global — one locked wobble, right of MIX. It may now modulate a once-only knob."
+    : "LFO 1 is per-note — sixteen out-of-phase copies, left of MIX. A once-only knob will refuse it.",
+    false);
+  setTimeout(renderCables, 30);
+  setTimeout(renderCables, 430);
+}
+
+/* ==================================================================== *
+ * Rail wiring                                                          *
+ * ==================================================================== */
+document.querySelectorAll(".seg[data-set]").forEach(seg => {
+  seg.addEventListener("click", e => {
+    const b = e.target.closest("button[data-v]");
+    if (!b) return;
+    seg.querySelectorAll("button").forEach(
+      x => x.setAttribute("aria-pressed", String(x === b)));
+    const set = seg.dataset.set;
+    S[set] = b.dataset.v;
+    canvas.dataset[set === "style" ? "style" : set] = b.dataset.v;
+    if (set === "mix" || set === "style") setTimeout(renderCables, 20);
+    else renderCables();
+  });
+});
+const tension = document.getElementById("tension");
+tension.addEventListener("input", () => {
+  S.tension = tension.value / 100;
+  document.getElementById("tensionOut").textContent = S.tension.toFixed(2);
+  renderCables();
+});
+const opacity = document.getElementById("opacity");
+opacity.addEventListener("input", () => {
+  S.opacity = opacity.value / 100;
+  document.getElementById("opacityOut").textContent = S.opacity.toFixed(2);
+  renderCables();
+});
+
+window.addEventListener("resize", renderCables);
+document.fonts && document.fonts.ready.then(renderCables);
+renderCables();
+setTimeout(renderCables, 120);
+</script>
+</body>
+</html>
