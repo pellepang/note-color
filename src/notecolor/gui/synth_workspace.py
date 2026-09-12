@@ -402,7 +402,18 @@ class _TitleBar(QtWidgets.QWidget):
         # `ModuleWindow._apply_border_style()`), which paints its focus
         # border onto every descendant that doesn't opt out (bug: "weird
         # box" around title-bar text). Same for `_tag_label` below.
-        self._title_label.setStyleSheet("background: transparent; border: none;")
+        # `padding: 0` is load-bearing, not tidiness (issue #197, and the
+        # real cause behind #164/#168). `theme.main_stylesheet()` sets
+        # `QLabel { ... padding: 8px; }` on *every* label in the app, and a
+        # per-widget stylesheet that names only `background`/`border` does
+        # not displace it. Every width below is derived from
+        # `QFontMetrics`, which knows nothing about a stylesheet padding --
+        # so the label was handed a fixed width of exactly its text's
+        # advance, then spent 16px of that on padding and clipped the text
+        # mid-glyph. The elide arithmetic was right all along; it was
+        # measuring a box 16px wider than the one the text got to paint in.
+        self._title_label.setStyleSheet(
+            "background: transparent; border: none; padding: 0;")
         self._title_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
         layout.addWidget(self._title_label)
 
@@ -411,7 +422,8 @@ class _TitleBar(QtWidgets.QWidget):
             self._tag_label = QtWidgets.QLabel(self)
             self._tag_label.setFont(theme.font(7))
             self._tag_label.setStyleSheet(
-                f"background: transparent; border: none; color: {theme.rgba(theme.TEXT_FAINT)};")
+                "background: transparent; border: none; padding: 0; "
+                f"color: {theme.rgba(theme.TEXT_FAINT)};")
             self._tag_label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
             layout.addWidget(self._tag_label)
 
@@ -710,10 +722,32 @@ class _DrawerRow(QtWidgets.QLabel):
         metrics = QtGui.QFontMetrics(self.font())
         self.setFixedHeight(metrics.height() + 10)
         self.setContentsMargins(6, 0, 6, 0)
+        # `padding: 0` for the same reason as `_TitleBar`'s labels, in the
+        # other axis (issue #197). `theme.main_stylesheet()`'s
+        # `QLabel { ... padding: 8px; }` applies here too -- this class *is*
+        # a QLabel -- so the height computed just above from the font's own
+        # metrics lost 16px to padding and left the glyphs less vertical
+        # room than the font needs. #168 correctly replaced a hardcoded 22
+        # with `metrics.height() + 10` and the descenders were *still* cut,
+        # because the 10px of slack it added was being spent twice over on
+        # a padding neither that fix nor `AlignVCenter` could see. Spacing
+        # here is this widget's own: `setContentsMargins` above.
+        #
+        # Only the *vertical* padding is harmful, so only it is zeroed: the
+        # 8px horizontal inset is what sets these rows in from the drawer's
+        # edge, and dropping it too would leave the row text starting
+        # further left than the "Synth core"/"Effects" group labels above
+        # them -- fixing a clipped descender by inverting the list's
+        # indent hierarchy is not a fix.
+        padding = "padding: 0 8px;"
         if enabled:
-            self.setStyleSheet(f"color: {theme.rgba(theme.TEXT)}; background: {theme.rgba(theme.PANEL)};")
+            self.setStyleSheet(
+                f"color: {theme.rgba(theme.TEXT)}; "
+                f"background: {theme.rgba(theme.PANEL)}; {padding}")
         else:
-            self.setStyleSheet(f"color: {theme.rgba(theme.TEXT_FAINT)}; background: {theme.rgba(theme.PANEL)};")
+            self.setStyleSheet(
+                f"color: {theme.rgba(theme.TEXT_FAINT)}; "
+                f"background: {theme.rgba(theme.PANEL)}; {padding}")
             self.setEnabled(False)
 
     def mousePressEvent(self, event):

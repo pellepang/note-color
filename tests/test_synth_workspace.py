@@ -410,3 +410,70 @@ def test_knob_drag_state_cleared_on_release(app):
 def test_knob_tooltip_mentions_drag(app):
     knob = sw.Knob("Cutoff", "440Hz", 0.0)
     assert "drag" in knob.toolTip()
+
+
+# --- module names render in full (issues #164, #168, #197) -------------
+
+
+@pytest.fixture
+def styled_app(app):
+    """The app with `theme.main_stylesheet()` actually applied.
+
+    Load-bearing, not scene-setting. The cause of #164/#168/#197 was that
+    stylesheet's `QLabel { ... padding: 8px; }`: every name label below
+    sizes itself from `QFontMetrics`, which cannot see a stylesheet
+    padding, so each was handed a box exactly as big as its text and then
+    spent 16px of it on padding. Assert against an unstyled app and the
+    guard passes while the real app still clips.
+    """
+    from notecolor.gui import theme
+
+    app.setStyleSheet(theme.main_stylesheet())
+    yield app
+    app.setStyleSheet("")
+
+
+def test_module_window_titles_are_not_clipped(styled_app):
+    """Every title/tag label has room for the text it is actually showing.
+
+    `contentsRect()` rather than `width()`: Qt applies stylesheet padding
+    as contents margins, so the content rect is the box the glyphs really
+    get -- which is the whole point of this guard.
+    """
+    for title, tag in [("OSC 1", "saw"), ("FILTER", "lp"), ("AMP ENV", "ADSR")]:
+        window = sw.ModuleWindow("osc1", title, tag=tag,
+                                 knob_specs=[("Cutoff", "1.00", None)])
+        window.show()
+        bar = window._title_bar
+        for label in (bar._title_label, bar._tag_label):
+            if label is None or not label.isVisible():
+                continue
+            advance = label.fontMetrics().horizontalAdvance(label.text())
+            assert advance <= label.contentsRect().width(), (
+                f"{title!r}: {label.text()!r} needs {advance}px, "
+                f"has {label.contentsRect().width()}px")
+        # ... and the title that is shown is the whole title, not an elision,
+        # at the module's real fixed width.
+        assert bar._title_label.text() == title
+
+
+def test_drawer_row_names_keep_their_descenders(styled_app):
+    """Rows are tall enough for the font, not just for its x-height.
+
+    "Delay" and "CLAP Plugin..." are the canonical failures: #168's fix
+    derived the height from `QFontMetrics` and the descenders were *still*
+    cut, because the slack it added was spent on the padding.
+    """
+    drawer = sw.Drawer()
+    drawer.show()
+    rows = drawer.findChildren(sw._DrawerRow)
+    assert rows, "drawer built no rows"
+    for row in rows:
+        needed = row.fontMetrics().height()
+        assert needed <= row.contentsRect().height(), (
+            f"{row.text()!r} needs {needed}px of height, "
+            f"has {row.contentsRect().height()}px")
+        advance = row.fontMetrics().horizontalAdvance(row.text())
+        assert advance <= row.contentsRect().width(), (
+            f"{row.text()!r} needs {advance}px of width, "
+            f"has {row.contentsRect().width()}px")
