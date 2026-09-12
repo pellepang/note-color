@@ -790,11 +790,14 @@ class SynthKeyboardBand(QtWidgets.QWidget):
         self._body.setContentsMargins(4, 4, 4, 4)
         self._body.setSpacing(6)
 
-        hint = QtWidgets.QLabel("↑/↓ octave  ·  Tab layout", self)
-        hint.setFont(theme.font(7))
-        hint.setStyleSheet(f"background: transparent; color: {theme.rgba(theme.TEXT_FAINT)};")
-        self._body.addWidget(hint)
-
+        # No "↑/↓ octave · Tab layout" hint row here any more (#195). The
+        # user's report was that the footer had grown three stacked
+        # headers -- the key-interaction header, this one, and the recents
+        # -- and this is the one they wanted gone. It was a bare label
+        # with no click targets, so nothing moved anywhere else: the
+        # clickable layout switcher is a different widget entirely
+        # (`SynthView._build_layout_tabs()`, added to the footer above
+        # this band), and `Tab`/`↑`/`↓` keep working exactly as before.
         self.recents_rail = RecentsRail(self)
         self._body.addWidget(self.recents_rail)
 
