@@ -1,5 +1,15 @@
 # 55. The Synth View's runtime: desktop-first, 16 voices, and the effects bus that was already there (issue #180, map #179)
 
+> **Partly superseded by decision 56, the same day.** The "Fog 3 -- cable graph
+> or series slots" section below is **overturned**: asked the question directly
+> rather than through his earlier phrasing, the project owner wants real visible
+> cables, and they are being built. Everything else here stands unchanged --
+> the shared mix bus, the measured per-block costs, pure Python with #145's seam
+> shut, the 16-voice cap, and desktop-first portability. Read 56 alongside this.
+>
+> The lesson this decision itself states applies to it: inferring a want from a
+> phrase is a claim to verify, not a premise to build on.
+
 Settled 2026-09-12 by grilling #180, which was asked to answer map #179's Fog
 questions 1-3 before anything got built. Two of the three turned out to have
 been answered in 2026-09 already, by decision 40; the grilling's real product is

@@ -1032,3 +1032,33 @@ One-liners; full detail in `docs/DECISIONS.md`.
   cost of merging a genuine fast repeat of the same note into one. A
   terminal-level limit, documented rather than chased.
 
+
+## Synth View as a cable-patched modular synth (decision 56, map #179)
+
+- **Real visible cables, not reorderable slots.** The wire on screen is the
+  actual signal path. Overturns decision 55's Fog 3 answer; the rest of 55 stands.
+- **One canvas with a visible Mix node.** Left of it runs once per held note,
+  right of it runs once. A per-note cable dropped on a once-only module is
+  **refused** (Reaktor's behaviour) rather than silently summed (VCV's), so the
+  Mix node never lies about where summing happens.
+- **The drawer is a palette of instances.** Dragging adds a module; a patch with
+  no Osc 2 has no Osc 2. One meaning for the gesture, unlike today.
+- **Feedback loops are legal, through a Delay module you place yourself** --
+  Bitwig's model. Minimum one block, 11.61 ms. Not VCV's free one-sample
+  feedback, which is only affordable in a per-sample C++ engine.
+- **Per-sample recursion inside a module is fine and already shipping**
+  (`lfilter`'s SVF); per-sample traversal *of the graph* is what Python cannot
+  do. Conflating those two is what made an earlier round wrongly conclude a
+  compiled core was required.
+- **Numpy block graph now, compiled core later.** A 16-voice by 8-module graph
+  costs ~3% of the callback budget, so dispatch is not the constraint; the module
+  contract is still shaped compiled-first so the inner loop can be swapped.
+- **Modulation is a separate layer with a visibly different cable**, and LFOs
+  carry a per-note/global switch (default per-note) that the Mix node's two sides
+  already express.
+- **The graph engine lives beside `synth_engine.py`, not replacing it**, so the
+  score editor, frozen-buffer playback and QWERTY entry cannot regress while it
+  is built.
+- **CLAP still, on new grounds.** VST3 relicensed to MIT in Oct 2025, killing
+  #145's licence argument; CLAP wins now on being plain C and `ctypes`-bindable.
+  The newly explicit cost: no Python CLAP host exists.

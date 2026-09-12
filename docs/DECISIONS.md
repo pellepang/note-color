@@ -60,3 +60,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The GUI screenshot harness: a nested headless compositor (issue #194)](decisions/53-the-gui-screenshot-harness-a-nested-headless-compositor-issue-194.md)
 - [Synth View footer, Phase 1: collapse deleted, and a padding rule that had been clipping text (issues #195, #196, #197)](decisions/54-synth-view-footer-phase-1-collapse-deleted-padding-as-a-clipping-cause-issues-195-196-197.md)
 - [The Synth View's runtime: desktop-first, 16 voices, and the effects bus that was already there (issue #180, map #179)](decisions/55-synth-view-runtime-desktop-first-16-voices-and-the-bus-that-was-already-there-issue-180.md)
+- [The Synth View becomes a real cable-patched modular synth (map #179, grilling round 2)](decisions/56-the-synth-view-becomes-a-real-cable-patched-modular-synth-issue-200-round-2.md)
