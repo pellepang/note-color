@@ -622,7 +622,20 @@ class RecentsRail(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet(f"background: {theme.rgba(theme.CHROME)};")
+        # Same `WA_StyledBackground` trap #187 hit on `AssignmentPill`: a
+        # bare `QWidget` subclass never paints the background/border its
+        # own stylesheet asks for unless this attribute is set, so the
+        # rail was drawing *nothing* -- its "RECENT" label and chips read
+        # as text floating loose on the band's own chrome rather than as
+        # the full-width strip this ticket asks for. Grabbing the widget
+        # (not reading the stylesheet) is what showed it.
+        self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+        # `CHROME_DEEP` rather than `CHROME` (the band's own tone) plus a
+        # bottom rule, so the strip is actually distinguishable from the
+        # band it sits on once it does paint.
+        self.setStyleSheet(
+            f"RecentsRail {{ background: {theme.rgba(theme.CHROME_DEEP)}; "
+            f"border-bottom: 1px solid {theme.rgba(theme.RULE)}; }}")
         self._layout = QtWidgets.QHBoxLayout(self)
         self._layout.setContentsMargins(6, 4, 6, 4)
         self._layout.setSpacing(6)
@@ -650,6 +663,14 @@ class RecentsRail(QtWidgets.QWidget):
     def set_names(self, names):
         for chip in self._chips:
             self._layout.removeWidget(chip)
+            # removeWidget() only stops the layout from managing the
+            # widget's geometry -- it does not hide it, so without this
+            # the outgoing chip kept rendering at its last on-screen
+            # position (visibly overlapping the incoming chips) for
+            # however long deleteLater()'s deferred deletion took to
+            # actually run. Found by grabbing a real re-populated rail
+            # rather than trusting `_chips`/layout state alone.
+            chip.hide()
             chip.deleteLater()
         self._chips = []
         self._empty_hint.setVisible(not names)
@@ -657,6 +678,13 @@ class RecentsRail(QtWidgets.QWidget):
         for name in names:
             chip = _RecentChip(name, self)
             self._layout.insertWidget(insert_at, chip)
+            # Explicit, for symmetry with the `hide()` above: adding a
+            # widget to a visible parent's layout does eventually show it,
+            # but only once the event loop gets round to it -- so a rail
+            # repopulated and grabbed in the same turn (a screenshot right
+            # after an assignment) would otherwise come out with the old
+            # chips hidden and the new ones not yet shown, i.e. blank.
+            chip.show()
             insert_at += 1
             self._chips.append(chip)
 

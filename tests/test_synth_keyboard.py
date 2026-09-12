@@ -677,6 +677,52 @@ def test_recents_rail_reflects_current_tabs_recents(app):
     assert labels == ["Beta"]
 
 
+def test_recents_rail_spans_the_full_footer_width(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta"], kit_zone_names={})
+    band.resize(900, 360)
+    band.show()
+    # Without this the band's layout has never run, so every child is
+    # still at its default geometry and the width check below is
+    # meaningless (the first draft of this test asserted against exactly
+    # that unlaid-out state and failed).
+    band.layout().activate()
+    band._assign_row("upper", "Beta")
+
+    # Same left/right inset (4px, `_body`'s contents margins) as every
+    # other row in the band -- ticket #189 requires the rail to read as
+    # the footer's full width, not a narrower strip floating inside it.
+    assert band.recents_rail.x() == 4
+    assert band.recents_rail.width() == band.width() - 2 * 4
+
+
+def test_repopulating_the_rail_leaves_no_stale_chip_on_screen(app):
+    # Regression test for ticket #189: RecentsRail.set_names() used to
+    # removeWidget() an outgoing chip and deleteLater() it, but never
+    # hide() it -- removeWidget() only stops layout management, it
+    # doesn't hide the widget, so the outgoing chip kept painting at its
+    # old on-screen position (visibly overlapping the "RECENT" label and
+    # the incoming chips) until deleteLater()'s deferred deletion
+    # actually ran. Caught by grabbing a real re-populated rail rather
+    # than trusting `_chips`/layout state alone.
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    band.resize(900, 360)
+    band.show()
+
+    band._assign_row("upper", "Beta")
+    band._assign_row("upper", "Gamma")  # triggers a second set_names() call
+    band.layout().activate()
+
+    # `deleteLater()` is deferred, so the outgoing chips are still
+    # children here -- which is exactly the point: what matters is that
+    # they are no longer *visible*. Note they still carry overlapping
+    # geometry (a stale chip sits right where a live one now draws), so
+    # visibility is the only thing keeping them off screen.
+    all_chips = band.recents_rail.findChildren(sk._RecentChip)
+    assert len(all_chips) > 2, "expected pending-deletion chips to still be children"
+    visible = [c.name for c in all_chips if c.isVisible()]
+    assert visible == ["Gamma", "Beta"]
+
+
 # -- per-layout-tab persistence (ticket #184) ---------------------------------
 
 def test_each_layout_tab_keeps_its_own_row_assignment():
@@ -778,6 +824,56 @@ def test_key_box_drop_assigns_just_that_key(app):
     key_box_row.dropEvent(_FakeDropEvent("Beta", x=box_x))
 
     assert band.assignments.key_override[("lower", letter)] == "Beta"
+
+
+def _chip_drag_text(chip):
+    """The plain text a real `_RecentChip` drag would carry. `mousePressEvent`
+    itself can't be driven here -- `QDrag.exec()` spins its own blocking event
+    loop -- so this mirrors the one line of mime payload it builds, the same
+    way `Canvas.spawn_module()` is exercised without synthesizing real Qt DnD
+    (issue #175)."""
+    return chip.name
+
+
+def test_dragging_a_rail_chip_onto_a_key_assigns_that_key(app):
+    # End-to-end for ticket #189: the rail is the drag *source*, the key
+    # box is the drop target, and the payload connecting them is the
+    # chip's own name.
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    band.resize(900, 300)
+    band.show()
+    band.layout().activate()
+    band._assign_row("upper", "Gamma")  # puts "Gamma" in the rail
+
+    chip = band.recents_rail._chips[0]
+    assert _chip_drag_text(chip) == "Gamma"
+
+    _, key_box_row = band._row_widgets["lower"]
+    letter = PIANO_LOWER_ROW[2]
+    box_side, gap, _stagger, _margin, x_offset, _y_offset = key_box_row._geometry()
+    box_x = x_offset + 2 * (box_side + gap) + box_side / 2
+
+    key_box_row.dropEvent(_FakeDropEvent(_chip_drag_text(chip), x=box_x))
+
+    assert band.assignments.key_override[("lower", letter)] == "Gamma"
+    # ...and the key now paints its per-key override marker.
+    assert key_box_row._boxes[2]["overridden"] is True
+    # Untouched neighbours keep the row's own assignment (no override).
+    assert ("lower", PIANO_LOWER_ROW[1]) not in band.assignments.key_override
+
+
+def test_dragging_a_rail_chip_onto_a_pill_assigns_the_whole_row(app):
+    band = sk.SynthKeyboardBand(synth_names=["Alpha", "Beta", "Gamma"], kit_zone_names={})
+    band.resize(900, 300)
+    band.show()
+    band.layout().activate()
+    band._assign_row("upper", "Gamma")
+
+    chip = band.recents_rail._chips[0]
+    pill, _ = band._row_widgets["lower"]
+    pill.dropEvent(_FakeDropEvent(_chip_drag_text(chip)))
+
+    assert band.assignments.name_for("lower", band.layout_state) == "Gamma"
 
 
 def test_shift_m_emits_panic_not_note_preview(app):
