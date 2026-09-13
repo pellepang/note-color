@@ -692,6 +692,10 @@ class Drawer(QtWidgets.QWidget):
     WIDTH = 178
     #: Width of the collapsed strip -- just the toggle tab, no content.
     COLLAPSED_WIDTH = 20
+    #: Height of the ☰ toggle, in both states. Fixed, so collapsing the
+    #: drawer leaves a square-ish button at the top rather than stretching
+    #: it down the whole rail (issue #160).
+    TOGGLE_H = 28
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -733,15 +737,18 @@ class Drawer(QtWidgets.QWidget):
         # the button itself span the drawer's whole current width in both
         # states, so there's no gap of raw background beside it to read as
         # a stray band.
-        self._toggle_button.setMinimumHeight(28)
-        # `QToolButton`'s own default size policy is Fixed/Fixed, which is
-        # exactly what made a `QVBoxLayout` leave it at its bare sizeHint
-        # in both directions instead of stretching it to fill the layout's
-        # cross-axis width (or, once expanded/collapsed toggles the
-        # remaining stretch below, the leftover height) -- Expanding in
-        # both directions is what actually makes it track the drawer.
+        # Width Expanding, height fixed. `QToolButton`'s own default policy
+        # is Fixed/Fixed, which is what left it at its bare sizeHint instead
+        # of spanning the drawer -- but Expanding in *both* directions
+        # overshot: with the row list hidden there is nothing below to take
+        # the leftover height, so the collapsed drawer stretched the button
+        # down its whole length and left the glyph floating at the midpoint
+        # of a bare 20px rail. That is issue #160's "resizing rail rather
+        # than a square at the top-left"; the band fix only ever needed the
+        # horizontal half.
+        self._toggle_button.setFixedHeight(self.TOGGLE_H)
         self._toggle_button.setSizePolicy(
-            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self._toggle_button.setStyleSheet(
             f"QToolButton {{ background: {theme.rgba(theme.ink(theme.INK_2))};"
             f" border: 1px solid {theme.rgba(theme.RULE)}; color: {theme.rgba(theme.TEXT_FAINT)}; }}"
@@ -769,6 +776,12 @@ class Drawer(QtWidgets.QWidget):
         self._scroll.setStyleSheet("background: transparent; border: none;")
         self._scroll.viewport().setStyleSheet("background: transparent;")
         outer.addWidget(self._scroll, 1)
+        # Collapsed, the scroll area is hidden and its stretch goes with it,
+        # leaving a fixed-height button as the layout's only visible item --
+        # which `QVBoxLayout` would centre down the rail. This takes the
+        # leftover height instead, so the toggle stays at the top in both
+        # states (issue #160).
+        outer.addStretch(0)
 
     def _group_label(self, text):
         label = QtWidgets.QLabel(text, self)
