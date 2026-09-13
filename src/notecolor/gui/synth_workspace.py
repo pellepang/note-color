@@ -35,6 +35,12 @@ TIDY_MARGIN = 14
 #: Canvas background grid spacing (prototype: `radial-gradient(... 22px)`).
 CANVAS_GRID_SPACING = 22
 
+#: How much canvas the Mix stripe occupies, for a side-aware `tidy()`.
+#: Kept here rather than imported from `patch_canvas` so this module stays
+#: free of any cable vocabulary; `patch_canvas.STRIPE_WIDTH` is the same
+#: number and `tests/test_patch_canvas.py` holds them together.
+STRIPE_ALLOWANCE = 150
+
 #: Effect types with real DSP behind them, kept in the same order
 #: `audio/effects.py`'s own `EFFECT_TYPES` registry declares them --
 #: reread from there rather than hand-copied, so a future effect (reverb,
@@ -79,6 +85,12 @@ class Knob(QtWidgets.QWidget):
     #: `last_shift` right after the signal fires, same turn, before any
     #: other wheel event can land.
     wheelStepped = QtCore.Signal(int)
+    #: True while this knob is being dragged, False when let go. A
+    #: modulation cable brightens while its knob is being turned and fades
+    #: back when it is not (decision 57 §3) -- that is what this reports,
+    #: and it is the only reason it exists; the knob itself paints the
+    #: same either way.
+    turning = QtCore.Signal(bool)
 
     def __init__(self, label="", value_text="", rotation_degrees=0.0, parent=None):
         super().__init__(parent)
@@ -143,9 +155,16 @@ class Knob(QtWidgets.QWidget):
     #: wants deliberate, controlled drag distance per step, not raw speed).
     DRAG_PIXELS_PER_STEP = 28
 
+    def label(self):
+        """This knob's label -- the half of its identity the patch layer
+        keys modulation cables on (a cable lands on `(module, "Cutoff")`,
+        not on a widget)."""
+        return self._label
+
     def mousePressEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton:
             self._drag_start_y = event.position().y()
+            self.turning.emit(True)
             event.accept()
             return
         super().mousePressEvent(event)
@@ -174,6 +193,7 @@ class Knob(QtWidgets.QWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == QtCore.Qt.LeftButton and self._drag_start_y is not None:
             self._drag_start_y = None
+            self.turning.emit(False)
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -232,6 +252,7 @@ class ModuleWindow(QtWidgets.QWidget):
         self.type_key = type_key
         self._drag = None
         self._focused = False
+        self._refusing = False
         self.setFixedWidth(TIDY_SLOT_W - TIDY_GAP)
         # Scoped to this widget alone (via the object-name selector in
         # `_apply_border_style()`) so the focus border can't leak onto
@@ -285,6 +306,11 @@ class ModuleWindow(QtWidgets.QWidget):
     def knobs(self):
         return list(self._knobs)
 
+    def title_text(self):
+        """The module's display title, unelided -- what a cable's refusal
+        calls it when it names the module back to the user."""
+        return self._title_bar.title_text()
+
     def _sync_content_height(self):
         """Pin `_body`'s height to exactly what `_FlowLayout` needs at this
         window's real (fixed) width, then resize the window to title bar +
@@ -310,8 +336,38 @@ class ModuleWindow(QtWidgets.QWidget):
 
     # -- focus state ----------------------------------------------------
 
+    #: Half-period of the refused-cable border flash, and how many halves
+    #: it runs for -- three full blinks, matching the prototype's
+    #: `refuse .6s steps(1,end) 3`.
+    REFUSAL_FLASH_MS = 100
+    REFUSAL_FLASH_STEPS = 6
+
+    def flash_refusal(self):
+        """Blinks this window's border when a cable aimed at it is refused
+        (ticket #211): the callout says why, this says *which module* said
+        no, which the sentence alone cannot do from across the canvas."""
+        self._refusal_steps = self.REFUSAL_FLASH_STEPS
+        timer = QtCore.QTimer(self)
+        timer.setInterval(self.REFUSAL_FLASH_MS)
+
+        def step():
+            self._refusing = not self._refusing
+            self._apply_border_style()
+            self._refusal_steps -= 1
+            if self._refusal_steps <= 0:
+                self._refusing = False
+                self._apply_border_style()
+                timer.stop()
+                timer.deleteLater()
+
+        timer.timeout.connect(step)
+        timer.start()
+
     def _apply_border_style(self):
-        border_colour = theme.COPPER if self._focused else theme.RULE_2
+        if self._refusing:
+            border_colour = theme.CLAY_RED
+        else:
+            border_colour = theme.COPPER if self._focused else theme.RULE_2
         self.setStyleSheet(
             f"#moduleWindow {{ background: {theme.rgba(theme.CHROME)}; "
             f"border: 1px solid {theme.rgba(theme.ink(border_colour))}; }}"
@@ -440,6 +496,9 @@ class _TitleBar(QtWidgets.QWidget):
         layout.addWidget(close_button)
 
         self._set_elided_texts()
+
+    def title_text(self):
+        return self._title_text
 
     def _set_elided_texts(self):
         """Squeeze `_title_label`/`_tag_label` to fit the title bar's fixed
@@ -798,7 +857,23 @@ class Canvas(QtWidgets.QWidget):
     pos) -> ModuleWindow | None` is where that vocabulary lives (stage 3).
     Returning `None` (e.g. "this module type is already open, or is the
     disabled CLAP row") is a valid, silent no-op.
+
+    It knows nothing about cables either. `gui/patch_canvas.PatchLayer`
+    attaches to the three signals below and supplies all of that; a canvas
+    with no layer attached behaves exactly as it did before ticket #211.
     """
+
+    #: Anything that can have moved a jack: a window added, closed, moved,
+    #: raised, tidied, or the canvas itself resized. One signal rather than
+    #: five because every listener so far wants the same thing -- "work out
+    #: your geometry again".
+    layoutChanged = QtCore.Signal()
+    #: The `ModuleWindow` that just opened, after it is on the canvas.
+    windowAdded = QtCore.Signal(object)
+    #: The `ModuleWindow` that just closed, before it is discarded.
+    windowRemoved = QtCore.Signal(object)
+    #: The window that just became the focused one.
+    windowFocused = QtCore.Signal(object)
 
     def __init__(self, module_factory, parent=None):
         super().__init__(parent)
@@ -807,6 +882,18 @@ class Canvas(QtWidgets.QWidget):
         self.setStyleSheet(f"background: {theme.rgba(theme.CANVAS)};")
         self._windows = []
         self._drop_hover = False
+        #: Optional `(window) -> "poly"|"mono"` hook. When set, `tidy()`
+        #: packs each group into its own half of the canvas instead of one
+        #: grid across the middle -- so a tidy does not shuffle modules
+        #: across the Mix boundary they belong on (decision 57 §1).
+        self.partition = None
+        #: Optional `() -> x` hook: where the Mix stripe sits, so `tidy()`
+        #: knows where the two halves are.
+        self.boundary = None
+        #: Optional `(painter) -> None` hook, called at the end of
+        #: `paintEvent` -- for anything that belongs *under* the module
+        #: windows, which an overlay widget cannot draw.
+        self.background_painter = None
 
     # -- window bookkeeping ---------------------------------------------
 
@@ -815,12 +902,17 @@ class Canvas(QtWidgets.QWidget):
         window.show()
         window.closed.connect(lambda _key, w=window: self._on_window_closed(w))
         window.focusRequested.connect(self._focus_window)
+        window.moved.connect(lambda _key: self.layoutChanged.emit())
         self._windows.append(window)
+        self.windowAdded.emit(window)
+        self.layoutChanged.emit()
         return window
 
     def _on_window_closed(self, window):
         if window in self._windows:
             self._windows.remove(window)
+            self.windowRemoved.emit(window)
+            self.layoutChanged.emit()
 
     def _focus_window(self, window):
         """Exactly one window is ever focused at a time -- the newly
@@ -828,6 +920,14 @@ class Canvas(QtWidgets.QWidget):
         for w in self._windows:
             w.set_focused(w is window)
         window.raise_()
+        self.windowFocused.emit(window)
+        # Raising a window puts it above the cable layer's own children
+        # too, so whoever owns those has to get them back on top.
+        self.layoutChanged.emit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.layoutChanged.emit()
 
     def windows(self):
         return list(self._windows)
@@ -913,6 +1013,9 @@ class Canvas(QtWidgets.QWidget):
                 x += spacing
             y += spacing
 
+        if self.background_painter is not None:
+            self.background_painter(p)
+
         if self._drop_hover:
             p.setRenderHint(QtGui.QPainter.Antialiasing, True)
             inset_rect = self.rect().adjusted(8, 8, -8, -8)
@@ -926,25 +1029,62 @@ class Canvas(QtWidgets.QWidget):
     # -- Tidy: ported 1:1 from the prototype's JS tidy() --------------------
 
     def tidy(self):
-        windows = sorted(self._windows, key=lambda w: (w.y(), w.x()))
+        if self.partition is not None and self.boundary is not None:
+            self._tidy_by_side()
+            self.layoutChanged.emit()
+            return
+        self._tidy_within(self._windows, 0, self.width())
+        self.layoutChanged.emit()
+
+    def _tidy_by_side(self):
+        """Per-note modules into the canvas left of the Mix stripe,
+        once-only modules into the canvas right of it. A module's side is
+        what it *is* (decision 56 §3); tidying it across the boundary would
+        say something untrue about the patch."""
+        left_edge = self.boundary()
+        poly = [w for w in self._windows if self.partition(w) != "mono"]
+        mono = [w for w in self._windows if self.partition(w) == "mono"]
+        self._tidy_within(poly, 0, left_edge)
+        self._tidy_within(mono, left_edge + STRIPE_ALLOWANCE,
+                          self.width() - left_edge - STRIPE_ALLOWANCE)
+
+    def _tidy_within(self, windows, origin_x, width):
+        windows = sorted(windows, key=lambda w: (w.y(), w.x()))
         count = len(windows)
         if count == 0:
             return
-        width = self.width()
         max_cols = max(1, math.floor((width - TIDY_MARGIN * 2 + TIDY_GAP)
                                      / (TIDY_SLOT_W + TIDY_GAP)))
         cols = min(max_cols, count)
         rows = math.ceil(count / cols)
+        row_pitch = self._row_pitch(windows, rows)
         grid_w = cols * TIDY_SLOT_W + (cols - 1) * TIDY_GAP
-        grid_h = rows * TIDY_SLOT_H + (rows - 1) * TIDY_GAP
+        grid_h = rows * row_pitch + (rows - 1) * TIDY_GAP
         offset_x = max(TIDY_MARGIN, (width - grid_w) / 2)
         offset_y = max(TIDY_MARGIN, (self.height() - grid_h) / 2)
 
         for index, window in enumerate(windows):
             row, col = divmod(index, cols)
-            x = offset_x + col * (TIDY_SLOT_W + TIDY_GAP)
-            y = offset_y + row * (TIDY_SLOT_H + TIDY_GAP)
+            x = origin_x + offset_x + col * (TIDY_SLOT_W + TIDY_GAP)
+            y = offset_y + row * (row_pitch + TIDY_GAP)
             window.move(round(x), round(y))
+
+    def _row_pitch(self, windows, rows):
+        """How far apart tidied rows sit.
+
+        `TIDY_SLOT_H` came from the prototype, where a mocked module was
+        three knobs tall. A real one with six knobs is nearly twice that,
+        so a second row landed on top of the first. Measuring the windows
+        gives rows that clear each other whenever the canvas has the room;
+        where it does not, the pitch shrinks back rather than pushing the
+        bottom row off the canvas entirely, which is the same overlap as
+        before but no worse.
+        """
+        tallest = max(w.height() for w in windows)
+        if rows <= 1:
+            return max(TIDY_SLOT_H, tallest)
+        available = (self.height() - TIDY_MARGIN * 2 - (rows - 1) * TIDY_GAP) / rows
+        return max(TIDY_SLOT_H, min(tallest, available))
 
     @staticmethod
     def tidy_grid(width, height, count):

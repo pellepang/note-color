@@ -115,9 +115,66 @@ def _footer_at(fraction):
     return build
 
 
+def _patched_canvas(refuse=False):
+    """The Synth View with a real patch on it (ticket #211): sound cables
+    across the Mix stripe, two modulation cables on knobs, and a feedback
+    loop through the Delay.
+
+    With `refuse`, it also drops a per-note output onto a once-only input
+    and leaves the refusal standing -- the state the callout's wording and
+    placement have to be judged in.
+    """
+    def build():
+        from PySide6 import QtCore, QtWidgets
+        from notecolor.gui import patch_graph
+
+        view = _synth_view()
+        view.resize(1280, 800)
+        view.show()
+        QtWidgets.QApplication.processEvents()
+        # The canvas is what this state is about, so give it the room the
+        # footer is not using -- the same clamp a real drag goes through.
+        splitter = view.splitter
+        splitter.setSizes([sum(splitter.sizes()) - splitter.floor, splitter.floor])
+        QtWidgets.QApplication.processEvents()
+
+        for type_key in ("osc2", "filter_env", "lfo", "delay", "chorus"):
+            view.canvas.spawn_module(type_key, QtCore.QPoint(0, 0))
+        view.canvas.tidy()
+
+        layer = view.patch_layer
+        graph = layer.graph
+        for source, dest in (("osc2", "filter"), ("mix", "delay"),
+                             ("delay", "chorus"), ("chorus", "delay")):
+            target = patch_graph.Target("socket", dest)
+            if graph.judge(source, target).ok:
+                graph.connect(source, target)
+        for source, node, knob in (("filter_env", "filter", "Cutoff"),
+                                   ("lfo", "osc1", "Fine")):
+            target = patch_graph.Target("knob", node, knob)
+            if graph.judge(source, target).ok:
+                graph.connect(source, target)
+        layer.relayout()
+
+        # Let the cables actually hang: the physics runs on the layer's
+        # own timer, and a shot taken on frame one would show them all
+        # strung tight.
+        for _ in range(120):
+            layer._tick()
+        if refuse:
+            target = patch_graph.Target("socket", "chorus")
+            layer.refuse(target, graph.judge("osc1", target).reason)
+        QtWidgets.QApplication.processEvents()
+        return view
+
+    return build
+
+
 #: name -> zero-argument builder returning the top-level widget to shoot.
 STATES = {
     "synth-view": _synth_view,
+    "patch-canvas": _patched_canvas(),
+    "patch-refusal": _patched_canvas(refuse=True),
     "drawer-expanded": _synth_view_drawer_expanded,
     "drawer-collapsed": _synth_view_drawer_collapsed,
     "footer-floor": _footer_at(0.0),

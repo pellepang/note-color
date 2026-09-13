@@ -38,6 +38,8 @@ from notecolor.gui import theme
 from notecolor.gui.synth_workspace import (
     Canvas, Drawer, ModuleWindow, SYNTH_CORE_MODULES, CLAP_TYPE_KEY,
 )
+from notecolor.gui.patch_canvas import PatchLayer
+from notecolor.gui import patch_graph
 from notecolor.gui.synth_keyboard import SynthKeyboardBand, LAYOUT_ORDER, LAYOUT_DUAL
 from notecolor.settings import config, patch_format
 from notecolor.tui import synth_params
@@ -170,6 +172,33 @@ DOT_COLOR_FOR_TYPE = {
     "delay": theme.AMBER,
     "chorus": theme.TEAL_PALE,
 }
+
+#: Which side of the Mix boundary each module type runs on (decision 56
+#: §3), and what leaves it. This is the vocabulary `patch_canvas` has none
+#: of -- it knows what a node is, not what an `osc1` is -- and it is the
+#: only reason a cable is accepted or refused, so it lives here with the
+#: rest of the type-key knowledge.
+#:
+#: Synth-core stages are per-note: sixteen copies, one per held key.
+#: Effects live right of the boundary and run once, which is why a delay
+#: keeps its tail after note-off.
+MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES)
+
+#: Modules that send knob movement rather than sound (#208's port type).
+#: Sound goes into a socket; only these two can grab a knob.
+MOD_SOURCE_TYPES = frozenset({"lfo", "filter_env"})
+
+#: Modules with nothing to take sound *in*: the generators, and the two
+#: modulation sources.
+NO_AUDIO_IN_TYPES = frozenset({"noise", "lfo", "filter_env", "voice"})
+
+#: `voice` is the patch's polyphony/glide settings rather than a stage
+#: sound passes through, so it carries no jacks at all. It is on the
+#: canvas because its knobs are, not because it is in the signal path.
+NO_AUDIO_OUT_TYPES = frozenset({"voice"})
+
+#: The one module a feedback loop may be closed through (decision 56 §4).
+DELAY_TYPE = "delay"
 
 ENGINE_PILLS = ("synth", "sampler", "sf2")
 
@@ -458,6 +487,21 @@ class SynthView(QtWidgets.QMainWindow):
         row.addWidget(self.drawer)
         row.addWidget(self.canvas, 1)
 
+        #: The cables, the jacks and the Mix stripe (ticket #211). The
+        #: canvas keeps its own vocabulary; everything a cable means --
+        #: which module is per-note, which sends modulation, which is the
+        #: Delay a loop may close through -- is handed over here.
+        self.patch_layer = PatchLayer(parent=self)
+        self.patch_layer.attach(self.canvas)
+        self.patch_layer.statusChanged.connect(self._on_patch_status)
+        self.canvas.windowAdded.connect(self._on_window_added)
+        self.canvas.windowFocused.connect(
+            lambda window: self.patch_layer.set_focused_node(window.type_key))
+        self.canvas.partition = lambda window: (
+            patch_graph.SIDE_MONO if window.type_key in MONO_TYPES
+            else patch_graph.SIDE_POLY)
+        self.canvas.boundary = self.patch_layer.stripe_x
+
         footer = _FooterSurface(central)
         footer_layout = QtWidgets.QVBoxLayout(footer)
         footer_layout.setContentsMargins(0, 0, 0, 0)
@@ -641,7 +685,12 @@ class SynthView(QtWidgets.QMainWindow):
         self._status_oct = QtWidgets.QLabel("", bar)
         self._status_rec = QtWidgets.QLabel("", bar)
         self._status_windows = QtWidgets.QLabel("", bar)
-        for label in (self._status_oct, self._status_rec, self._status_windows):
+        #: What the cables are doing, and where a refusal says its piece
+        #: when `CableAppearance.explain` is set to the status bar rather
+        #: than to a callout by the jack (decision 57 §5).
+        self._status_patch = QtWidgets.QLabel("", bar)
+        for label in (self._status_oct, self._status_rec, self._status_windows,
+                      self._status_patch):
             label.setFont(theme.font(7))
             label.setStyleSheet("background: transparent;")
             layout.addWidget(label)
@@ -752,6 +801,35 @@ class SynthView(QtWidgets.QMainWindow):
         window.closed.connect(functools.partial(self._on_effect_module_closed, effect_spec))
         return window
 
+    # -- the patch layer (ticket #211) --------------------------------------
+
+    def _node_spec_for(self, window):
+        """One module window's identity as a graph node. Everything the
+        refusal rules consult is decided here, from the type key."""
+        type_key = window.type_key
+        return patch_graph.NodeSpec(
+            node_id=type_key,
+            title=window.title_text(),
+            side=(patch_graph.SIDE_MONO if type_key in MONO_TYPES
+                  else patch_graph.SIDE_POLY),
+            can_in=type_key not in NO_AUDIO_IN_TYPES,
+            can_out=type_key not in NO_AUDIO_OUT_TYPES,
+            out_kind=(patch_graph.KIND_MOD if type_key in MOD_SOURCE_TYPES
+                      else patch_graph.KIND_AUDIO),
+            is_delay=type_key == DELAY_TYPE,
+        )
+
+    def _on_window_added(self, window):
+        self.patch_layer.add_node(self._node_spec_for(window), window)
+        self.patch_layer.register_knobs(
+            window.type_key, [(knob.label(), knob) for knob in window.knobs()])
+
+    def _on_patch_status(self, text, is_refusal):
+        colour = theme.CLAY_RED if is_refusal else theme.LINEN_DIM
+        self._status_patch.setStyleSheet(
+            f"background: transparent; color: {theme.rgba(theme.ink(colour))};")
+        self._status_patch.setText(text)
+
     def _on_effect_module_closed(self, effect_spec, _type_key):
         if effect_spec in self.current_patch.effects:
             self.current_patch.effects.remove(effect_spec)
@@ -764,6 +842,21 @@ class SynthView(QtWidgets.QMainWindow):
             if window is not None:
                 self.canvas.add_window(window)
         self.canvas.tidy()
+        self._patch_default_chain()
+
+    #: The signal path the three always-open modules already form, drawn
+    #: as cables rather than left implicit -- a never-before-seen patch
+    #: opens wired rather than as three modules and an empty canvas.
+    DEFAULT_CHAIN = (("osc1", "filter"), ("filter", "amp_env"), ("amp_env", "mix"))
+
+    def _patch_default_chain(self):
+        graph = self.patch_layer.graph
+        for source, dest in self.DEFAULT_CHAIN:
+            if graph.node(source) is None or graph.node(dest) is None:
+                continue
+            if graph.judge(source, patch_graph.Target("socket", dest)).ok:
+                graph.connect(source, patch_graph.Target("socket", dest))
+        self.patch_layer.relayout()
 
     # -- knob wheel handlers --------------------------------------------------
 
@@ -845,7 +938,10 @@ class SynthView(QtWidgets.QMainWindow):
             "assignments": kb.snapshot_assignments(),
             "base_octave": kb.base_octave,
         }
-        return {"modules": modules, "keyboard": keyboard}
+        # Cables are per-patch state exactly as window positions are: the
+        # same patch reopened should come back wired the way it was left.
+        return {"modules": modules, "keyboard": keyboard,
+                "cables": self.patch_layer.snapshot()}
 
     def _restore_workspace(self, snapshot):
         for window in list(self.canvas.windows()):
@@ -864,6 +960,10 @@ class SynthView(QtWidgets.QMainWindow):
         kb.base_octave = keyboard["base_octave"]
         kb._rebuild_structure()
         self._refresh_layout_tabs(kb.layout_state.layout)
+        # After the windows, not before: a cable whose module is not open
+        # is dropped on restore, so the nodes have to exist first.
+        self.patch_layer.restore(snapshot.get("cables"))
+        self._on_patch_status(self.patch_layer.summary(), False)
 
     def _apply_patch(self, patch):
         if self.current_patch is not None and self.current_patch is not patch:
@@ -877,6 +977,7 @@ class SynthView(QtWidgets.QMainWindow):
             for window in list(self.canvas.windows()):
                 window.request_close()
             self._open_default_modules()
+            self._on_patch_status(self.patch_layer.summary(), False)
         self._refresh_patchbar()
 
     def _refresh_patchbar(self):
@@ -997,3 +1098,9 @@ class SynthView(QtWidgets.QMainWindow):
         self._status_rec.setText(f"rec={'on' if recording else 'off'}")
         self._status_oct.setText(f"oct={self.keyboard_band.base_octave}")
         self._status_windows.setText(f"windows={self.canvas.window_count()}")
+        # The cable summary is polled rather than pushed: cables change
+        # from several places (a patch restored, a module closed taking its
+        # cables with it), and only the transient "patched · …" messages
+        # are worth a signal of their own.
+        if not self.patch_layer.message_pending():
+            self._on_patch_status(self.patch_layer.summary(), False)
