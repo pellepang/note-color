@@ -424,6 +424,7 @@ class PatchLayer(QtCore.QObject):
             if spec.node_id not in self._hosts:
                 continue
             in_count, out_count = self.graph.socket_counts(spec.node_id)
+            self._reserve_for_sockets(spec.node_id, max(in_count, out_count))
             for slot in range(in_count):
                 wanted[(spec.node_id, "in", slot)] = (pg.KIND_AUDIO, slot == in_count - 1)
             for slot in range(out_count):
@@ -473,6 +474,32 @@ class PatchLayer(QtCore.QObject):
             return None
         top_left = host.mapTo(self.canvas, QtCore.QPoint(0, 0))
         return QtCore.QRect(top_left, host.size())
+
+    def _reserve_for_sockets(self, node_id, count):
+        """Grow the host window so `count` jacks fit inside it.
+
+        Jacks are children of the canvas, not of the module window, so
+        nothing stopped a stack taller than the window from hanging off its
+        bottom edge and floating on bare canvas -- which starts at five
+        jacks (four cables plus the spare) on a one-knob-row module, the
+        exact case #163 left open when it sized windows to their knobs
+        alone. The stripe is excluded: it already spans the full canvas
+        height and centres its own jacks.
+        """
+        host = self._hosts.get(node_id)
+        if host is None or node_id == MixStripe.NODE_ID:
+            return
+        reserve = getattr(host, "set_body_reserve", None)
+        if reserve is None:
+            return
+        if count <= 0:
+            reserve(0)
+            return
+        # Where the last jack's bottom edge lands, measured from the
+        # window's top, minus the title bar the body sits below.
+        stack_bottom = (SOCKET_FIRST_Y + (count - 1) * SOCKET_PITCH
+                        + SOCKET_BOX / 2)
+        reserve(math.ceil(stack_bottom - host.TITLE_H))
 
     def _move_socket(self, key, socket):
         node_id, io, slot = key

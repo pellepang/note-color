@@ -160,6 +160,34 @@ def test_jacks_follow_their_module_when_it_moves(fixture):
     assert (after.x() - before.x(), after.y() - before.y()) == (300, 160)
 
 
+def test_a_growing_jack_stack_grows_its_module_to_fit(fixture):
+    """A one-knob-row module is shorter than five stacked jacks, so before
+    #163's socket half the fifth jack (four cables plus the spare) hung off
+    the bottom edge onto bare canvas. Jacks are canvas children, so nothing
+    clipped them -- the window has to grow instead."""
+    target = fixture.open(_poly("filter", "FILTER"), knobs=("Cutoff",))
+    before = target.height()
+    for i in range(4):
+        source = fixture.open(_poly(f"osc{i}", f"OSC {i}"), knobs=("Tune",),
+                              at=(40, 40 + i))
+        fixture.layer.graph.connect(source.type_key, pg.Target("socket", "filter"))
+    fixture.layer.relayout()
+
+    jacks = fixture.sockets("filter", "in")
+    assert len(jacks) == 5
+    assert target.height() > before
+    bottom = jacks[-1].centre_in(fixture.canvas).y() + pc.SOCKET_BOX // 2
+    assert bottom <= target.y() + target.height()
+
+
+def test_a_module_with_few_jacks_still_sizes_to_its_knobs(fixture):
+    """The reserve is a floor, not a new fixed height: an unpatched module
+    is sized by its knobs exactly as it was before."""
+    plain = _module("filter", "FILTER", knobs=("Cutoff",))
+    patched = fixture.open(_poly("filter", "FILTER"), knobs=("Cutoff",))
+    assert patched.height() == plain.height()
+
+
 def test_the_mix_stripes_jacks_sit_on_its_plate_not_at_its_top(fixture):
     socket = fixture.sockets(pc.MixStripe.NODE_ID, "in")[0]
     assert abs(socket.centre_in(fixture.canvas).y()

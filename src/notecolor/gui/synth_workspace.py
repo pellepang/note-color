@@ -281,9 +281,25 @@ class ModuleWindow(QtWidgets.QWidget):
         outer.addWidget(self._body)
 
         self._knobs = []
+        self._body_reserve = 0
         self.set_knobs(knob_specs)
 
     # -- content ------------------------------------------------------------
+
+    def set_body_reserve(self, height):
+        """Keep `_body` at least `height` px tall, whatever the knobs need.
+
+        Deliberately a bare number rather than anything about jacks: this
+        class knows nothing about cables, and `patch_canvas.PatchLayer` is
+        the only thing that knows how far a node's socket stack reaches
+        (issue #163). A window with no layer attached leaves this at 0 and
+        sizes to its knobs exactly as before.
+        """
+        height = max(0, int(height))
+        if height == self._body_reserve:
+            return
+        self._body_reserve = height
+        self._sync_content_height()
 
     def set_knobs(self, knob_specs):
         """`knob_specs`: iterable of `(label, value_text, on_wheel)`, where
@@ -328,9 +344,13 @@ class ModuleWindow(QtWidgets.QWidget):
         Asking the flow layout directly for `heightForWidth()` at the
         width the window will really have sidesteps that negotiation
         entirely.
+
+        Knobs are the floor, not the whole story: `set_body_reserve()` can
+        raise it so a taller-than-the-knobs socket stack still ends inside
+        the window instead of hanging off its bottom edge onto bare canvas.
         """
         width = self.width()
-        body_height = self._flow.heightForWidth(width)
+        body_height = max(self._flow.heightForWidth(width), self._body_reserve)
         self._body.setFixedHeight(body_height)
         self.setFixedHeight(self.TITLE_H + body_height)
 
