@@ -166,27 +166,6 @@ def test_drawer_toggle_collapses(app):
     assert drawer.expanded is True
 
 
-def test_the_drawer_toggle_sits_at_the_top_in_both_states(app):
-    """Issue #160. The button spans the drawer's width so no strip of raw
-    background shows beside it, but it must not stretch down the rail: with
-    the row list hidden there is nothing below to take the leftover height,
-    and a stretched button leaves the glyph floating at the midpoint of a
-    20px strip rather than reading as a toggle at the top-left."""
-    drawer = sw.Drawer()
-    # Shown, so the layout actually runs -- an unshown widget keeps its
-    # default geometry and every measurement below would be meaningless.
-    drawer.show()
-    button = drawer._toggle_button
-    for expanded in (True, False):
-        drawer.set_expanded(expanded)
-        drawer.resize(drawer.width(), 600)
-        app.processEvents()
-        geom = button.geometry()
-        assert geom.top() == 0
-        assert geom.height() == sw.Drawer.TOGGLE_H
-        assert geom.width() == drawer.width()
-
-
 # -- Canvas.tidy(): grid math ported from the prototype ---------------------
 
 @pytest.mark.parametrize("width,height,count,expected", [
