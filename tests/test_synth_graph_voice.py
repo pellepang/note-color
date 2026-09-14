@@ -72,10 +72,19 @@ def white_noise(frames, seed=7):
 # -- every module is a legal module ------------------------------------------
 
 
-@pytest.mark.parametrize("module", [StateVariableFilter(), AmpEnvelope(), Noise()])
-def test_every_new_module_satisfies_the_contract(module):
+@pytest.mark.parametrize("module,poly", [
+    # The filter runs on either side of Mix (decision 64): per-note for a
+    # filter per voice, once-only for a master filter over the summed mix.
+    (StateVariableFilter(), contract.POLY_EITHER),
+    # The other two are per-note and could hardly be otherwise: an amp
+    # envelope is opened by a note's own gate, and a noise source right of
+    # Mix would be one hiss rather than one per voice.
+    (AmpEnvelope(), contract.POLY_PER_NOTE),
+    (Noise(), contract.POLY_PER_NOTE),
+])
+def test_every_new_module_satisfies_the_contract(module, poly):
     assert contract.validate(module) is module
-    assert module.descriptor().poly == contract.POLY_PER_NOTE
+    assert module.descriptor().poly == poly
     # None of these may close a feedback loop; only a delay line may.
     assert module.descriptor().block_delay == 0
 

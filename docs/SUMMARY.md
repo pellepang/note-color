@@ -1264,3 +1264,26 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - **A loop's period is the delay plus one block** — one block is the delay's
   guarantee, the second is the ordering's, since the cut cable is read after the
   block that wrote it. So a one-block delay in a loop repeats every two blocks.
+
+### 64 — a master filter, and a short delay: the owner's two drawer calls (#205, #206)
+- **The filter runs on both sides of Mix.** Asked as "every note gets its own
+  filter — do you also want one on the whole sound at the end?", answered *both*.
+  `POLY_EITHER`; the `zi` worry dissolves (a master filter's voice *is* the mix)
+  and key tracking becomes a **no-op rather than an error** right of Mix, since a
+  filter over sixteen notes has no single note to track.
+- **A second, short delay module** (`ShortDelay`, `block_delay = 0`) for the
+  delays that *make* a sound rather than repeat one — chorus 15–30 ms, flanger
+  1–10 ms, comb below a millisecond, all under `Delay`'s 11.61 ms block floor.
+- **It has to be a second module, not a knob**: a delay shorter than a block makes
+  `block_delay = 1` false and every loop the graph ordered around it wrong. So it
+  **cannot close a feedback loop**, and the graph refuses that cable naming the
+  Delay it wants instead. Cost accepted knowingly: two drawer parts that look
+  alike. Mitigation is naming plus that refusal sentence, which arrives exactly
+  when the difference matters.
+- Ports `effects.py`'s chunking (chunks no longer than the delay, so a chunk's
+  reads only touch samples an earlier chunk wrote) but with contiguous slice
+  copies instead of index arrays — the allocation test runs at two block sizes
+  because an allocation per *chunk* would be louder than one per block.
+- Bipolar feedback (a negative comb cancels the fundamental — half of a flanger)
+  and mix defaulting to half (the interference is the effect, not the wet signal).
+  No damping: at 5 ms the tail is gone before dulling could be heard.

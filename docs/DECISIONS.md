@@ -68,3 +68,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The Mix node, the poly boundary, and where summing is allowed (ticket #204, map #179)](decisions/61-the-mix-node-the-poly-boundary-and-where-summing-is-allowed-issue-204.md)
 - [The per-note voice modules: filter, amp envelope and noise (ticket #205, map #179)](decisions/62-the-per-note-voice-modules-filter-envelope-and-noise-issue-205.md)
 - [Feedback loops through an explicit delay, and who owns stability (ticket #206, plus the Delay half of #205, map #179)](decisions/63-feedback-loops-through-an-explicit-delay-and-who-owns-stability-issue-206.md)
+- [A master filter, and a short delay: the owner's two drawer calls (tickets #205, #206)](decisions/64-a-master-filter-and-a-short-delay-the-owner-s-two-drawer-calls.md)

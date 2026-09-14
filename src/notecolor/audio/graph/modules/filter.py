@@ -60,16 +60,29 @@ KEY_TRACKING_CENTRE = 60
 
 
 class StateVariableFilter(Module):
-    """One 2-pole SVF, per held note.
+    """One 2-pole SVF, on either side of Mix.
 
-    Per-note rather than `POLY_EITHER`, for two reasons that point the same
-    way. Its `zi` is voice history -- sixteen notes sharing one recurrence
-    is one filter fed a chord, which is a different (and much duller)
-    instrument. And its key tracking reads `ctx.note.pitch`, which is
-    `None` on the once-only side of Mix. A master filter right of Mix is a
-    reasonable thing to want and this declaration forbids it today
-    (`graph.judge()` refuses the crossing); relaxing it is a one-word change
-    once there is something for key tracking to track over there.
+    **Per-note**, the usual case: one filter per held note, each with its
+    own `zi`, so sixteen notes are sixteen filters. That is what makes a
+    filter sweep sound like a filter sweep on every note rather than on the
+    chord as a whole.
+
+    **Once-only**, right of Mix: a master filter over the summed voices.
+    The owner asked for both (decision 64) -- "each singer with their own
+    tone control, and one more on the whole choir" -- and #205's original
+    per-note-only declaration was a caution rather than a limit. The two
+    things it worried about turn out to be fine:
+
+    - The `zi` is voice history, and a master filter's voice *is* the whole
+      mix; one recurrence over the sum is exactly the instrument being
+      asked for, not an accident.
+    - Key tracking reads `ctx.note.pitch`, which does not exist on the
+      once-only side. `process()` already falls back to
+      `KEY_TRACKING_CENTRE` there, which makes key tracking a no-op rather
+      than an error -- the honest answer, since a filter over sixteen notes
+      at once has no single note to track. The knob is still shown; it just
+      does nothing until the module is patched left of Mix, which is the
+      same thing every modular does with a control that has no source.
     """
 
     def __init__(self):
@@ -81,7 +94,7 @@ class StateVariableFilter(Module):
         return ModuleDescriptor(
             module_id="filter.svf",
             name="Filter",
-            poly=contract.POLY_PER_NOTE,
+            poly=contract.POLY_EITHER,
             category="filter",
         )
 
