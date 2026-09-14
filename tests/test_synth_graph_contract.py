@@ -327,6 +327,217 @@ def test_reset_clears_the_line_so_a_new_note_does_not_inherit_an_echo():
     assert np.all(ctx.outputs[0] == 0.0)
 
 
+def test_the_delay_floors_its_own_minimum_rather_than_trusting_the_knob():
+    """#206's second requirement: the minimum is the *module's* to enforce.
+
+    Turned right down, the delay must still be a whole block long, because
+    `graph.py` has already ordered a feedback loop around the promise that
+    it is. Nothing in the graph re-checks this -- shortening it later (a
+    compiled core, sub-blocks) is meant to need no graph change, which only
+    holds while the rule lives here.
+    """
+    module = Delay()
+    ctx = host(module, frames=BLOCK)
+    module.params.set("time", 0.0)          # clamped to the spec's 1ms...
+    assert module.params.get("time") == pytest.approx(0.001)
+    module.params.set("mix", 1.0)
+    module.params.set("feedback", 0.0)
+
+    # ...and 1ms at 44100 is 44 frames, an eighth of a block. If the knob
+    # were obeyed the impulse would come back inside this same block.
+    ctx.inputs[0][0] = 1.0
+    module.process(ctx)
+    assert np.all(ctx.outputs[0] == 0.0)
+    ctx.inputs[0][0] = 0.0
+    module.process(ctx)
+    assert ctx.outputs[0][0] == pytest.approx(1.0)  # exactly one block later
+
+
+def test_a_short_block_size_shortens_the_floor_with_it():
+    """The floor is `max_block`, not a constant. A host running 64-frame
+    blocks gets a 1.45ms minimum delay for free -- which is the mechanism
+    the ticket points at when it says the minimum can shrink later."""
+    module = Delay()
+    ctx = host(module, frames=64)
+    module.params.set("time", 0.0)
+    module.params.set("mix", 1.0)
+    module.params.set("feedback", 0.0)
+    ctx.inputs[0][0] = 1.0
+    module.process(ctx)
+    ctx.inputs[0][0] = 0.0
+    module.process(ctx)
+    assert ctx.outputs[0][0] == pytest.approx(1.0)
+
+
+def test_the_delay_runs_on_either_side_of_mix():
+    """#205: per-note for short uses, once-only for a real echo. Declaring
+    it is the easy half; `tests/test_synth_poly.py` proves the other."""
+    assert Delay().descriptor().poly == contract.POLY_EITHER
+
+
+def test_a_clone_keeps_the_ring_length_it_was_built_with():
+    """`max_seconds` is a construction choice, not a parameter, so the
+    default `new_instance()` would silently hand sixteen voices a
+    two-second buffer each when the module on the canvas was built for
+    fifty milliseconds. Sixteen times 706kB is the difference."""
+    original = Delay(max_seconds=0.05)
+    clone = original.new_instance()
+    assert clone.max_seconds == original.max_seconds
+    assert clone.activation is None          # fresh and inactive, per the contract
+    clone.activate(Activation(SAMPLE_RATE, BLOCK))
+    assert clone.params.specs[0].maximum == pytest.approx(0.05)
+
+
+def test_two_instances_do_not_share_a_delay_line():
+    """The per-note case's real risk: sixteen voices sharing one ring is
+    one voice heard sixteen times, and it is invisible until two notes are
+    held at once."""
+    a, b = Delay(), Delay().new_instance()
+    ctx_a, ctx_b = host(a, frames=64), host(b, frames=64)
+    for module in (a, b):
+        module.params.set("time", 64 / SAMPLE_RATE)
+        module.params.set("mix", 1.0)
+        module.params.set("feedback", 0.0)
+    ctx_a.inputs[0][:] = 1.0
+    a.process(ctx_a)
+    b.process(ctx_b)
+    a.process(ctx_a)
+    b.process(ctx_b)
+    assert np.allclose(ctx_a.outputs[0], 1.0)
+    assert np.all(ctx_b.outputs[0] == 0.0)
+
+
+def test_how_the_host_splits_its_blocks_does_not_change_the_signal():
+    """Ported from `tests/test_effects.py`, where `effects.py` earns it by
+    chunking. Here it falls out of the one-block floor: any sub-block is
+    shorter than the delay, so its reads can only touch samples an earlier
+    sub-block wrote. Worth asserting for the same reason it is asserted
+    there -- the claim is exact, not approximate, so drift fails loudly.
+    """
+    signal = np.sin(np.linspace(0.0, 40.0, 4 * BLOCK))
+
+    def render(chunk):
+        module = Delay()
+        ctx = host(module, frames=BLOCK)
+        module.params.set("time", BLOCK / SAMPLE_RATE)
+        module.params.set("mix", 0.5)
+        module.params.set("feedback", 0.7)
+        module.params.set("damping", 0.4)   # carried state, so it is in the claim
+        out = np.zeros(signal.size)
+        for start in range(0, signal.size, chunk):
+            n = min(chunk, signal.size - start)
+            ctx.frames = n
+            ctx.inputs[0][:n] = signal[start:start + n]
+            module.process(ctx)
+            out[start:start + n] = ctx.outputs[0][:n]
+        return out
+
+    whole = render(BLOCK)
+    assert np.array_equal(render(BLOCK // 2), whole)
+    assert np.array_equal(render(BLOCK // 8), whole)
+
+
+def test_damping_makes_each_repeat_darker_than_the_last():
+    """Ported from `effects.py`: the one-zero average sits in the feedback
+    path, so it compounds over repeats instead of colouring the output
+    once. Measured on an 8kHz tone, which is what a high-end rolloff is
+    supposed to remove."""
+    def tail(damping):
+        module = Delay()
+        ctx = host(module, frames=BLOCK)
+        module.params.set("time", BLOCK / SAMPLE_RATE)
+        module.params.set("mix", 1.0)
+        module.params.set("feedback", 0.9)
+        module.params.set("damping", damping)
+        ctx.inputs[0][:] = np.sin(2 * np.pi * 8000 * np.arange(BLOCK) / SAMPLE_RATE)
+        module.process(ctx)
+        ctx.inputs[0][:] = 0.0
+        levels = []
+        for _ in range(10):
+            module.process(ctx)
+            levels.append(float(np.sqrt(np.mean(ctx.outputs[0] ** 2))))
+        return levels
+
+    dry, damped = tail(0.0), tail(1.0)
+    # Undamped, feedback 0.9 costs about 0.9 of the level per repeat; damped,
+    # an 8kHz tone loses far more than that, and the gap compounds. By the
+    # tenth repeat it is a factor of three.
+    assert damped[-1] < dry[-1] * 0.4
+    assert all(later < earlier for earlier, later in zip(damped, damped[1:]))
+
+
+def test_damping_off_is_the_untouched_signal_not_a_filter_at_zero():
+    """Off means bypassed, not "a one-zero with a coefficient of zero" --
+    the default has to be bit-identical to the module before damping
+    existed, or every existing delay test is measuring something new."""
+    def render(damping):
+        module = Delay()
+        ctx = host(module, frames=BLOCK)
+        module.params.set("time", BLOCK / SAMPLE_RATE)
+        module.params.set("mix", 1.0)
+        module.params.set("feedback", 0.8)
+        module.params.set("damping", damping)
+        ctx.inputs[0][:] = np.linspace(-1.0, 1.0, BLOCK)
+        out = []
+        for _ in range(4):
+            module.process(ctx)
+            out.append(ctx.outputs[0].copy())
+        return np.concatenate(out)
+
+    assert np.array_equal(render(0.0), render(0.0))
+    assert not np.array_equal(render(0.0), render(0.5))
+
+
+# -- stability: counted, never corrected (decision 63 §4) --------------------
+
+
+def test_a_non_finite_line_is_counted_and_left_alone():
+    """The stability position, made testable. A NaN reaching the line is
+    reported and **not** repaired: the module does not decide what the
+    user's signal should have been. See decision 63 §4 for why a runaway is
+    the patch's business and this is still worth counting -- a NaN never
+    leaves a ring buffer on its own, so without a number to show, a patch
+    that has gone silent-and-NaN looks exactly like a patch that is quiet.
+    """
+    module = Delay()
+    ctx = host(module, frames=64)
+    module.params.set("time", 64 / SAMPLE_RATE)
+    module.params.set("mix", 1.0)
+    module.params.set("feedback", 0.5)
+
+    ctx.inputs[0][0] = float("nan")
+    module.process(ctx)
+    # Nothing yet: this block's output is the (clean) line from before, which
+    # is the one-block guarantee showing up in the diagnostics too.
+    assert module.nonfinite_blocks == 0
+
+    ctx.inputs[0][0] = 0.0
+    for _ in range(4):
+        module.process(ctx)
+    assert module.nonfinite_blocks == 4
+    assert np.isnan(ctx.outputs[0]).any(), "the signal was repaired, which is not this module's call"
+
+    # Recoverable, but only by the one operation that is allowed to discard
+    # a signal: an explicit reset.
+    module.reset()
+    module.process(ctx)
+    assert module.nonfinite_blocks == 0
+    assert not np.isnan(ctx.outputs[0]).any()
+
+
+def test_an_ordinary_loud_signal_is_not_reported_as_non_finite():
+    """Loud is not broken. A patch-level runaway stays finite for thousands
+    of blocks and is deliberately not flagged -- level is the user's."""
+    module = Delay()
+    ctx = host(module, frames=64)
+    module.params.set("mix", 1.0)
+    module.params.set("feedback", 0.95)
+    ctx.inputs[0][:] = 1e6
+    for _ in range(32):
+        module.process(ctx)
+    assert module.nonfinite_blocks == 0
+
+
 # -- the rule that is easiest to break ---------------------------------------
 
 
@@ -393,6 +604,24 @@ class _Allocating(WavetableOscillator):
         ctx.outputs[0][:n] = np.arange(n) * 0.5 + 1.0
 
 
+def _damped_delay():
+    """A `Delay` whose damping knob starts on.
+
+    A subclass rather than a `params.set()` because `allocation_growth()`
+    activates whatever the factory returns and never touches it again --
+    and damping off short-circuits the whole branch, so measuring the
+    default would measure nothing.
+    """
+    class _Damped(Delay):
+        def parameters(self):
+            return tuple(
+                ParamSpec(s.param_id, s.name, s.minimum, s.maximum,
+                          0.4 if s.param_id == "damping" else s.default,
+                          s.unit, s.log, s.steps, s.modulatable)
+                for s in super().parameters())
+    return _Damped()
+
+
 def test_the_allocation_check_can_actually_fail():
     assert allocation_growth(_Allocating, NoteContext(frequency=440.0)) > 16 * 1024
 
@@ -401,6 +630,9 @@ def test_the_allocation_check_can_actually_fail():
     (lambda: WavetableOscillator("saw"), NoteContext(frequency=440.0)),
     (lambda: WavetableOscillator("square"), NoteContext(frequency=440.0)),
     (Delay, None),
+    # Damping is a second code path through `process()` with two more
+    # buffers and a carried sample; it has to obey rule 2 as well.
+    (_damped_delay, None),
 ])
 def test_process_allocates_nothing_that_scales_with_the_block(build, note):
     """Contract rule 2, measured rather than asserted in a comment.
