@@ -63,3 +63,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The Synth View becomes a real cable-patched modular synth (map #179, grilling round 2)](decisions/56-the-synth-view-becomes-a-real-cable-patched-modular-synth-issue-200-round-2.md)
 - [The patch canvas's settled look: cables with weight, and a labelled stripe (issue #210)](decisions/57-the-patch-canvas-s-settled-look-cables-with-weight-and-a-labelled-stripe-issue-210.md)
 - [The quality dial, the conversion cache and long-run UX (issue #134)](decisions/58-the-quality-dial-the-conversion-cache-and-long-run-ux-issue-134.md)
+- [The graph module contract, and plugin hosting moved into the design (ticket #202, map #179)](decisions/59-the-graph-module-contract-and-plugin-hosting-moved-into-the-design-issue-202.md)

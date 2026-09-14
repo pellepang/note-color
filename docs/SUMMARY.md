@@ -1110,3 +1110,30 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - Corrections: `htdemucs` is **1.28–1.41×** here against #126's 2.02–2.14× on the
   same machine, and transkun's cost is **content-dependent**, so #126's
   "timing is content-independent" covers the separator only.
+
+### 59 — the graph module contract, and plugin hosting moved into the design (ticket #202)
+- **Plugin hosting is a goal now, not a later phase.** The owner asked for a node
+  system that takes VST plugins *and* our own modules, so decision 56 §10's
+  "informational" status is superseded: the contract is shaped like a plugin ABI
+  (ports declared per instance, parameters by stable id with a 0..1 form,
+  `activate`/`process`/`deactivate`), and a hosted plugin is a `Module` with no
+  privileges anywhere above it. Which format is still open — see below.
+- **Five rules**: block-at-a-time; no allocation in the callback; ports declared
+  by the instance, not the class; typed ports (`audio` / `mod` / `event` — the
+  third added for hosted instruments, which are fed notes); parameters out of
+  band through a preallocated float64 array.
+- **`block_delay` is a guarantee, `latency_frames()` is a measurement.** The
+  first is what #203's cycle rule turns on; `Delay` enforces its own by flooring
+  the delay to one block rather than trusting the knob, so a cycle can be
+  *ordered* rather than solved.
+- **Sample-accurate automation is deliberately absent.** `ParamBlock` is
+  block-rate; the event queue CLAP delivers is #208's problem and extends it
+  rather than replacing it.
+- **The no-allocation rule is measured.** A snapshot diff cannot see a NumPy
+  temporary (it is freed at the end of the expression), so the test compares
+  *peak* traced memory at 64 frames against 2048 and carries a deliberately
+  sloppy module so the check is known to be able to fail. It immediately found
+  `np.take(..., out=)` allocating 18kB a block for its bounds check —
+  `ndarray.take(..., mode="wrap")` does not, and the wrap replaced a modulo too.
+- Shipped against it: `WavetableOscillator` (per-note) and `Delay` (once-only),
+  reusing `synth_engine.py`'s tables rather than forking them.

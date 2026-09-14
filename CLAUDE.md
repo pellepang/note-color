@@ -40,6 +40,16 @@ transcribe --play` bypasses all of it (offline pre-render, still
 `playback.render_offline()`); `virtualnote replay --play` builds its own
 `SoundEngine`, since that entry point constructs no `SessionState`.
 
+**The patch graph engine (decision 56, ticket #202)** is a third, additive
+audio path under `audio/graph/`, for the Synth View's cable-patched canvas
+only: `contract.py` defines what a module is, `modules/` holds modules
+written against it. Nothing else in the app is on it, deliberately — the
+score editor, frozen-buffer playback and QWERTY note entry keep
+`synth_engine.py`'s fixed path, so a half-built graph cannot regress them.
+The contract is shaped like a plugin ABI rather than a Python base class,
+because hosting VST/CLAP plugins alongside our own modules is a goal of the
+system (decision 59); which format is still an open question.
+
 **Process/session lifecycle (issue #40).** `AudioCapture`, the analysis
 thread, `Sensitivity`, and `SourceState` are bundled in `main.SessionState`
 and created lazily — on first tool entry, not at process start — via
