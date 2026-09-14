@@ -40,6 +40,8 @@ from notecolor.gui.synth_workspace import (
 )
 from notecolor.gui.patch_canvas import PatchLayer
 from notecolor.gui import patch_graph
+from notecolor.gui import patch_bridge
+from notecolor.gui.patch_bridge import PatchBridge
 from notecolor.gui.synth_keyboard import SynthKeyboardBand, LAYOUT_ORDER, LAYOUT_DUAL
 from notecolor.settings import config, patch_format
 from notecolor.tui import synth_params
@@ -199,6 +201,15 @@ NO_AUDIO_OUT_TYPES = frozenset({"voice"})
 
 #: The one module a feedback loop may be closed through (decision 56 §4).
 DELAY_TYPE = "delay"
+
+#: Stands where a `VoiceManager` voice id would, in `_voice_by_key`, for a
+#: note the patch graph is playing (#207). A graph note has no voice id to
+#: remember: the graph owns its own sixteen voices and releases them by
+#: pitch, so the pitch beside this sentinel is the whole handle. A distinct
+#: object rather than `None`, because `None` there already means "no audio
+#: device, nothing is sounding" and the release path has to tell the two
+#: apart.
+GRAPH_VOICE = object()
 
 ENGINE_PILLS = ("synth", "sampler", "sf2")
 
@@ -450,6 +461,12 @@ class SynthView(QtWidgets.QMainWindow):
         self._sample_to_kit = {}
         self._sampler_engine = SamplerEngine()
         self._shown_once = False
+        #: The canvas's patch, as a real engine graph (#207). Built before
+        #: `_build()` because `PatchLayer` hands it the canvas's rules the
+        #: moment it attaches.
+        self.bridge = PatchBridge(
+            sound_engine_provider=self._sound_engine,
+            voices=config.POLYPHONY_SYNTH_VIEW)
 
         self._build()
 
@@ -494,6 +511,13 @@ class SynthView(QtWidgets.QMainWindow):
         self.patch_layer = PatchLayer(parent=self)
         self.patch_layer.attach(self.canvas)
         self.patch_layer.statusChanged.connect(self._on_patch_status)
+        #: Every structural edit -- a cable plugged, unplugged, a module
+        #: closed, a workspace restored -- rebuilds the engine graph. The
+        #: canvas is the source of truth for what the user drew; the engine
+        #: is rebuilt from it rather than edited alongside it, so the two
+        #: cannot drift (#207).
+        self.patch_layer.cablesChanged.connect(self._rebuild_graph)
+        self.patch_layer.graph.engine_judge = self.bridge.judge
         self.canvas.windowAdded.connect(self._on_window_added)
         self.canvas.windowFocused.connect(
             lambda window: self.patch_layer.set_focused_node(window.type_key))
@@ -812,7 +836,13 @@ class SynthView(QtWidgets.QMainWindow):
             title=window.title_text(),
             side=(patch_graph.SIDE_MONO if type_key in MONO_TYPES
                   else patch_graph.SIDE_POLY),
-            can_in=type_key not in NO_AUDIO_IN_TYPES,
+            # Two sources, both necessary. The canvas's own list covers the
+            # modules the engine has never heard of (a modulation source, a
+            # settings window); the engine's ports cover the ones it has --
+            # an oscillator generates and takes nothing in, and a jack drawn
+            # on it would be a hole no cable can ever go into (#207).
+            can_in=(type_key not in NO_AUDIO_IN_TYPES
+                    and patch_bridge.takes_sound_in(type_key)),
             can_out=type_key not in NO_AUDIO_OUT_TYPES,
             out_kind=(patch_graph.KIND_MOD if type_key in MOD_SOURCE_TYPES
                       else patch_graph.KIND_AUDIO),
@@ -823,6 +853,71 @@ class SynthView(QtWidgets.QMainWindow):
         self.patch_layer.add_node(self._node_spec_for(window), window)
         self.patch_layer.register_knobs(
             window.type_key, [(knob.label(), knob) for knob in window.knobs()])
+        self._rebuild_graph()
+
+    # -- the engine graph (ticket #207) --------------------------------------
+
+    def _graph_settings(self):
+        """Construction choices per node -- an oscillator's waveform, which
+        picks the module's wavetable set and so cannot be a knob value sent
+        to a module that already exists."""
+        patch = self.current_patch
+        if patch is None:
+            return {}
+        settings = {}
+        for type_key, names in patch_bridge.CONSTRUCTION_KEYS.items():
+            section = getattr(patch, type_key, None)
+            if section is None:
+                continue
+            settings[type_key] = {name: getattr(section, name) for name in names
+                                  if hasattr(section, name)}
+        return settings
+
+    def _graph_parameters(self):
+        """Every knob on screen, as `{type_key: {param_id: value}}`, so a
+        freshly built graph starts where the knobs are rather than at the
+        modules' own defaults.
+
+        The engine's parameter ids and `tui/synth_params.py`'s attribute
+        names were deliberately kept identical where both exist (`cutoff`,
+        `attack`, `feedback`), so this is a copy and not a translation
+        table. Names with no engine parameter -- `filter.env_amount`, an
+        oscillator's `waveform` -- are passed anyway and dropped by
+        `PatchBridge.set_parameter()`, because a mapping maintained in two
+        places is a mapping that rots.
+        """
+        patch = self.current_patch
+        if patch is None:
+            return {}
+        values = {}
+        for _title, specs in synth_params.sections_for(patch):
+            for spec in specs:
+                try:
+                    values.setdefault(spec.section, {})[spec.attr] = \
+                        synth_params.read(patch, spec)
+                except AttributeError:
+                    continue
+        for effect in patch.effects:
+            values.setdefault(effect.type, {}).update(effect.params)
+        return values
+
+    def _rebuild_graph(self):
+        """Rebuild the engine graph from the canvas and install it.
+
+        Called on every structural edit. Held notes are re-triggered on the
+        new graph afterwards: a rebuild replaces all sixteen voices, so a
+        chord held while a cable is moved would otherwise stop dead instead
+        of changing sound -- which is the single thing the cable-moving
+        gesture exists to demonstrate.
+        """
+        self.bridge.set_settings(self._graph_settings())
+        self.bridge.set_parameters(self._graph_parameters())
+        self.bridge.rebuild(self.patch_layer.graph.nodes(),
+                            self.patch_layer.graph.cables)
+        if self.bridge.active:
+            for voice_id, pitch in list(self._voice_by_key.values()):
+                if voice_id is GRAPH_VOICE and pitch is not None:
+                    self.bridge.note_on(pitch)
 
     def _on_patch_status(self, text, is_refusal):
         colour = theme.CLAY_RED if is_refusal else theme.LINEN_DIM
@@ -857,12 +952,18 @@ class SynthView(QtWidgets.QMainWindow):
             if graph.judge(source, patch_graph.Target("socket", dest)).ok:
                 graph.connect(source, patch_graph.Target("socket", dest))
         self.patch_layer.relayout()
+        # These cables were laid by reaching into the graph rather than by a
+        # drag, so nothing has announced them. Say so, or the engine graph
+        # would be built from three modules and no wiring and a
+        # never-before-seen patch would open silent (#207).
+        self.patch_layer.cablesChanged.emit()
 
     # -- knob wheel handlers --------------------------------------------------
 
     def _on_synth_knob_wheel(self, spec, knob, direction):
         value = synth_params.adjust(self.current_patch, spec, direction, coarse=knob.last_shift)
         knob.set_display(synth_params.format_value(spec, value), _rotation_for(spec, value))
+        self._knob_reached_engine(spec.section, spec.attr, value)
 
     def _on_effect_knob_wheel(self, effect_spec, spec, knob, direction):
         defaults = EFFECT_DEFAULTS.get(effect_spec.type, {})
@@ -870,6 +971,21 @@ class SynthView(QtWidgets.QMainWindow):
         value = synth_params.step_value(spec, current, direction, coarse=knob.last_shift)
         effect_spec.params[spec.attr] = value
         knob.set_display(synth_params.format_value(spec, value), _rotation_for(spec, value))
+        self._knob_reached_engine(effect_spec.type, spec.attr, value)
+
+    def _knob_reached_engine(self, type_key, attr, value):
+        """One knob edit, to all sixteen of that module's voices.
+
+        A *construction* choice -- an oscillator's waveform -- is not a
+        parameter and cannot be sent to a module that already exists; it
+        picks which wavetable set the module reads at construction, so the
+        graph is rebuilt instead. That is a few milliseconds, off the audio
+        thread, and it is the honest cost of a choice that is not a knob.
+        """
+        if attr in patch_bridge.CONSTRUCTION_KEYS.get(type_key, ()):
+            self._rebuild_graph()
+            return
+        self.bridge.set_parameter(type_key, attr, value)
 
     # -- Tidy / patch load / save --------------------------------------------
 
@@ -963,7 +1079,7 @@ class SynthView(QtWidgets.QMainWindow):
         # After the windows, not before: a cable whose module is not open
         # is dropped on restore, so the nodes have to exist first.
         self.patch_layer.restore(snapshot.get("cables"))
-        self._on_patch_status(self.patch_layer.summary(), False)
+        self._on_patch_status(self._patch_summary(), False)
 
     def _apply_patch(self, patch):
         if self.current_patch is not None and self.current_patch is not patch:
@@ -977,7 +1093,7 @@ class SynthView(QtWidgets.QMainWindow):
             for window in list(self.canvas.windows()):
                 window.request_close()
             self._open_default_modules()
-            self._on_patch_status(self.patch_layer.summary(), False)
+            self._on_patch_status(self._patch_summary(), False)
         self._refresh_patchbar()
 
     def _refresh_patchbar(self):
@@ -1040,6 +1156,14 @@ class SynthView(QtWidgets.QMainWindow):
                 NoteOn(pitch, preview.velocity, preview.channel, None),
                 getattr(sound_engine, "sample_rate", config.PLAYBACK_SAMPLE_RATE))
             voice_id = sound_engine.voices.allocate(voice, pitch, preview.channel)
+        elif self.bridge.active:
+            # The patch the user wired, through the graph's own sixteen
+            # voices -- not `SoundEngine.note_on()`, which would spend a
+            # slot of the polyphony budget the pads share (#207). One or
+            # the other, never both: two engines on one key is a chorus
+            # nobody asked for.
+            self.bridge.note_on(pitch, preview.velocity)
+            voice_id = GRAPH_VOICE
         else:
             voice_id = sound_engine.note_on(
                 NoteOn(pitch, preview.velocity, preview.channel, preview.name))
@@ -1066,7 +1190,13 @@ class SynthView(QtWidgets.QMainWindow):
         if entry is None:
             return
         voice_id, pitch = entry
-        if voice_id is not None:
+        if voice_id is GRAPH_VOICE:
+            # Released by pitch: the graph has no voice ids to hand out,
+            # and a pitch is enough because it releases every voice
+            # sounding that note, which is what letting go of a key means.
+            if pitch is not None:
+                self.bridge.note_off(pitch)
+        elif voice_id is not None:
             provider = getattr(self.controller, "sound_engine_provider", None)
             sound_engine = provider() if provider is not None else None
             if sound_engine is not None:
@@ -1088,6 +1218,10 @@ class SynthView(QtWidgets.QMainWindow):
         # panicRequested signal here too -- so releasing every held key
         # before silencing audio covers both without duplicating the fix.
         self.keyboard_band._release_all_held()
+        # The graph's voices are not the sound engine's, so the controller's
+        # panic cannot reach them (#207). Silenced here, before the
+        # controller's, so Panic means silence everywhere or nowhere.
+        self.bridge.all_notes_off()
         self.controller.panic()
 
     # -- status bar ----------------------------------------------------------
@@ -1103,4 +1237,15 @@ class SynthView(QtWidgets.QMainWindow):
         # cables with it), and only the transient "patched · …" messages
         # are worth a signal of their own.
         if not self.patch_layer.message_pending():
-            self._on_patch_status(self.patch_layer.summary(), False)
+            self._on_patch_status(self._patch_summary(), False)
+
+    def _patch_summary(self):
+        """The cable summary, plus whatever the engine wants the user to
+        know about this patch (#207): a module that is only passing sound
+        through, a knob that turns nothing yet, or the reason the patch is
+        not making any sound at all. Appended rather than shown instead,
+        because "3 cables · feedback loop" is still true while it is also
+        true that Chorus does nothing."""
+        summary = self.patch_layer.summary()
+        extra = self.bridge.status()
+        return f"{summary} · {extra}" if extra else summary

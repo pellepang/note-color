@@ -596,6 +596,10 @@ def test_the_block_listener_error_counter_starts_at_zero_and_counts(monkeypatch)
     from notecolor.audio.sound_engine import SoundEngine
 
     engine = SoundEngine.__new__(SoundEngine)
+    # Hand-assembled rather than constructed, so every attribute the
+    # callback reads has to be listed here. `graph` joined that list in
+    # #207; None is what a `SoundEngine` with no patch graph holds.
+    engine.graph = None
     engine.callback_status_count = 0
     engine._frame_clock = 0
     engine._block_listener = None

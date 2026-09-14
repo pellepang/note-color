@@ -144,6 +144,17 @@ def require_scipy():
     return True
 
 
+def signal_module():
+    """`scipy.signal` itself, for a caller that needs to *bind* one of its
+    functions once rather than call it once -- the graph engine's filter
+    and noise modules (#205) cache `lfilter` in `activate()` so their
+    `process()` does not walk a module attribute on the audio thread.
+    Raises `SynthUnavailable` exactly as `require_scipy()` does, so a
+    caller that binds is refused at the same moment a caller that calls
+    would be."""
+    return _signal()
+
+
 # --------------------------------------------------------------------------
 # Mip-mapped wavetables (#103 recommendation 2)
 # --------------------------------------------------------------------------
@@ -414,12 +425,42 @@ class DahdsrEnvelope:
         self.release_samples = max(1, int(round(spec.release * sample_rate)))
         self.sustain = min(max(float(spec.sustain), 0.0), 1.0)
 
+        #: Scratch handed in by `preallocate()`. `None` means "allocate the
+        #: ramp when you need it", which is what every caller but the graph
+        #: engine wants.
+        self._ramp = None
+        self.restart()
+
+    # -- state ------------------------------------------------------------
+
+    def restart(self):
+        """Back to the starting state, reusing the object.
+
+        Same thing `__init__` leaves behind, factored out because the graph
+        engine's voice slots are made once and replayed forever (#205): a
+        `reset()` that rebuilt the envelope would allocate on note-on,
+        which is the one place `poly.PolyGraph` refuses to allocate. Stage
+        timings are deliberately *not* recomputed here -- they are whatever
+        the knobs currently say, and the graph module pushes them in every
+        block."""
         self.level = 0.0
         self.stage = DELAY if self.delay_samples > 0 else ATTACK
         self._counter = self.delay_samples
         self._release_rate = 0.0
 
-    # -- state ------------------------------------------------------------
+    def preallocate(self, max_block):
+        """Give the envelope a ramp buffer of its own, up to `max_block`
+        samples.
+
+        Without one, a ramping stage builds `np.arange(1, take + 1)` per
+        segment per block -- fine for `SynthVoice`, which allocates its
+        whole mix buffer a block at a time anyway, and forbidden by the
+        graph module contract (#202 rule 2), which is the only caller that
+        needs this. The arithmetic is unchanged, term for term and in the
+        same order, so an envelope with a ramp and one without produce bit-
+        identical output; that is what lets #205's parity test compare the
+        two engines sample by sample."""
+        self._ramp = np.arange(1, max_block + 1, dtype=np.float64)
 
     @property
     def finished(self):
@@ -445,8 +486,12 @@ class DahdsrEnvelope:
 
     def block(self, frames):
         """The next `frames` envelope samples, audio rate."""
-        out = np.empty(frames, dtype=np.float64)
-        self._walk(frames, out)
+        return self.block_into(np.empty(frames, dtype=np.float64))
+
+    def block_into(self, out):
+        """The next `len(out)` envelope samples, written into a buffer the
+        caller already owns. `block()` is this plus the allocation."""
+        self._walk(out.shape[0], out)
         return out
 
     def advance(self, frames):
@@ -491,7 +536,14 @@ class DahdsrEnvelope:
                 continue
             step = rate if target > self.level else -rate
             if out is not None:
-                out[filled:filled + take] = self.level + step * np.arange(1, take + 1)
+                segment = out[filled:filled + take]
+                if self._ramp is not None and take <= self._ramp.shape[0]:
+                    # `level + step * ramp`, same two operations in the same
+                    # order as the branch below, so the two are bit-identical.
+                    np.multiply(self._ramp[:take], step, out=segment)
+                    np.add(segment, self.level, out=segment)
+                else:
+                    segment[:] = self.level + step * np.arange(1, take + 1)
             self.level += step * take
             filled += take
             if take >= needed:

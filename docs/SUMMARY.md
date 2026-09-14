@@ -1110,3 +1110,230 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - Corrections: `htdemucs` is **1.28–1.41×** here against #126's 2.02–2.14× on the
   same machine, and transkun's cost is **content-dependent**, so #126's
   "timing is content-independent" covers the separator only.
+
+### 59 — the graph module contract, and plugin hosting moved into the design (ticket #202)
+- **Plugin hosting is a goal now, not a later phase.** The owner asked for a node
+  system that takes VST plugins *and* our own modules, so decision 56 §10's
+  "informational" status is superseded: the contract is shaped like a plugin ABI
+  (ports declared per instance, parameters by stable id with a 0..1 form,
+  `activate`/`process`/`deactivate`), and a hosted plugin is a `Module` with no
+  privileges anywhere above it. Which format is still open — see below.
+- **Five rules**: block-at-a-time; no allocation in the callback; ports declared
+  by the instance, not the class; typed ports (`audio` / `mod` / `event` — the
+  third added for hosted instruments, which are fed notes); parameters out of
+  band through a preallocated float64 array.
+- **`block_delay` is a guarantee, `latency_frames()` is a measurement.** The
+  first is what #203's cycle rule turns on; `Delay` enforces its own by flooring
+  the delay to one block rather than trusting the knob, so a cycle can be
+  *ordered* rather than solved.
+- **Sample-accurate automation is deliberately absent.** `ParamBlock` is
+  block-rate; the event queue CLAP delivers is #208's problem and extends it
+  rather than replacing it.
+- **The no-allocation rule is measured.** A snapshot diff cannot see a NumPy
+  temporary (it is freed at the end of the expression), so the test compares
+  *peak* traced memory at 64 frames against 2048 and carries a deliberately
+  sloppy module so the check is known to be able to fail. It immediately found
+  `np.take(..., out=)` allocating 18kB a block for its bounds check —
+  `ndarray.take(..., mode="wrap")` does not, and the wrap replaced a modulo too.
+- Shipped against it: `WavetableOscillator` (per-note) and `Delay` (once-only),
+  reusing `synth_engine.py`'s tables rather than forking them.
+
+### 60 — graph execution order, the cycle rule and the staged swap (ticket #203)
+- **Two objects, two threads.** `ModuleGraph` is the editable patch (may allocate,
+  may raise, never in a callback); `CompiledGraph` is a flat tuple of steps with
+  every buffer bound, immutable. An edit builds a replacement off the audio thread
+  and the host rebinds **one attribute** — no lock, no queue, no torn state,
+  because nothing is mutated in place. No incremental path, deliberately.
+- **A cable leaving a module with `block_delay >= 1` does not constrain the
+  order** — its output was computed a block ago. Cutting those edges turns a legal
+  feedback loop into an ordinary DAG: the cycle is *ordered*, not solved.
+- **That collapses the cycle rule into the same fact.** "Does this cable close a
+  cycle among the constraining edges?" is decision 56 §4 exactly — a loop with a
+  delay has already vanished from that graph. One search, not two. The refusal
+  names every module in the loop.
+- **Kahn's algorithm, ties broken by insertion order**, so two identical compiles
+  give identical orders; a graph that reorders itself makes ordering bugs
+  unreproducible. `compile()` still raises `CycleError` on an illegal cycle forced
+  past `judge()`.
+- **Several cables on one input are summed**; one cable binds straight through to
+  the producer's buffer (no module writes to its inputs, so a copy is pure cost);
+  an unconnected input reads a shared zero buffer, so no branch enters the
+  callback. **This contradicts #204's "Mix is the only place summing happens"** and
+  is flagged there — decision 56 §3's rule is about the *poly boundary*, and osc1 +
+  osc2 into one filter inside one voice is a different operation Mix cannot do.
+- **`Verdict(ok, code, reason)`**: a code to style and branch on *and* a sentence
+  for the person holding the cable. Neither substitutes for the other.
+- **Stability is the patch's business.** A unity-gain loop through a delay runs
+  away and nothing refuses it — that is what a real modular does.
+
+### 61 — the Mix node, the poly boundary, and where summing is allowed (ticket #204)
+- **Where summing is allowed (the owner's call).** #204 said Mix is "the only
+  place summing happens"; that does not cover Osc 1 + Osc 2 into one Filter
+  *inside a voice*, which Mix cannot do because Mix **is** the boundary. Offered
+  three ways, the owner chose: **inputs sum, and the canvas marks any jack
+  carrying more than one cable.** `ModuleGraph.summed_inputs()` publishes where,
+  so the canvas never has to infer it. Decision 56 §3 is intact — its objection
+  was to a *voice count* collapsing unseen, not to addition.
+- **The cables decide which side a module is on**, not the module: reaches Mix →
+  per-note, reachable from Mix → once-only, unpatched → whatever it declares.
+  Most modules declare `POLY_EITHER`, so the patch decides.
+- **The refusal therefore has two halves.** `graph.judge()` catches the *declared*
+  crossing; `PolyGraph.judge()` adds the ones that exist only because of the
+  patch, and `activate()` refuses to build a patch already containing one rather
+  than silently dropping the cable.
+- **`is_boundary` is a flag, not a fourth poly mode.** Mix's inputs are per-note
+  and its output is once-only; one `poly` field cannot answer a question that is
+  really about which end of the cable you are standing at.
+- **Voice tear-down is a module's decision.** `note_off()` clears the gate; a
+  voice is reclaimed when a module sets `note.finished` (#205's amp envelope).
+  Until one exists a released note **drones** — what a modular with no envelope
+  does, and deliberately not papered over: a voice manager that decides when a
+  note stopped is how a synth clicks on release.
+- **16 copies of the per-note subgraph built in `activate()`** via
+  `new_instance()`, off the audio thread; slots are reset and reused, never freed.
+  Stealing: oldest released, else oldest (decision 38's policy, separate code).
+- **Note-off touches nothing right of Mix**, which is what keeps a delay's tail
+  ringing after the key is up — the practical argument for drawing the boundary.
+
+### 62 — the per-note voice modules: filter, amp envelope and noise (ticket #205)
+- **Ported, not rewritten.** The SVF coefficients, the `lfilter` recurrence, the
+  DAHDSR walk and the pink `B`/`A` pair are `synth_engine.py`'s, imported
+  (decision 56 §7). Three arithmetic-identical additions were made *to*
+  `DahdsrEnvelope` — `restart()`, `block_into()`, `preallocate()` — so a voice slot
+  can be replayed without allocating and a ramping stage does not build an `arange`.
+- **The amp envelope is what ends a note**, which is the answer decision 61 §4 left
+  to a module: it reads `ctx.note.gate`, releases from wherever it is, and sets
+  `ctx.note.finished` for `PolyGraph` to reclaim the slot. No envelope in the patch,
+  no end to the note — tested both ways. The gate is read once per block; sample-
+  accurate note timing is an event-list change to the contract, not a module fix.
+- **Audio in / audio out, not a mod output plus a VCA.** Decision 56 §5's modulation
+  cables are for knobs; a gain applied to sound is sound.
+- **Filter type and noise colour are stepped parameters, not construction choices**
+  (unlike the oscillator's waveform, which builds a table set): all three filter
+  types share one denominator, and both noise colours are one generator with or
+  without a 3-pole filter. Noise therefore needs SciPy to activate even when white —
+  named as a cost, not hidden. Each noise instance owns its generator and
+  `new_instance()` drops the seed: sixteen voices from one seed is a correlated 16x
+  boost, not noise.
+- **Contract rule 2 is broken in exactly two places, by SciPy.** `lfilter` has no
+  `out=` and no pure-NumPy substitute exists (decision 42), so the filter and pink
+  noise each allocate one block-sized array per block (4kB at 512 frames). The test
+  gives them a budget of exactly one block, zero to everything else, **and asserts
+  the budget is used**, so a future `out=` fails the test rather than being carried
+  as a licence forever.
+- **Parity with the fixed engine: the first block is bit-identical**, whole note
+  including release; later blocks drift to ~8e-12 (−220 dB) from float64
+  association in the two phase accumulators. **What it cannot say** is stated in the
+  test: the patch switches off the LFO, the filter envelope, glide, osc 2 and noise
+  because the graph has no module for any of them — so **nothing varies at control
+  rate**, and `SynthVoice`'s 64-sample grid collapses to one `lfilter` call. A
+  second test asserts the two engines *disagree* once `filter.env_amount` is up.
+  That control-rate gap is the real remaining difference, and it belongs to #208.
+### 63 — feedback loops through an explicit delay, and who owns stability (ticket #206, + the Delay half of #205)
+- **Stability is the user's problem, and nothing clamps.** A loop at gain >= 1 runs
+  away, no cable is refused and no signal is turned down — every surveyed system's
+  position, and the engine could not know the loop gain anyway (it is the product
+  of knobs around the loop plus a filter's response). Pinned by a test named so
+  that adding a limiter fails it.
+- **The master `np.tanh` is not a limiter for this.** It bounds what reaches the
+  *device*; it does not protect the patch (by then the signal is a square wave), it
+  is not in the graph's path until #207, and `tanh(nan)` is `nan`.
+- **What warns instead: `Delay.nonfinite_blocks`, a count and never a correction.**
+  A NaN never leaves a ring buffer on its own, so turning the feedback down does
+  not recover — only `reset()` does, and without a number a NaN'd patch looks
+  exactly like a quiet one. A static "this loop is unstable" warning was rejected
+  as a guess. Nothing consumes the counter yet (#207).
+- **The Delay is `POLY_EITHER`** (#205): once-only for an echo whose tail outlives
+  the key, per-note for a delay inside a voice. `max_seconds` became a construction
+  choice because sixteen two-second float64 rings is 11 MB, and `new_instance()` is
+  overridden to carry it.
+- **Ported from `effects.py`: damping** (one-zero in the feedback path, off by
+  default) and its **block-partition-transparency test**. **Deliberately not
+  ported: sub-delay chunking** — a delay shorter than one block makes
+  `block_delay = 1` false and every loop ordered around it wrong. If short per-note
+  delays are wanted they are a second module reporting `block_delay = 0`, not a
+  knob.
+- **The minimum is the module's**, floored to `max_block` in `delay.py`; nothing in
+  `graph.py` duplicates the number, which is what lets it shrink later without a
+  graph change. Tested from both ends — the knob at minimum still comes back a
+  whole block later, and a 64-frame host gets a 1.45 ms minimum for free.
+- **A loop through the Mix node is now refused** (`PolyGraph.straddlers()`): a node
+  both upstream and downstream of the boundary would have to be sixteen copies and
+  one copy at once. Previously accepted, then silently half-dropped at build — the
+  patch ran, sounded like nothing, and said nothing.
+- **A loop's period is the delay plus one block** — one block is the delay's
+  guarantee, the second is the ordering's, since the cut cable is read after the
+  block that wrote it. So a one-block delay in a loop repeats every two blocks.
+
+### 64 — a master filter, and a short delay: the owner's two drawer calls (#205, #206)
+- **The filter runs on both sides of Mix.** Asked as "every note gets its own
+  filter — do you also want one on the whole sound at the end?", answered *both*.
+  `POLY_EITHER`; the `zi` worry dissolves (a master filter's voice *is* the mix)
+  and key tracking becomes a **no-op rather than an error** right of Mix, since a
+  filter over sixteen notes has no single note to track.
+- **A second, short delay module** (`ShortDelay`, `block_delay = 0`) for the
+  delays that *make* a sound rather than repeat one — chorus 15–30 ms, flanger
+  1–10 ms, comb below a millisecond, all under `Delay`'s 11.61 ms block floor.
+- **It has to be a second module, not a knob**: a delay shorter than a block makes
+  `block_delay = 1` false and every loop the graph ordered around it wrong. So it
+  **cannot close a feedback loop**, and the graph refuses that cable naming the
+  Delay it wants instead. Cost accepted knowingly: two drawer parts that look
+  alike. Mitigation is naming plus that refusal sentence, which arrives exactly
+  when the difference matters.
+- Ports `effects.py`'s chunking (chunks no longer than the delay, so a chunk's
+  reads only touch samples an earlier chunk wrote) but with contiguous slice
+  copies instead of index arrays — the allocation test runs at two block sizes
+  because an allocation per *chunk* would be louder than one per block.
+- Bipolar feedback (a negative comb cancels the fundamental — half of a flanger)
+  and mix defaulting to half (the interference is the effect, not the wet signal).
+  No damping: at 5 ms the tail is gone before dulling could be heard.
+
+### 65 — the first merge: the canvas's patch becomes the sound (#207)
+- **The graph arrives beside the old engine, never instead of it** (decision 56 §7).
+  `SoundEngine.set_graph()` copies `set_effects()`'s idiom exactly — activate off
+  the audio thread, install by a single attribute store — and the graph's block is
+  added into the same mix before the effects bus and the soft-clip. So the clip
+  sits *outside* every loop and can never stabilise one, exactly as decision 63 §7
+  predicted.
+- **Two voice pools on purpose.** A graph note goes to `PolyGraph.note_on()` and
+  spends none of `VoiceManager`'s budget; the pads and the old synth keep theirs.
+  Different lifetimes, different stealing, different owners. The one thing that
+  had to reach both is panic.
+- **Where the sound comes out: anything you do not patch onward.** No Out node —
+  every once-only node Mix can reach that feeds nothing further is an output, all
+  summed, and Mix itself when nothing follows it. Chosen on failure modes: it
+  cannot be silently got wrong, where a missing cable to an explicit Out is a
+  finished-looking patch that makes no sound. **An explicit Out node is the
+  alternative and is the owner's call on #211.**
+- **A feedback loop forced the rule's real form**: in `MIX → Delay → Bypass →
+  Delay` every node feeds something, so "no outgoing cable" finds nothing and the
+  patch goes silent. The test is "feeds nothing *new*" — a node is an output when
+  everything it feeds can reach it back. Identical to the short rule on any patch
+  without a loop.
+- **A canvas node with no engine module becomes a wire, and the status bar says
+  so** (`modules/passthrough.Passthrough`). Leaving it out would make the cables
+  lie; refusing to build would silence the canvas over one missing effect.
+  `lfo`/`filter_env`/`voice` are absent instead, correctly: none can be an end of
+  a sound cable, so nothing leaves the signal path. Both are named to the user.
+- **`patch_graph.PatchGraph.judge()` is now a delegation**, as its docstring
+  promised. The canvas gains the loop-through-Mix refusal it never had. Three
+  things stay behind: modulation (no engine layer until #208), two sentences about
+  the canvas's own furniture, and the duplicate sentence, because the engine's
+  names a port and this canvas draws unlabelled holes.
+- **`ModuleGraph.add()` takes a host `poly` and `title`** — the two facts a host
+  knows better than a module. Without the first, the canvas and the engine
+  disagree about an unpatched Filter and the default chain's first cable is
+  refused on an empty canvas.
+- **A rebuild replaces all sixteen voices, so held keys are re-triggered after
+  one** — otherwise a held chord stops dead during the exact gesture that exists
+  to show that moving a cable changes the sound.
+- **Measured in a real `sounddevice` callback** (`scripts/graph_callback_cost.py`):
+  **48.2% of the block budget at 16 voices**, 0 xruns, against decision 55's ~70%
+  revisit trigger and the old fixed engine's 30.7%. The seam stays shut. p99
+  exceeds the deadline with no xruns reported, which is prototype #100's ring
+  buffer hiding overruns; the mean is what the trigger asks about.
+- Two things found and left: `StateVariableFilter` allocates a block per call via
+  `scipy.signal.lfilter` (predates this, now on the callback path), and **any graph
+  loop around the Delay has gain ≥ 1 once its Fdbk knob is above zero**, because a
+  mix-controlled delay is unity-gain and the canvas has no attenuator on the
+  once-only side. A simple Level module is the owner's call.

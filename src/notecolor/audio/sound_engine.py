@@ -398,6 +398,12 @@ class SoundEngine:
         self.voices = VoiceManager(polyphony=self._polyphony)
         self.effects = EffectsChain()
         self.set_effects(effects)
+        #: The patch graph (`audio/graph/poly.PolyGraph`) mixed in beside
+        #: the voices, or None for "no graph". See `set_graph()`.
+        self.graph = None
+        #: Where a graph block is cast from float64 to the mix's float32,
+        #: preallocated so the cast costs no allocation in the callback.
+        self._graph_scratch = np.zeros(self.block_size, dtype=np.float32)
         self._stream = None
         self._frame_clock = 0
         self._block_listener = None
@@ -445,6 +451,8 @@ class SoundEngine:
             self._stream = None
         self.voices.clear()
         self.effects.reset()
+        if self.graph is not None:
+            self.graph.all_notes_off()
         with self._pending_lock:
             self._pending_offs = {}
 
@@ -481,6 +489,43 @@ class SoundEngine:
         self.effects = chain
         return chain
 
+    # -- the patch graph (ticket #207, decision 56 §7) ---------------------
+
+    def set_graph(self, graph, activate=True):
+        """Installs a `graph.poly.PolyGraph` whose output is added into the
+        same mix the voices render into, before the effects bus and the
+        soft-clip. `None` uninstalls it.
+
+        **Additive, never replacing** (decision 56 §7). `VoiceManager` keeps
+        its own voices, its own polyphony budget and its own note
+        vocabulary; nothing about score-editor audition, frozen-buffer
+        playback or QWERTY note entry changes because a graph is present.
+        The graph owns its own sixteen voices and does its own mixing, so a
+        graph note never consumes a `VoiceManager` slot and the two never
+        argue about the budget. What they share is the output stream, the
+        effects bus and the clip -- which is the point: one device, one
+        master path.
+
+        The install follows `set_effects()`'s idiom exactly, and for the
+        same reason: `activate()` -- which allocates sixteen copies of the
+        per-note subgraph and compiles the lot -- happens here, on the
+        caller's thread, and the result is handed to the audio thread by a
+        **single attribute store**. The callback reads `self.graph` once per
+        block, so it sees the whole old graph or the whole new one and never
+        a half-built anything. There is no lock and nothing to tear.
+
+        `activate=False` is for a caller that has already activated the
+        graph against this engine's sample rate and block size (the Synth
+        View's bridge does, because it wants an activation failure reported
+        in its own status bar rather than raised out of here).
+        """
+        if graph is not None and activate:
+            from notecolor.audio.graph.contract import Activation
+
+            graph.activate(Activation(self.sample_rate, self.block_size))
+        self.graph = graph
+        return graph
+
     # -- the note vocabulary ----------------------------------------------
 
     def note_on(self, event, velocity=1.0, channel=0, patch=None):
@@ -503,8 +548,13 @@ class SoundEngine:
         return self.voices.release_voice(voice_id)
 
     def all_notes_off(self):
+        """Panic. Covers the graph's own voices too, which `VoiceManager`
+        knows nothing about -- a panic that silenced only half of what is
+        sounding would be the worst possible bug in a panic button."""
         with self._pending_lock:
             self._pending_offs = {}
+        if self.graph is not None:
+            self.graph.all_notes_off()
         return self.voices.all_notes_off()
 
     def schedule_note_off(self, voice_id, delay_seconds):
@@ -563,6 +613,17 @@ class SoundEngine:
         self._resolve_due_offs(self._frame_clock)
         mix = np.zeros(frames, dtype=np.float32)
         self.voices.render_block(mix, frames)
+        # Read once, into a local: a swap from `set_graph()` lands between
+        # blocks, never inside one (#207).
+        graph = self.graph
+        if graph is not None:
+            block = graph.output_block(frames)
+            # float64 -> the mix's float32, through a buffer that already
+            # exists. `np.add` straight from the float64 array would make
+            # NumPy build a casting buffer inside the callback.
+            scratch = self._graph_scratch[:frames]
+            np.copyto(scratch, block[:frames], casting="same_kind")
+            np.add(mix, scratch, out=mix)
         mix = self.effects.process(mix)   # the shared bus (#114), before the clip
         outdata[:, 0] = np.tanh(mix)
 

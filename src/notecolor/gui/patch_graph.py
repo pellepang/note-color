@@ -28,6 +28,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, replace
 
+# The one thing this file takes from the engine: the refusal code whose
+# sentence the canvas phrases better than the engine does (see
+# `PatchGraph._engine_verdict`). Not Qt, not numpy on import, and not a
+# rule -- the rules arrive through `engine_judge`, at runtime.
+from notecolor.audio.graph.graph import REFUSE_DUPLICATE
+
 #: The two sides of the Mix boundary, plus the boundary itself.
 SIDE_POLY = "poly"        # instantiated once per held note
 SIDE_MONO = "mono"        # instantiated once
@@ -171,6 +177,12 @@ class PatchGraph:
         self._nodes: dict[str, NodeSpec] = {}
         self.cables: list[Cable] = []
         self._uid = 0
+        #: `engine_judge(source_id, dest_id) -> audio.graph.Verdict | None`,
+        #: set by `gui/patch_bridge.PatchBridge` once the real engine graph
+        #: exists (#207). `None` -- no engine, or no engine node for one of
+        #: these two -- means "answer it yourself", which is what keeps this
+        #: class usable on its own and what every test below relies on.
+        self.engine_judge = None
 
     # -- nodes ---------------------------------------------------------
 
@@ -314,10 +326,35 @@ class PatchGraph:
         return SIDE_POLY if spec.is_mix else spec.side
 
     def judge(self, source_id, target: Target) -> Verdict:
-        """The accept/refuse-with-reason contract (#203), against decision
-        56 §3/§4/§5. Every refusal says what is wrong *and* what to do
-        instead; a bare "invalid connection" would be a bug in this
-        method, not a terse style."""
+        """The accept/refuse-with-reason contract, against decision 56
+        §3/§4/§5. Every refusal says what is wrong *and* what to do instead;
+        a bare "invalid connection" would be a bug in this method, not a
+        terse style.
+
+        **This is now a delegation** (#207). Where the real engine can
+        answer -- a sound cable between two nodes it has modules for -- the
+        verdict comes from `audio/graph/poly.PolyGraph.judge()`, so the
+        rules the canvas argues about and the rules the sound obeys are one
+        set of rules. Three things stay here, each for a stated reason:
+
+        - **Modulation cables.** A knob is not an engine port until #208.
+          The engine has no rule to delegate to; these are still judged by
+          the copy below, and that copy is the only one there is.
+        - **Two checks the engine cannot phrase as well.** "That module is
+          no longer on the canvas" and "X has nothing to take sound in" are
+          about the canvas's own furniture; the engine's equivalents talk
+          about ports, which this canvas does not draw and the user has
+          never seen a name for.
+        - **The duplicate-cable sentence.** The engine's names a port ("…
+          into In on FILTER"); this one does not, because on this canvas
+          there is nothing else it could be.
+
+        Everything else -- self-feed, the poly boundary, the loop rule and
+        its naming of the whole cycle, and the boundary-straddling loop the
+        stand-in below never knew about -- comes from the engine, and the
+        engine's sentences were checked against these before the switch.
+        With no engine attached the copy below answers everything, unchanged.
+        """
         source = self._nodes.get(source_id)
         if source is None:
             return Verdict(False, "That module is no longer on the canvas.")
@@ -348,6 +385,11 @@ class PatchGraph:
                 f"knob you want it to turn."))
         if not dest.can_in:
             return Verdict(False, f"{dest.title} has nothing to take sound in.")
+
+        engine = self._engine_verdict(source_id, target.node_id, dest, source)
+        if engine is not None:
+            return engine
+
         if target.node_id == source_id:
             return Verdict(False, (
                 f"{source.title} cannot feed itself. A loop needs a Delay "
@@ -369,6 +411,32 @@ class PatchGraph:
                 f"loop needs a Delay module, so the sound comes back one block "
                 f"later instead of instantly."))
         return Verdict(True)
+
+    def _engine_verdict(self, source_id, dest_id, dest, source):
+        """The engine's answer to one sound cable, translated, or `None`
+        when there is no engine to ask.
+
+        The translation is two lines long and both are deliberate:
+
+        - the engine's `Verdict` has a `code` and this one does not, so the
+          code is used here and dropped -- the canvas styles a refusal by
+          the fact of it, not by its kind;
+        - a duplicate keeps this file's sentence rather than the engine's,
+          which names a port ("… into In on FILTER"). The canvas draws
+          unlabelled holes, so a port name in a refusal names something the
+          user cannot see. Every other sentence is the engine's, and each
+          reads at least as well as the one it replaced.
+        """
+        if self.engine_judge is None:
+            return None
+        verdict = self.engine_judge(source_id, dest_id)
+        if verdict is None:
+            return None
+        if verdict.ok:
+            return Verdict(True)
+        if verdict.code == REFUSE_DUPLICATE:
+            return Verdict(False, f"{source.title} is already patched into {dest.title}.")
+        return Verdict(False, verdict.reason)
 
     def _is_delay(self, node_id):
         spec = self._nodes.get(node_id)

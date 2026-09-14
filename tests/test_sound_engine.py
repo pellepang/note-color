@@ -427,3 +427,90 @@ def test_effects_state_survives_all_notes_off_but_not_stop():
     engine.stop()                                   # teardown drops the tail with the voices
     engine._callback(outdata, 100, None, None)
     assert np.all(outdata[:, 0] == 0.0)
+
+
+# --------------------------------------------------------------------------
+# The patch graph beside the voices (ticket #207, decision 65)
+# --------------------------------------------------------------------------
+
+class FakeGraph:
+    """A `PolyGraph` as far as `SoundEngine` is concerned: something that
+    hands back one block of float64 and can be told every note is over.
+    A real one is exercised in `tests/test_patch_bridge.py`; what is being
+    tested here is the *seam*, and a real graph would hide it behind DSP."""
+
+    def __init__(self, level=0.25):
+        self.level = level
+        self.blocks = 0
+        self.silenced = 0
+        self.buffer = np.zeros(4096, dtype=np.float64)
+
+    def output_block(self, frames):
+        self.blocks += 1
+        self.buffer[:frames] = self.level
+        return self.buffer
+
+    def all_notes_off(self):
+        self.silenced += 1
+
+
+def test_a_patch_graph_is_added_into_the_same_mix_the_voices_render_into():
+    """Additive, never replacing (decision 56 §7). The old engine's voices
+    keep sounding; the graph arrives beside them, before the clip."""
+    engine = make_engine()
+    engine.note_on(60)                              # one FakeVoice, rendering 1.0
+    engine.set_graph(FakeGraph(level=0.5), activate=False)
+    outdata = np.zeros((100, 1), dtype=np.float32)
+    engine._callback(outdata, 100, None, None)
+    assert np.allclose(outdata[:, 0], np.tanh(1.5), atol=1e-6)
+
+
+def test_a_patch_graph_alone_is_heard_with_no_voices_allocated():
+    engine = make_engine()
+    engine.set_graph(FakeGraph(level=0.25), activate=False)
+    outdata = np.zeros((100, 1), dtype=np.float32)
+    engine._callback(outdata, 100, None, None)
+    assert np.allclose(outdata[:, 0], np.tanh(0.25), atol=1e-6)
+
+
+def test_uninstalling_the_graph_leaves_the_old_engine_exactly_as_it_was():
+    """The claim decision 56 §7 rests on: nothing about score-editor
+    audition, frozen-buffer playback or QWERTY entry changes because a
+    graph came and went."""
+    engine = make_engine()
+    engine.note_on(60)
+    outdata = np.zeros((100, 1), dtype=np.float32)
+    engine._callback(outdata, 100, None, None)
+    before = outdata[:, 0].copy()
+    engine.set_graph(FakeGraph(level=0.5), activate=False)
+    engine._callback(outdata, 100, None, None)
+    engine.set_graph(None)
+    engine._callback(outdata, 100, None, None)
+    assert np.allclose(outdata[:, 0], before)
+
+
+def test_a_graph_note_spends_none_of_the_polyphony_budget():
+    """The graph owns its own sixteen voices; a note played through it must
+    not take a slot the pads and the old synth are sharing."""
+    engine = make_engine()
+    engine.set_graph(FakeGraph(), activate=False)
+    outdata = np.zeros((100, 1), dtype=np.float32)
+    engine._callback(outdata, 100, None, None)
+    assert engine.voices.active_count() == 0
+
+
+def test_panic_silences_the_graph_as_well_as_the_voices():
+    engine = make_engine()
+    graph = FakeGraph()
+    engine.set_graph(graph, activate=False)
+    engine.note_on(60)
+    engine.all_notes_off()
+    assert graph.silenced == 1
+
+
+def test_stopping_the_engine_silences_the_graph_too():
+    engine = make_engine()
+    graph = FakeGraph()
+    engine.set_graph(graph, activate=False)
+    engine.stop()
+    assert graph.silenced == 1
