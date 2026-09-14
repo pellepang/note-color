@@ -1229,3 +1229,38 @@ One-liners; full detail in `docs/DECISIONS.md`.
   rate**, and `SynthVoice`'s 64-sample grid collapses to one `lfilter` call. A
   second test asserts the two engines *disagree* once `filter.env_amount` is up.
   That control-rate gap is the real remaining difference, and it belongs to #208.
+### 63 — feedback loops through an explicit delay, and who owns stability (ticket #206, + the Delay half of #205)
+- **Stability is the user's problem, and nothing clamps.** A loop at gain >= 1 runs
+  away, no cable is refused and no signal is turned down — every surveyed system's
+  position, and the engine could not know the loop gain anyway (it is the product
+  of knobs around the loop plus a filter's response). Pinned by a test named so
+  that adding a limiter fails it.
+- **The master `np.tanh` is not a limiter for this.** It bounds what reaches the
+  *device*; it does not protect the patch (by then the signal is a square wave), it
+  is not in the graph's path until #207, and `tanh(nan)` is `nan`.
+- **What warns instead: `Delay.nonfinite_blocks`, a count and never a correction.**
+  A NaN never leaves a ring buffer on its own, so turning the feedback down does
+  not recover — only `reset()` does, and without a number a NaN'd patch looks
+  exactly like a quiet one. A static "this loop is unstable" warning was rejected
+  as a guess. Nothing consumes the counter yet (#207).
+- **The Delay is `POLY_EITHER`** (#205): once-only for an echo whose tail outlives
+  the key, per-note for a delay inside a voice. `max_seconds` became a construction
+  choice because sixteen two-second float64 rings is 11 MB, and `new_instance()` is
+  overridden to carry it.
+- **Ported from `effects.py`: damping** (one-zero in the feedback path, off by
+  default) and its **block-partition-transparency test**. **Deliberately not
+  ported: sub-delay chunking** — a delay shorter than one block makes
+  `block_delay = 1` false and every loop ordered around it wrong. If short per-note
+  delays are wanted they are a second module reporting `block_delay = 0`, not a
+  knob.
+- **The minimum is the module's**, floored to `max_block` in `delay.py`; nothing in
+  `graph.py` duplicates the number, which is what lets it shrink later without a
+  graph change. Tested from both ends — the knob at minimum still comes back a
+  whole block later, and a 64-frame host gets a 1.45 ms minimum for free.
+- **A loop through the Mix node is now refused** (`PolyGraph.straddlers()`): a node
+  both upstream and downstream of the boundary would have to be sixteen copies and
+  one copy at once. Previously accepted, then silently half-dropped at build — the
+  patch ran, sounded like nothing, and said nothing.
+- **A loop's period is the delay plus one block** — one block is the delay's
+  guarantee, the second is the ordering's, since the cut cable is read after the
+  block that wrote it. So a one-block delay in a loop repeats every two blocks.

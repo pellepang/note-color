@@ -22,6 +22,10 @@ A module cabled to neither side falls back to its own declaration, and to
 the once-only side when it has no opinion: an unpatched module has no voice
 to belong to.
 
+A module cabled to *both* -- which only a feedback loop drawn through Mix
+can do -- has no side at all, and `straddlers()` refuses it rather than
+picking one. See that method; it is #206's one addition to this file.
+
 ## What is instantiated how many times
 
 `PolyGraph.activate()` builds `voices` complete copies of the per-note
@@ -66,7 +70,9 @@ from notecolor.audio.graph import contract
 from notecolor.audio.graph.contract import (
     Activation, Module, ModuleDescriptor, NoteContext, audio_in, audio_out,
 )
-from notecolor.audio.graph.graph import REFUSE_POLY, ModuleGraph, Verdict
+from notecolor.audio.graph.graph import (
+    REFUSE_POLY, Connection, ModuleGraph, Verdict,
+)
 
 #: How the two sides are named everywhere below, and in `gui/patch_graph.py`.
 SIDE_POLY = "poly"
@@ -170,11 +176,20 @@ class PolyGraph:
                 f"a patch needs exactly one Mix node; this one has {len(found)}")
         return found[0]
 
-    def sides(self):
+    def _cables(self, extra=None):
+        """The patch's cables, optionally plus one being considered. Lets
+        every reachability question below be asked about a cable that is not
+        plugged in yet, which is what `judge()` needs."""
+        if extra is None:
+            return self.graph.connections
+        return list(self.graph.connections) + [extra]
+
+    def sides(self, extra=None):
         """`{node_id: SIDE_POLY | SIDE_MONO}` for every node but the Mix
         node, decided by the cables (see the module docstring)."""
-        upstream = self._reaches(self.boundary_id, forward=False)
-        downstream = self._reaches(self.boundary_id, forward=True)
+        cables = self._cables(extra)
+        upstream = self._reaches(self.boundary_id, forward=False, cables=cables)
+        downstream = self._reaches(self.boundary_id, forward=True, cables=cables)
         sides = {}
         for node in self.graph.nodes():
             node_id = node.node_id
@@ -193,14 +208,40 @@ class PolyGraph:
                                   else SIDE_MONO)
         return sides
 
-    def _reaches(self, start, forward):
+    def straddlers(self, extra=None):
+        """Nodes that both feed Mix and are fed by it -- i.e. nodes sitting
+        on a loop that passes *through* the boundary.
+
+        There is no coherent thing to build for one of these, which is why
+        they are named rather than assigned a side. A loop through Mix would
+        have to take the sum of sixteen voices and send it back into one
+        voice, which is not a signal path the poly split can express: the
+        node would have to be sixteen copies (it is upstream of Mix) and one
+        copy (it is downstream) at the same time.
+
+        Found here rather than in `graph.judge()` for decision 61 §2's
+        reason: whether a node is upstream of Mix is a fact about the
+        *patch*, and `judge()` only knows what a module declares. Before
+        this existed the graph accepted such a cable -- correctly, since a
+        Delay was in the loop -- and `PolyGraph` then silently dropped the
+        half of it that crossed the boundary, so the loop the user drew did
+        not exist and nothing said so.
+        """
+        cables = self._cables(extra)
+        upstream = self._reaches(self.boundary_id, forward=False, cables=cables)
+        downstream = self._reaches(self.boundary_id, forward=True, cables=cables)
+        return upstream & downstream
+
+    def _reaches(self, start, forward, cables=None):
         """Every node reachable from `start` following cables forwards, or
         every node that can reach it following them backwards."""
+        if cables is None:
+            cables = self.graph.connections
         seen = set()
         stack = [start]
         while stack:
             node_id = stack.pop()
-            for cable in self.graph.connections:
+            for cable in cables:
                 if forward and cable.source == node_id and cable.dest not in seen:
                     seen.add(cable.dest)
                     stack.append(cable.dest)
@@ -229,7 +270,21 @@ class PolyGraph:
     def judge(self, source, source_port, dest, dest_port):
         """`graph.judge()` plus the side rule. The call the canvas makes."""
         verdict = self.graph.judge(source, source_port, dest, dest_port)
-        if not verdict.ok or dest == self.boundary_id:
+        if not verdict.ok:
+            return verdict
+        # Asked before the poly/mono question, because a node on both sides
+        # of Mix has no side for that question to be about. This is the one
+        # refusal a feedback cable can still collect after the cycle rule has
+        # accepted it (decision 63 §3).
+        straddling = self.straddlers(Connection(source, source_port, dest, dest_port))
+        if straddling:
+            named = ", ".join(sorted(self.graph.title(n) for n in straddling))
+            return Verdict(False, REFUSE_POLY, (
+                f"That runs the summed voices back into the per-note side "
+                f"({named}). A feedback loop has to stay on one side of MIX — "
+                f"put the Delay before MIX to loop inside a voice, or after it "
+                f"to loop the mix."))
+        if dest == self.boundary_id:
             return verdict
         sides = self.sides()
         if sides.get(source) == SIDE_POLY and sides.get(dest) == SIDE_MONO:
@@ -251,6 +306,11 @@ class PolyGraph:
         """Build one once-only subgraph and `voice_count` per-note ones, and
         activate every module in all of them. Every allocation this design
         makes happens here."""
+        straddling = self.straddlers()
+        if straddling:
+            raise contract.ContractError(
+                "these modules sit on a loop through the Mix node, which has no "
+                "side to be built on: " + ", ".join(sorted(straddling)))
         crossings = self.crossings()
         if crossings:
             named = ", ".join(f"{c.source} → {c.dest}" for c in crossings)

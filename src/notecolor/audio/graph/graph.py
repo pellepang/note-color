@@ -29,6 +29,20 @@ legitimately run before it. Cutting those edges is what makes a feedback
 loop an ordinary DAG -- the cycle is not solved, it is *ordered*, which is
 the only thing a block-at-a-time engine can do (decision 56 §4).
 
+Two consequences worth stating here, because both are easy to rediscover the
+hard way (decision 63):
+
+- **The frame arithmetic is not here and must not be.** This file asks one
+  question of a module -- `descriptor().block_delay >= 1` -- and takes the
+  answer as a guarantee. Flooring a delay time to a whole block is
+  `modules/delay.py`'s job, deliberately, so that shortening the minimum
+  later (sub-blocks, a compiled core) touches one module and no graph code.
+  A second copy of the rule in here would be a second thing to keep true.
+- **A loop's period is the delay plus one block.** The cut cable is read
+  *after* the block that wrote it, so the module the loop comes back into
+  sees the delay's previous output. That extra block is the ordering's, not
+  the delay's, and it is why a one-block delay in a loop repeats every two.
+
 ## The refusal contract
 
 `judge()` returns a `Verdict`: yes, or no with a `code` the UI can style and
