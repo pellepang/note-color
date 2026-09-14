@@ -74,6 +74,7 @@ the owner rather than settled here.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 
 import numpy as np
@@ -179,18 +180,47 @@ class ModuleGraph:
         self._nodes: dict[str, Node] = {}
         self.connections: list[Connection] = []
         self._activation: Activation | None = None
+        #: `{node_id: name}` -- the host's name for a node, where it knows
+        #: one the module cannot. See `add()` and `title()`.
+        self.titles: dict[str, str] = {}
         #: Bumped on every structural edit, so a host can tell whether the
         #: `CompiledGraph` it is holding is still the current one.
         self.revision = 0
 
     # -- nodes ---------------------------------------------------------------
 
-    def add(self, node_id, module):
+    def add(self, node_id, module, poly=None, title=None):
+        """Put a module on the canvas.
+
+        `poly` and `title` are the two facts a *host* can know better than
+        the module does, and both exist because `gui/patch_bridge.py` is one
+        (#207):
+
+        - `poly` replaces `descriptor().poly` for this node only. Decision
+          61 §2 says a `POLY_EITHER` module's side is decided by the patch;
+          the Synth View's canvas has already decided it (its drawer sorts
+          effects onto the once-only side and everything else onto the
+          per-note one), and handing that decision down here is what stops
+          the canvas's answer and the engine's answer from being two
+          different answers about the same screen. It replaces the *node's*
+          cached descriptor, never the module's -- sixteen voices share one
+          module type, and a type has no side.
+        - `title` is the name a refusal sentence uses for this node. The
+          user is looking at a window captioned "FILTER"; a sentence that
+          says "Filter" is naming something else on the same screen.
+
+        Both default to None, which is "ask the module", so every existing
+        caller is unaffected.
+        """
         if node_id in self._nodes:
             raise contract.ContractError(f"a node called {node_id!r} is already on the canvas")
         contract.validate(module)
         node = Node(node_id, module)
+        if poly is not None:
+            node.descriptor = dataclasses.replace(node.descriptor, poly=poly)
         self._nodes[node_id] = node
+        if title is not None:
+            self.titles[node_id] = title
         if self._activation is not None:
             module.activate(self._activation)
         self.revision += 1
@@ -204,6 +234,7 @@ class ModuleGraph:
             return False
         self.connections = [c for c in self.connections
                             if c.source != node_id and c.dest != node_id]
+        self.titles.pop(node_id, None)
         if self._activation is not None:
             node.module.deactivate()
         self.revision += 1
@@ -216,6 +247,10 @@ class ModuleGraph:
         return list(self._nodes.values())
 
     def title(self, node_id):
+        """What a refusal sentence calls this node: the host's name for it
+        if it gave one (`add(title=...)`), else the module's own."""
+        if node_id in self.titles:
+            return self.titles[node_id]
         node = self._nodes.get(node_id)
         return node.title if node else node_id
 
@@ -271,33 +306,34 @@ class ModuleGraph:
         in_port = dst.port(dest_port)
         if out_port is None:
             return Verdict(False, REFUSE_NO_SUCH_PORT,
-                           f"{src.title} has no socket called {source_port!r}.")
+                           f"{self.title(source)} has no socket called {source_port!r}.")
         if in_port is None:
             return Verdict(False, REFUSE_NO_SUCH_PORT,
-                           f"{dst.title} has no socket called {dest_port!r}.")
+                           f"{self.title(dest)} has no socket called {dest_port!r}.")
 
         if out_port.direction != contract.DIRECTION_OUT:
             return Verdict(False, REFUSE_DIRECTION, (
-                f"{out_port.name} on {src.title} is an input. A cable runs "
+                f"{out_port.name} on {self.title(source)} is an input. A cable runs "
                 f"out of one module and into another."))
         if in_port.direction != contract.DIRECTION_IN:
             return Verdict(False, REFUSE_DIRECTION, (
-                f"{in_port.name} on {dst.title} is an output. A cable runs "
+                f"{in_port.name} on {self.title(dest)} is an output. A cable runs "
                 f"out of one module and into another."))
 
         if out_port.kind != in_port.kind:
-            return Verdict(False, REFUSE_TYPE, self._type_sentence(src, out_port, dst, in_port))
+            return Verdict(False, REFUSE_TYPE,
+                           self._type_sentence(source, out_port, dest, in_port))
 
         if source == dest:
             return Verdict(False, REFUSE_SELF, (
-                f"{src.title} cannot feed itself. A loop needs a Delay in it, "
+                f"{self.title(source)} cannot feed itself. A loop needs a Delay in it, "
                 f"so the sound comes back a block later instead of instantly."))
 
         if any(c.source == source and c.source_port == source_port
                and c.dest == dest and c.dest_port == dest_port
                for c in self.connections):
             return Verdict(False, REFUSE_DUPLICATE, (
-                f"{src.title} is already patched into {in_port.name} on {dst.title}."))
+                f"{self.title(source)} is already patched into {in_port.name} on {self.title(dest)}."))
 
         poly = self._poly_verdict(src, dst)
         if not poly.ok:
@@ -332,15 +368,15 @@ class ModuleGraph:
 
     # -- the rules ------------------------------------------------------------
 
-    def _type_sentence(self, src, out_port, dst, in_port):
+    def _type_sentence(self, source, out_port, dest, in_port):
         """Decision 56 §5: sound and knob movement are different cables, and
         a refusal has to say which one the user is holding."""
         names = {contract.PORT_AUDIO: "sound",
                  contract.PORT_MOD: "knob movement",
                  contract.PORT_EVENT: "notes"}
-        return (f"{out_port.name} on {src.title} sends "
+        return (f"{out_port.name} on {self.title(source)} sends "
                 f"{names.get(out_port.kind, out_port.kind)}, and {in_port.name} on "
-                f"{dst.title} takes {names.get(in_port.kind, in_port.kind)}.")
+                f"{self.title(dest)} takes {names.get(in_port.kind, in_port.kind)}.")
 
     def _poly_verdict(self, src, dst) -> Verdict:
         """Decision 56 §3. A per-note output into a once-only input is
@@ -364,7 +400,8 @@ class ModuleGraph:
         if (src_poly == contract.POLY_PER_NOTE
                 and dst.descriptor.poly == contract.POLY_ONCE):
             return Verdict(False, REFUSE_POLY, (
-                f"{src.title} runs once per held note; {dst.title} runs once. "
+                f"{self.title(src.node_id)} runs once per held note; "
+                f"{self.title(dst.node_id)} runs once. "
                 f"Send it through MIX first — that is what MIX is for."))
         return ACCEPT
 
@@ -383,7 +420,7 @@ class ModuleGraph:
         path = self._ordering_path(dst.node_id, src.node_id)
         if path is None:
             return ACCEPT
-        named = " → ".join(self.title(n) for n in path) + f" → {dst.title}"
+        named = " → ".join(self.title(n) for n in path) + f" → {self.title(dst.node_id)}"
         return Verdict(False, REFUSE_CYCLE, (
             f"That closes a loop with no Delay in it ({named}). A feedback "
             f"loop needs a Delay module, so the sound comes back one block "

@@ -163,6 +163,11 @@ class PolyGraph:
         self._mono_compiled = None
         self._mix_sources: tuple = ()
         self._mix_buffer = None
+        #: Preallocated in `activate()`: where `output_block()` sums the
+        #: patch's output nodes. One buffer for the life of the graph, so
+        #: the host's callback allocates nothing to read the patch.
+        self._out_buffer = None
+        self._out_sources: tuple = ()
         self._next_note_id = 0
         self._clock = 0
 
@@ -231,6 +236,73 @@ class PolyGraph:
         upstream = self._reaches(self.boundary_id, forward=False, cables=cables)
         downstream = self._reaches(self.boundary_id, forward=True, cables=cables)
         return upstream & downstream
+
+    # -- where the sound comes out (#207) -------------------------------------
+
+    def outputs(self):
+        """The once-only node outputs that reach the speakers, as
+        `[(node_id, port_id), ...]`.
+
+        There is no Out node. The rule is: **anything you do not patch
+        onward goes to the speakers.** Concretely, a once-only node that Mix
+        can reach and that feeds nothing further is an output, and all of
+        them are summed. If nothing at all is patched after Mix, Mix itself
+        is the output, so a patch is audible the moment its voices reach the
+        boundary.
+
+        Chosen over an explicit Out node for one reason: it is impossible to
+        get silently wrong. Forget to patch the last module anywhere and it
+        is still the output; the failure mode of the alternative -- a
+        finished patch that makes no sound because one cable is missing --
+        does not exist here. The cost is that "output" is inferred rather
+        than drawn, which decision 56 §3 would rather it were not; an
+        explicit Out node beside the Mix node is the alternative and is
+        flagged for the owner on #211.
+
+        **Feedback loops need the rule stated more carefully than "no
+        outgoing cable".** In `MIX → Delay → Bypass → Delay` every node
+        feeds something, so a literal reading finds no output and the patch
+        is silent -- which is exactly the failure this rule exists to avoid.
+        So the test is not "feeds nothing" but "feeds nothing *new*": a node
+        is an output when every node it feeds can reach it back again. A
+        loop has no end, so every node on it counts as one. On a patch with
+        no loops the two readings are identical, which is why the short
+        sentence above is the one worth remembering.
+        """
+        sides = self.sides()
+        downstream = self._reaches(self.boundary_id, forward=True)
+        mono = [n for n in downstream if sides.get(n) == SIDE_MONO]
+        if not mono:
+            return [(self.boundary_id, "out")]
+        found = []
+        for node_id in mono:
+            onward = [c.dest for c in self.graph.connections if c.source == node_id]
+            if all(self._any_path_back(dest, node_id) for dest in onward):
+                found.append(node_id)
+        if not found:                       # unreachable; belt and braces
+            return [(self.boundary_id, "out")]
+        node_order = [n.node_id for n in self.graph.nodes()]
+        found.sort(key=node_order.index)
+        return [(node_id, self.graph.node(node_id).outputs[0].port_id)
+                for node_id in found]
+
+    def _any_path_back(self, start, goal):
+        """Can `start` reach `goal` by following cables forwards? True means
+        the cable into `start` is closing a loop rather than carrying the
+        signal onward, which is what `outputs()` needs to tell apart."""
+        seen = set()
+        stack = [start]
+        while stack:
+            node_id = stack.pop()
+            if node_id == goal:
+                return True
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            for cable in self.graph.connections:
+                if cable.source == node_id:
+                    stack.append(cable.dest)
+        return False
 
     def _reaches(self, start, forward, cables=None):
         """Every node reachable from `start` following cables forwards, or
@@ -340,6 +412,13 @@ class PolyGraph:
             if c.dest == self.boundary_id and c.source in set(poly_ids))
         self._mono_compiled = mono_compiled
         self._mix_buffer = mono_compiled.buffer(self.boundary_id)
+        # Bound here, not in `output_block()`: which nodes are outputs is a
+        # fact about the patch, and the patch cannot change without a
+        # rebuild. Resolving it per block would be a dict lookup and a
+        # graph walk inside the callback.
+        self._out_sources = tuple(mono_compiled.buffer(node_id, port_id)
+                                  for node_id, port_id in self.outputs())
+        self._out_buffer = np.zeros(activation.max_block, dtype=np.float64)
         return self
 
     def _subgraph(self, node_ids, clone):
@@ -454,6 +533,26 @@ class PolyGraph:
             if voice.note.finished:
                 voice.active = False
         self._mono_compiled.process(frames)
+
+    def output_block(self, frames):
+        """Run one block and return the patch's output: `outputs()` summed
+        into one preallocated buffer.
+
+        The host's whole audio-thread interface. Allocates nothing -- the
+        buffer and the list of sources were both fixed at `activate()` --
+        and returns a float64 array the caller must copy out of rather than
+        keep, because the next block overwrites it.
+        """
+        self.process(frames)
+        out = self._out_buffer
+        sources = self._out_sources
+        if not sources:
+            out[:frames] = 0.0
+            return out
+        np.copyto(out[:frames], sources[0][:frames])
+        for extra in sources[1:]:
+            np.add(out[:frames], extra[:frames], out=out[:frames])
+        return out
 
     def buffer(self, node_id, port_id="out"):
         """A once-only node's output buffer -- including Mix's own, which is
