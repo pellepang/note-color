@@ -320,6 +320,13 @@ class ModuleDescriptor:
     #: output. Only a delay line reports more than 0, and only a module
     #: reporting at least 1 may close a feedback loop (decision 56 §4).
     block_delay: int = 0
+    #: True for the Mix node and nothing else (#204, decision 56 §3). The
+    #: boundary belongs to neither side: its inputs are per-note -- that is
+    #: what it is summing -- and its output is once-only. A flag rather than
+    #: a fourth `poly` mode, because every rule that asks about poly needs
+    #: to ask about *which end of the cable*, and one field cannot answer
+    #: two different questions.
+    is_boundary: bool = False
     #: Free text for the drawer's grouping: "source", "filter", "effect",
     #: "modulator", "utility", "plugin".
     category: str = "utility"

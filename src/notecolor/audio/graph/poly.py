@@ -1,0 +1,401 @@
+"""The Mix node and the poly boundary (#204, decision 56 §3): where sixteen
+held notes become one signal, as a graph object rather than an implicit
+layer.
+
+Decision 56 §3 settled that the boundary is **drawn, not hidden**, because
+the owner's stated reason for wanting cables was seeing the true path, and a
+boundary that summed invisibly would make the cables lie. This module is
+that decision made real: one `MixModule` on the canvas, everything cabled
+into it running once per held note, everything downstream running once.
+
+## How the split is decided
+
+Not by a property of a module, and not by where its window sits on screen --
+by **the cables**. A node that can reach the Mix node is on the per-note
+side; a node Mix can reach is on the once-only side. A module declaring
+`POLY_PER_NOTE` or `POLY_ONCE` constrains which side it may be cabled onto
+(`graph.judge()` refuses the crossing), but for everything declaring
+`POLY_EITHER` -- which is most things -- the patch decides, which is the
+whole point of a patch.
+
+A module cabled to neither side falls back to its own declaration, and to
+the once-only side when it has no opinion: an unpatched module has no voice
+to belong to.
+
+## What is instantiated how many times
+
+`PolyGraph.activate()` builds `voices` complete copies of the per-note
+subgraph, through `Module.new_instance()` -- a fresh module of the same type
+and configuration, not a clone of a live one. That is 16 copies at
+`config.POLYPHONY_SYNTH_VIEW`, all allocated up front, off the audio thread,
+because a note-on that allocates is a note-on that can miss its deadline.
+The once-only subgraph is built once, from the modules the caller put in the
+graph.
+
+## Voice lifecycle
+
+`note_on()` takes a slot, resets its modules and points its `NoteContext` at
+the new note. `note_off()` clears `gate`. A voice is reclaimed when a module
+sets `note.finished` -- which is an amp envelope's job (#205), and until one
+exists a released note **drones**, exactly as a modular with no envelope
+patched does. That is not a gap being papered over: the alternative, having
+the voice manager decide when a note has stopped sounding, is how a synth
+ends up clicking on release.
+
+Stealing, when all slots are busy: the oldest released voice, else the
+oldest voice. `sound_engine.select_steal_index()` has the same policy for
+the non-graph engines; this one is separate because it steals *subgraphs*,
+not `Voice` objects, and sharing the function would mean sharing a data
+model neither side wants.
+
+## What the once-only side never sees
+
+Note-off tears down nothing to the right of Mix. That is what keeps a delay's
+tail ringing after the key is up (the test that proves it is in
+`tests/test_synth_poly.py`), and it is the practical reason the boundary is
+worth drawing at all: the two sides have different lifetimes, and the canvas
+says which is which.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from notecolor.settings import config
+from notecolor.audio.graph import contract
+from notecolor.audio.graph.contract import (
+    Activation, Module, ModuleDescriptor, NoteContext, audio_in, audio_out,
+)
+from notecolor.audio.graph.graph import REFUSE_POLY, ModuleGraph, Verdict
+
+#: How the two sides are named everywhere below, and in `gui/patch_graph.py`.
+SIDE_POLY = "poly"
+SIDE_MONO = "mono"
+
+
+class MixModule(Module):
+    """The boundary itself, as a node you can see and patch into.
+
+    It does no arithmetic of its own. `PolyGraph` sums the voices into this
+    module's output buffer before the once-only subgraph runs, so by the
+    time `process()` is called the answer is already in place --
+    deliberately, because the sum is across *graphs*, one per voice, and no
+    module can see more than its own.
+
+    That makes this the one module in the project whose `process()` leaves
+    its output untouched, and the exception is worth the docstring: the
+    alternative is a module that reaches outside its own context, which is
+    the thing the contract exists to forbid.
+    """
+
+    def descriptor(self):
+        return ModuleDescriptor(
+            module_id="mix",
+            name="Mix",
+            poly=contract.POLY_ONCE,
+            is_boundary=True,
+            category="utility",
+        )
+
+    def ports(self):
+        return (audio_in("in", "In"), audio_out("out", "Out"))
+
+    def process(self, ctx):
+        """Intentionally empty -- see the class docstring."""
+
+
+class Voice:
+    """One slot: a complete copy of the per-note subgraph, plus the note it
+    is currently rendering.
+
+    Slots are made once and reused forever. A retired voice keeps its
+    modules and its buffers; all that changes is the `NoteContext` and a
+    `reset()`, which is what makes note-on free of allocation.
+    """
+
+    __slots__ = ("index", "graph", "compiled", "note", "age", "active")
+
+    def __init__(self, index, graph):
+        self.index = index
+        self.graph = graph
+        self.compiled = None
+        self.note = NoteContext()
+        self.age = 0
+        self.active = False
+
+    def start(self, note_id, pitch, velocity, frequency, age):
+        for step in self.compiled.steps:
+            step.module.reset()
+        self.note.note_id = note_id
+        self.note.pitch = pitch
+        self.note.velocity = velocity
+        self.note.frequency = frequency
+        self.note.gate = True
+        self.note.finished = False
+        self.age = age
+        self.active = True
+
+    def retire(self):
+        self.active = False
+        self.note.gate = False
+        self.note.finished = True
+
+
+class PolyGraph:
+    """A `ModuleGraph` containing exactly one `MixModule`, run as sixteen
+    per-note subgraphs feeding one once-only subgraph.
+
+    Everything here runs off the audio thread except `process()`.
+    """
+
+    def __init__(self, graph: ModuleGraph, voices=None):
+        self.graph = graph
+        self.voice_count = voices or config.POLYPHONY_SYNTH_VIEW
+        self.boundary_id = self._find_boundary(graph)
+        self.voices: list[Voice] = []
+        self._mono = None
+        self._mono_compiled = None
+        self._mix_sources: tuple = ()
+        self._mix_buffer = None
+        self._next_note_id = 0
+        self._clock = 0
+
+    # -- the split -----------------------------------------------------------
+
+    @staticmethod
+    def _find_boundary(graph):
+        found = [n.node_id for n in graph.nodes() if n.descriptor.is_boundary]
+        if len(found) != 1:
+            raise contract.ContractError(
+                f"a patch needs exactly one Mix node; this one has {len(found)}")
+        return found[0]
+
+    def sides(self):
+        """`{node_id: SIDE_POLY | SIDE_MONO}` for every node but the Mix
+        node, decided by the cables (see the module docstring)."""
+        upstream = self._reaches(self.boundary_id, forward=False)
+        downstream = self._reaches(self.boundary_id, forward=True)
+        sides = {}
+        for node in self.graph.nodes():
+            node_id = node.node_id
+            if node_id == self.boundary_id:
+                continue
+            if node_id in upstream:
+                sides[node_id] = SIDE_POLY
+            elif node_id in downstream:
+                sides[node_id] = SIDE_MONO
+            else:
+                # Cabled to neither side: its own declaration, and the
+                # once-only side when it has none. An unpatched module has
+                # no voice to belong to.
+                sides[node_id] = (SIDE_POLY
+                                  if node.descriptor.poly == contract.POLY_PER_NOTE
+                                  else SIDE_MONO)
+        return sides
+
+    def _reaches(self, start, forward):
+        """Every node reachable from `start` following cables forwards, or
+        every node that can reach it following them backwards."""
+        seen = set()
+        stack = [start]
+        while stack:
+            node_id = stack.pop()
+            for cable in self.graph.connections:
+                if forward and cable.source == node_id and cable.dest not in seen:
+                    seen.add(cable.dest)
+                    stack.append(cable.dest)
+                elif not forward and cable.dest == node_id and cable.source not in seen:
+                    seen.add(cable.source)
+                    stack.append(cable.source)
+        seen.discard(start)
+        return seen
+
+    def crossings(self):
+        """Cables that leave the per-note side and land on the once-only
+        side without passing through Mix.
+
+        `graph.judge()` cannot see these on its own: it knows what a module
+        *declares*, and a module declaring `POLY_EITHER` only becomes
+        per-note by being cabled that way. So the patch-aware half of
+        decision 56 §3's rule lives here, and `judge()` below is what the
+        canvas should call.
+        """
+        sides = self.sides()
+        return [c for c in self.graph.connections
+                if c.dest != self.boundary_id
+                and sides.get(c.source) == SIDE_POLY
+                and sides.get(c.dest) == SIDE_MONO]
+
+    def judge(self, source, source_port, dest, dest_port):
+        """`graph.judge()` plus the side rule. The call the canvas makes."""
+        verdict = self.graph.judge(source, source_port, dest, dest_port)
+        if not verdict.ok or dest == self.boundary_id:
+            return verdict
+        sides = self.sides()
+        if sides.get(source) == SIDE_POLY and sides.get(dest) == SIDE_MONO:
+            return Verdict(False, REFUSE_POLY, (
+                f"{self.graph.title(source)} is on the per-note side of MIX and "
+                f"{self.graph.title(dest)} is on the once-only side. Send it "
+                f"through MIX first — that is what MIX is for."))
+        return verdict
+
+    def connect(self, source, source_port, dest, dest_port):
+        verdict = self.judge(source, source_port, dest, dest_port)
+        if verdict.ok:
+            self.graph.connect(source, source_port, dest, dest_port)
+        return verdict
+
+    # -- building ------------------------------------------------------------
+
+    def activate(self, activation: Activation):
+        """Build one once-only subgraph and `voice_count` per-note ones, and
+        activate every module in all of them. Every allocation this design
+        makes happens here."""
+        crossings = self.crossings()
+        if crossings:
+            named = ", ".join(f"{c.source} → {c.dest}" for c in crossings)
+            raise contract.ContractError(
+                f"these cables cross the Mix boundary without going through Mix: {named}")
+        sides = self.sides()
+        poly_ids = [n for n, side in sides.items() if side == SIDE_POLY]
+        mono_ids = [n for n, side in sides.items() if side == SIDE_MONO]
+
+        self._mono = self._subgraph(mono_ids + [self.boundary_id], clone=False)
+        self._mono.activate(activation)
+        mono_compiled = self._mono.compile()
+
+        self.voices = []
+        for index in range(self.voice_count):
+            sub = self._subgraph(poly_ids, clone=True)
+            sub.activate(activation)
+            voice = Voice(index, sub)
+            voice.compiled = sub.compile()
+            self.voices.append(voice)
+
+        # Which per-note outputs the Mix node is fed by. Held as node/port
+        # pairs rather than buffers, because every voice has its own buffer
+        # for the same pair.
+        self._mix_sources = tuple(
+            (c.source, c.source_port) for c in self.graph.connections
+            if c.dest == self.boundary_id and c.source in set(poly_ids))
+        self._mono_compiled = mono_compiled
+        self._mix_buffer = mono_compiled.buffer(self.boundary_id)
+        return self
+
+    def _subgraph(self, node_ids, clone):
+        """A `ModuleGraph` over `node_ids` and the cables between them.
+
+        `clone=True` goes through `Module.new_instance()` rather than
+        reusing the module object: sixteen voices need sixteen filters with
+        sixteen `zi` histories, and a shared one is one voice played
+        sixteen times as loud.
+        """
+        wanted = set(node_ids)
+        sub = ModuleGraph()
+        for node_id in node_ids:
+            module = self.graph.node(node_id).module
+            sub.add(node_id, module.new_instance() if clone else module)
+        for cable in self.graph.connections:
+            if cable.source in wanted and cable.dest in wanted:
+                sub.force_connect(cable.source, cable.source_port,
+                                  cable.dest, cable.dest_port)
+        return sub
+
+    def module(self, node_id, voice=None):
+        """The live module behind a node -- the once-only one, or one
+        voice's copy. How a knob edit reaches all sixteen copies: the caller
+        loops, because there is no shared parameter store and inventing one
+        would put a second source of truth on the audio thread."""
+        if voice is None:
+            return self._mono.node(node_id).module
+        return self.voices[voice].graph.node(node_id).module
+
+    def set_parameter(self, node_id, param_id, value):
+        """One knob, everywhere it exists. The ordinary way to drive a
+        per-note module from the UI."""
+        mono = self._mono.node(node_id)
+        if mono is not None:
+            mono.module.params.set(param_id, value)
+            return
+        for voice in self.voices:
+            voice.graph.node(node_id).module.params.set(param_id, value)
+
+    # -- notes ---------------------------------------------------------------
+
+    @property
+    def active_voices(self):
+        return [v for v in self.voices if v.active]
+
+    def note_on(self, pitch, velocity=1.0, frequency=None):
+        """Take a slot for a new note and return it. Never refuses: a synth
+        that drops a note because it is busy is worse than one that steals
+        the oldest, which is the same conclusion `sound_engine.VoiceManager`
+        reached (decision 38)."""
+        self._clock += 1
+        self._next_note_id += 1
+        voice = self._free_voice() or self._steal()
+        if frequency is None:
+            from notecolor.audio.sound_engine import frequency_for
+            frequency = frequency_for(pitch)
+        voice.start(self._next_note_id, pitch, velocity, frequency, self._clock)
+        return voice
+
+    def note_off(self, pitch):
+        """Release every sounding voice on `pitch`. Clears the gate and
+        nothing else -- what happens next is the patch's business, and with
+        no envelope patched the answer is that it keeps sounding."""
+        released = 0
+        for voice in self.voices:
+            if voice.active and voice.note.pitch == pitch and voice.note.gate:
+                voice.note.gate = False
+                released += 1
+        return released
+
+    def all_notes_off(self):
+        for voice in self.voices:
+            if voice.active:
+                voice.retire()
+
+    def _free_voice(self):
+        for voice in self.voices:
+            if not voice.active:
+                return voice
+        return None
+
+    def _steal(self):
+        """Oldest released voice, else oldest voice. Released first because
+        a note the player has let go of is the one they will miss least."""
+        released = [v for v in self.voices if not v.note.gate]
+        pool = released or self.voices
+        return min(pool, key=lambda v: v.age)
+
+    # -- the audio thread ----------------------------------------------------
+
+    def process(self, frames):
+        """Run every sounding voice, sum them at Mix, then run the once-only
+        side once.
+
+        The summing here is the only place sixteen become one, which is the
+        claim decision 56 §3 makes and the reason the node is drawn. It is
+        not the only place *any* summing happens -- several cables meeting
+        one input also sum, at a jack the canvas marks (decision 60 §3, the
+        owner's call) -- but that is two signals inside one voice, not a
+        voice count collapsing.
+        """
+        mix = self._mix_buffer
+        mix[:frames] = 0.0
+        for voice in self.voices:
+            if not voice.active:
+                continue
+            voice.compiled.process(frames, note=voice.note)
+            for node_id, port_id in self._mix_sources:
+                np.add(mix[:frames], voice.compiled.buffer(node_id, port_id)[:frames],
+                       out=mix[:frames])
+            if voice.note.finished:
+                voice.active = False
+        self._mono_compiled.process(frames)
+
+    def buffer(self, node_id, port_id="out"):
+        """A once-only node's output buffer -- including Mix's own, which is
+        the patch's summed voices."""
+        return self._mono_compiled.buffer(node_id, port_id)

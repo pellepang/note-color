@@ -1165,3 +1165,32 @@ One-liners; full detail in `docs/DECISIONS.md`.
   for the person holding the cable. Neither substitutes for the other.
 - **Stability is the patch's business.** A unity-gain loop through a delay runs
   away and nothing refuses it — that is what a real modular does.
+
+### 61 — the Mix node, the poly boundary, and where summing is allowed (ticket #204)
+- **Where summing is allowed (the owner's call).** #204 said Mix is "the only
+  place summing happens"; that does not cover Osc 1 + Osc 2 into one Filter
+  *inside a voice*, which Mix cannot do because Mix **is** the boundary. Offered
+  three ways, the owner chose: **inputs sum, and the canvas marks any jack
+  carrying more than one cable.** `ModuleGraph.summed_inputs()` publishes where,
+  so the canvas never has to infer it. Decision 56 §3 is intact — its objection
+  was to a *voice count* collapsing unseen, not to addition.
+- **The cables decide which side a module is on**, not the module: reaches Mix →
+  per-note, reachable from Mix → once-only, unpatched → whatever it declares.
+  Most modules declare `POLY_EITHER`, so the patch decides.
+- **The refusal therefore has two halves.** `graph.judge()` catches the *declared*
+  crossing; `PolyGraph.judge()` adds the ones that exist only because of the
+  patch, and `activate()` refuses to build a patch already containing one rather
+  than silently dropping the cable.
+- **`is_boundary` is a flag, not a fourth poly mode.** Mix's inputs are per-note
+  and its output is once-only; one `poly` field cannot answer a question that is
+  really about which end of the cable you are standing at.
+- **Voice tear-down is a module's decision.** `note_off()` clears the gate; a
+  voice is reclaimed when a module sets `note.finished` (#205's amp envelope).
+  Until one exists a released note **drones** — what a modular with no envelope
+  does, and deliberately not papered over: a voice manager that decides when a
+  note stopped is how a synth clicks on release.
+- **16 copies of the per-note subgraph built in `activate()`** via
+  `new_instance()`, off the audio thread; slots are reset and reused, never freed.
+  Stealing: oldest released, else oldest (decision 38's policy, separate code).
+- **Note-off touches nothing right of Mix**, which is what keeps a delay's tail
+  ringing after the key is up — the practical argument for drawing the boundary.

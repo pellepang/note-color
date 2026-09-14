@@ -495,3 +495,28 @@ def test_running_the_graph_allocates_nothing_that_scales_with_the_block():
     note = contract.NoteContext(frequency=220.0)
     grew = peak_bytes(compiled_for(2048), 2048, note) - peak_bytes(compiled_for(64), 64, note)
     assert grew < 16 * 1024, f"the graph grew {grew} bytes with the block"
+
+
+# -- where the summing happens (decision 60 §3, the owner's call) -------------
+
+
+def test_the_graph_publishes_which_jacks_sum():
+    """Inputs sum, and the canvas marks the jack. Published by the graph
+    rather than counted by the canvas, so the two can never disagree about
+    where addition is happening."""
+    g = built(("a", source("a")), ("b", source("b")), ("c", source("c")),
+              ("sink", Fake("sink", ports=(audio_in("x"), audio_in("y"), audio_out("out")))))
+    g.connect("a", "out", "sink", "x")
+    assert g.summed_inputs() == {}
+    g.connect("b", "out", "sink", "x")
+    g.connect("c", "out", "sink", "y")
+    assert g.summed_inputs() == {("sink", "x"): 2}
+
+
+def test_unplugging_back_to_one_cable_stops_marking_the_jack():
+    g = built(("a", source("a")), ("b", source("b")), ("sink", Fake("sink")))
+    g.connect("a", "out", "sink", "in")
+    g.connect("b", "out", "sink", "in")
+    assert g.summed_inputs() == {("sink", "in"): 2}
+    g.disconnect("b", "out", "sink", "in")
+    assert g.summed_inputs() == {}

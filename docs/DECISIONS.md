@@ -65,3 +65,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The quality dial, the conversion cache and long-run UX (issue #134)](decisions/58-the-quality-dial-the-conversion-cache-and-long-run-ux-issue-134.md)
 - [The graph module contract, and plugin hosting moved into the design (ticket #202, map #179)](decisions/59-the-graph-module-contract-and-plugin-hosting-moved-into-the-design-issue-202.md)
 - [Graph execution order, the cycle rule, and the staged swap (ticket #203, map #179)](decisions/60-graph-execution-order-the-cycle-rule-and-the-staged-swap-issue-203.md)
+- [The Mix node, the poly boundary, and where summing is allowed (ticket #204, map #179)](decisions/61-the-mix-node-the-poly-boundary-and-where-summing-is-allowed-issue-204.md)

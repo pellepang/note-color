@@ -227,6 +227,23 @@ class ModuleGraph:
         return [c for c in self.connections
                 if c.dest == node_id and c.dest_port == port_id]
 
+    def summed_inputs(self):
+        """`{(node_id, port_id): cable count}` for every input carrying more
+        than one cable.
+
+        The owner's answer to decision 60 §3: inputs **do** sum, and the
+        canvas **marks the jack where it happens**. Summing itself was never
+        the objection -- decision 56 §3 objected to summing somewhere the
+        screen does not admit to. So the graph publishes exactly where it
+        sums and the canvas draws it (#211); neither has to infer it from
+        counting cables itself.
+        """
+        counts: dict[tuple[str, str], int] = {}
+        for cable in self.connections:
+            key = (cable.dest, cable.dest_port)
+            counts[key] = counts.get(key, 0) + 1
+        return {key: n for key, n in counts.items() if n > 1}
+
     def judge(self, source, source_port, dest, dest_port) -> Verdict:
         """Would this cable be accepted? Every refusal names what is wrong
         and what to do instead."""
@@ -320,8 +337,17 @@ class ModuleGraph:
         `POLY_EITHER` is compatible with both sides; which one it actually
         ends up on is #204's problem, and this rule does not need the
         answer to refuse the case that is wrong either way.
+
+        The Mix node is the exception in both directions, because it is the
+        boundary rather than a side of it: per-note cables are what it
+        exists to accept, and what leaves it is once-only however per-note
+        the sixteen things that went in were.
         """
-        if (src.descriptor.poly == contract.POLY_PER_NOTE
+        src_poly = (contract.POLY_ONCE if src.descriptor.is_boundary
+                    else src.descriptor.poly)
+        if dst.descriptor.is_boundary:
+            return ACCEPT
+        if (src_poly == contract.POLY_PER_NOTE
                 and dst.descriptor.poly == contract.POLY_ONCE):
             return Verdict(False, REFUSE_POLY, (
                 f"{src.title} runs once per held note; {dst.title} runs once. "
