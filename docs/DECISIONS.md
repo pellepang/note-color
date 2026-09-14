@@ -66,3 +66,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The graph module contract, and plugin hosting moved into the design (ticket #202, map #179)](decisions/59-the-graph-module-contract-and-plugin-hosting-moved-into-the-design-issue-202.md)
 - [Graph execution order, the cycle rule, and the staged swap (ticket #203, map #179)](decisions/60-graph-execution-order-the-cycle-rule-and-the-staged-swap-issue-203.md)
 - [The Mix node, the poly boundary, and where summing is allowed (ticket #204, map #179)](decisions/61-the-mix-node-the-poly-boundary-and-where-summing-is-allowed-issue-204.md)
+- [The per-note voice modules: filter, amp envelope and noise (ticket #205, map #179)](decisions/62-the-per-note-voice-modules-filter-envelope-and-noise-issue-205.md)

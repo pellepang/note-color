@@ -1194,3 +1194,38 @@ One-liners; full detail in `docs/DECISIONS.md`.
   Stealing: oldest released, else oldest (decision 38's policy, separate code).
 - **Note-off touches nothing right of Mix**, which is what keeps a delay's tail
   ringing after the key is up — the practical argument for drawing the boundary.
+
+### 62 — the per-note voice modules: filter, amp envelope and noise (ticket #205)
+- **Ported, not rewritten.** The SVF coefficients, the `lfilter` recurrence, the
+  DAHDSR walk and the pink `B`/`A` pair are `synth_engine.py`'s, imported
+  (decision 56 §7). Three arithmetic-identical additions were made *to*
+  `DahdsrEnvelope` — `restart()`, `block_into()`, `preallocate()` — so a voice slot
+  can be replayed without allocating and a ramping stage does not build an `arange`.
+- **The amp envelope is what ends a note**, which is the answer decision 61 §4 left
+  to a module: it reads `ctx.note.gate`, releases from wherever it is, and sets
+  `ctx.note.finished` for `PolyGraph` to reclaim the slot. No envelope in the patch,
+  no end to the note — tested both ways. The gate is read once per block; sample-
+  accurate note timing is an event-list change to the contract, not a module fix.
+- **Audio in / audio out, not a mod output plus a VCA.** Decision 56 §5's modulation
+  cables are for knobs; a gain applied to sound is sound.
+- **Filter type and noise colour are stepped parameters, not construction choices**
+  (unlike the oscillator's waveform, which builds a table set): all three filter
+  types share one denominator, and both noise colours are one generator with or
+  without a 3-pole filter. Noise therefore needs SciPy to activate even when white —
+  named as a cost, not hidden. Each noise instance owns its generator and
+  `new_instance()` drops the seed: sixteen voices from one seed is a correlated 16x
+  boost, not noise.
+- **Contract rule 2 is broken in exactly two places, by SciPy.** `lfilter` has no
+  `out=` and no pure-NumPy substitute exists (decision 42), so the filter and pink
+  noise each allocate one block-sized array per block (4kB at 512 frames). The test
+  gives them a budget of exactly one block, zero to everything else, **and asserts
+  the budget is used**, so a future `out=` fails the test rather than being carried
+  as a licence forever.
+- **Parity with the fixed engine: the first block is bit-identical**, whole note
+  including release; later blocks drift to ~8e-12 (−220 dB) from float64
+  association in the two phase accumulators. **What it cannot say** is stated in the
+  test: the patch switches off the LFO, the filter envelope, glide, osc 2 and noise
+  because the graph has no module for any of them — so **nothing varies at control
+  rate**, and `SynthVoice`'s 64-sample grid collapses to one `lfilter` call. A
+  second test asserts the two engines *disagree* once `filter.env_amount` is up.
+  That control-rate gap is the real remaining difference, and it belongs to #208.
