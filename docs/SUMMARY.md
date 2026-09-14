@@ -1084,3 +1084,29 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - **Settings are reached from a menu bar** (File / Edit / View / Transport /
   Settings), which the app does not have yet — not from a panel on the canvas.
 
+
+### 58 — the quality dial, the conversion cache and long-run UX (issue #134)
+
+- **~6 minutes is the *fast* setting, not the top of a dial.** Measured on the
+  target box, a 4-minute song costs ≈6.5 min in band mode and ≈6.8 min in piano
+  mode, against map #123's ~1 hour allowance. Separation dominates; all four
+  stems transcribe in 36 s (`nmp.onnx` at 0.04× real time).
+- **Two positions ship — Fast (≈6.5 min) and Quality (`htdemucs_ft`, ≈32 min).**
+  Max ships with #215 or not at all: a third position that runs identically to
+  the second is a lie in the interface.
+- **`transkun`'s segment hop is a measured trap.** Below its default, it emits
+  both copies of every overlapped note — 120 duplicates, F0.5 0.835, at twice
+  the compute. Pinned and unexposed; adapter-level dedupe is #216.
+- **Every model is bit-exact across runs**, so consensus schemes must perturb the
+  input, not repeat it — a standing constraint on #215.
+- **The cache is derived, deletable and keyed per pass**
+  (`sha256(audio)` + pass + settings + model version), bounded by size (~5 GB,
+  LRU) rather than age. The line that makes map #24's carve-out safe: *nothing in
+  a score file ever points into the cache.*
+- **Progress carries a real ETA** (cost is a known multiple of a known duration),
+  Ctrl-C cancels at a pass boundary leaving completed passes cached, and the
+  quality choice is a Studio dialog with `--fast`/`--quality` on the terminal
+  path. First-run order: refusal, then terms, then quality.
+- Corrections: `htdemucs` is **1.28–1.41×** here against #126's 2.02–2.14× on the
+  same machine, and transkun's cost is **content-dependent**, so #126's
+  "timing is content-independent" covers the separator only.

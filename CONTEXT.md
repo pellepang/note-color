@@ -110,5 +110,13 @@ _Avoid_: Track, for this. This concept was called a Track until map [#145](https
 **Timing oracle**:
 Use of the drum **Stem** to establish beat, downbeat and meter for the whole piece, because percussion carries that information far more clearly than pitched material does. Distinct from drum *notation*, which is a separate output; the same stem serves both purposes.
 
+**Quality setting**:
+The one choice a user makes about how hard a **Conversion** should work, asked once when the file is loaded — **Fast** or **Quality** today, **Max** when #215 earns it. Each position names a measured cost and a different pipeline, never an adjective over the same one.
+_Avoid_: "quality dial", "speed setting". There is no continuous control and no position that trades quality for speed on the same work.
+
+**Conversion cache**:
+Derived, deletable working data from a **Conversion** — **Stems** and each **Pass**'s symbolic output — under `$XDG_CACHE_HOME/note-color/convert/`, keyed per pass by the audio, the pass, its settings and the model version. Nothing in a saved score ever points into it, which is what keeps it distinct from the score of record and squares it with map #24's ban on persisting raw audio.
+_Avoid_: calling it storage, or a project file. Deleting it can only cost time.
+
 **Pass**:
 One stage of a conversion that consumes the previous stage's output — separation and global estimates, then transcription conditioned on those estimates, then quantization against a fixed grid. Whether more passes genuinely buy accuracy is a hypothesis this map tests, not an assumption it builds on.
