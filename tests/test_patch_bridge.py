@@ -20,6 +20,7 @@ pytest.importorskip("scipy.signal")
 
 from notecolor.audio.graph.modules.delay import Delay
 from notecolor.audio.graph.modules.envelope import AmpEnvelope
+from notecolor.audio.graph.modules.level import Level
 from notecolor.audio.graph.modules.oscillator import WavetableOscillator
 from notecolor.audio.graph.modules.passthrough import Passthrough
 from notecolor.audio.graph.contract import Activation, ProcessContext
@@ -64,6 +65,10 @@ def _chorus():
     return pg.NodeSpec("chorus", "Chorus", side=pg.SIDE_MONO)
 
 
+def _level(node_id="level", title="Level"):
+    return pg.NodeSpec(node_id, title, side=pg.SIDE_MONO)
+
+
 def _cables(*pairs):
     return [pg.Cable(source, dest) for source, dest in pairs]
 
@@ -86,7 +91,7 @@ def test_each_canvas_module_becomes_the_engine_module_it_looks_like():
     kinds = {
         "osc1": WavetableOscillator, "osc2": WavetableOscillator,
         "filter": type(pb.module_for(pg.NodeSpec("filter", "FILTER"))),
-        "amp_env": AmpEnvelope, "delay": Delay,
+        "amp_env": AmpEnvelope, "delay": Delay, "level": Level,
     }
     for type_key, expected in kinds.items():
         spec = pg.NodeSpec(type_key, type_key.upper())
@@ -226,6 +231,33 @@ def test_a_loop_through_the_delay_rings_on_after_the_key_is_up():
                for _ in range(40))
     assert 0.01 < tail < 1e6
     assert np.isfinite(bridge.playing.output_block(BLOCK)).all()
+
+
+def test_a_level_in_the_loop_brings_a_hot_round_trip_under_control():
+    """#218's whole reason to exist, per decision 65 §8: a unity-gain delay
+    (dry + wet) patched back into its own input has loop gain >= 1 as soon
+    as `Fdbk` leaves zero, and there was nothing on the once-only side that
+    could turn that back down. A Level at 0.5 in the loop should hold a
+    sustained tail to a visibly smaller ceiling than the same loop with the
+    Level left at unity."""
+    def loop_peak(level_gain):
+        bridge, _ = _bridge(
+            _specs(_delay(), _level()),
+            _cables(*DEFAULT_CHAIN, ("mix", "delay"), ("delay", "level"),
+                    ("level", "delay")),
+            parameters={"delay": {"time": 0.01, "mix": 0.9, "feedback": 0.6},
+                        "level": {"level": level_gain}})
+        bridge.note_on(60)
+        for _ in range(20):
+            bridge.playing.output_block(BLOCK)
+        bridge.note_off(60)
+        return max(float(np.abs(bridge.playing.output_block(BLOCK)).max())
+                   for _ in range(60))
+
+    hot = loop_peak(1.0)
+    turned_down = loop_peak(0.5)
+    assert np.isfinite(hot) and np.isfinite(turned_down)
+    assert turned_down < hot
 
 
 # -- knobs -------------------------------------------------------------------

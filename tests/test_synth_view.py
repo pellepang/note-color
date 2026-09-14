@@ -235,6 +235,57 @@ def test_knob_wheel_edit_is_reflected_in_the_engines_live_patch(app):
     assert sound_engine.engine.patches[patch.name] is patch
 
 
+# --- the Level utility module (#218) -------------------------------------
+
+
+def test_level_is_reachable_from_the_drawer_and_starts_at_unity(app):
+    """It is not in `MODULE_FACTORIES`' Patch-backed half or on the fixed
+    effects bus (`UTILITY_TYPES`'s own docstring on why), so this exercises
+    the third path -- `_build_utility_module()` -- end to end."""
+    view, _controller, _patch = _make_view()
+    window = view._module_factory("level", QtCore.QPoint(0, 0))
+    assert window is not None
+    assert window.type_key == "level"
+    knobs = window.knobs()
+    assert len(knobs) == 1
+    view.canvas.add_window(window)
+    view._on_window_added(window)
+    assert view._utility_params["level"]["level"] == pytest.approx(1.0)
+
+
+def test_level_knob_wheel_updates_its_own_store_and_reaches_the_bridge(app):
+    view, _controller, _patch = _make_view()
+    window = view._module_factory("level", QtCore.QPoint(0, 0))
+    view.canvas.add_window(window)
+    view._on_window_added(window)
+    knob = window.knobs()[0]
+
+    knob.last_shift = False
+    knob.wheelStepped.emit(-1)
+
+    value = view._utility_params["level"]["level"]
+    assert value < 1.0
+    # Reached the bridge's pending-parameter store, the same path every
+    # other knob uses (`_knob_reached_engine` -> `PatchBridge.set_parameter`).
+    assert view.bridge._parameters["level"]["level"] == value
+
+
+def test_closing_the_level_window_resets_its_stored_gain(app):
+    """Symmetry with an effect module: reopening should start from the
+    module's own default, not from wherever the knob was left."""
+    view, _controller, _patch = _make_view()
+    window = view._module_factory("level", QtCore.QPoint(0, 0))
+    view.canvas.add_window(window)
+    view._on_window_added(window)
+    knob = window.knobs()[0]
+    knob.last_shift = False
+    knob.wheelStepped.emit(-5)
+    assert view._utility_params["level"]["level"] != pytest.approx(1.0)
+
+    window.closed.emit("level")
+    assert "level" not in view._utility_params
+
+
 # --- keyboard preview / release -----------------------------------------
 
 

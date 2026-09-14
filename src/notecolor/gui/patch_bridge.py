@@ -71,6 +71,7 @@ from notecolor.audio.graph.graph import ModuleGraph
 from notecolor.audio.graph.modules.delay import Delay
 from notecolor.audio.graph.modules.envelope import AmpEnvelope
 from notecolor.audio.graph.modules.filter import FILTER_TYPES, StateVariableFilter
+from notecolor.audio.graph.modules.level import Level
 from notecolor.audio.graph.modules.noise import COLOURS as NOISE_COLOURS, Noise
 from notecolor.audio.graph.modules.oscillator import WavetableOscillator
 from notecolor.audio.graph.modules.passthrough import Passthrough
@@ -89,6 +90,7 @@ MODULE_FACTORIES = {
     "filter": lambda cfg: StateVariableFilter(),
     "amp_env": lambda cfg: AmpEnvelope(),
     "delay": lambda cfg: Delay(),
+    "level": lambda cfg: Level(),
 }
 
 #: Canvas nodes that are deliberately absent from the engine graph: they

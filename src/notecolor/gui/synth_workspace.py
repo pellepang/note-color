@@ -61,6 +61,11 @@ SYNTH_CORE_MODULES = [
     ("lfo", "LFO"),
     ("filter_env", "Filter Env"),
     ("voice", "Voice"),
+    # A plain gain stage (#218) -- the engine has it (`graph/modules/
+    # level.py`), unlike `lfo`/`filter_env`, so it belongs here rather than
+    # with the unimplemented pair even though it is a utility rather than a
+    # synth-engine stage; there is no third drawer group for "utility".
+    ("level", "Level"),
 ]
 
 #: Always present, never enabled -- the map's "kept in mind, not built"

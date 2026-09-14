@@ -140,6 +140,31 @@ EFFECT_DEFAULTS = {
 #: private there, so duplicated rather than reached into).
 EFFECT_TITLES = {"delay": "Delay", "chorus": "Chorus"}
 
+#: Drawer modules with real engine backing but no `Patch` section and no
+#: place in `audio/effects.py`'s registry (#218's `Level`): a graph-only
+#: utility, so it gets its own small knob-spec table rather than either of
+#: the two existing paths -- `_build_synth_module()` wants a `Patch`
+#: attribute section, `_build_effect_module()` would put it on the shared
+#: fixed-engine effects bus (`effects_audio.EFFECT_TYPES`), which is a real
+#: behaviour change to the score editor and pad playback that a
+#: Synth-View-only module must not make (decision 56 §7).
+UTILITY_TYPES = frozenset({"level"})
+
+#: Knob specs for `UTILITY_TYPES`, in the same shape `EFFECT_PARAM_SPECS`
+#: uses -- `spec.section` is unused (there is no `Patch` object underneath),
+#: kept as "params" for `synth_params.step_value()`'s sake, which only
+#: reads `spec.attr`/`spec.kind`/etc.
+UTILITY_PARAM_SPECS = {
+    "level": (
+        synth_params.ParamSpec("params", "level", "Level", synth_params.KIND_FLOAT,
+                                -2.0, 2.0, 0.05),
+    ),
+}
+
+#: Mirrors `graph/modules/level.Level.parameters()`'s own default (unity
+#: gain) -- a freshly dropped Level should not need to be found by ear.
+UTILITY_DEFAULTS = {"level": {"level": 1.0}}
+
 #: Short descriptive tag shown small/dim next to a module window's title,
 #: per the accepted prototype's mock data -- covers every synth-core type
 #: key plus every key actually present in `effects_audio.EFFECT_TYPES`.
@@ -154,6 +179,7 @@ TAG_FOR_TYPE = {
     "voice": "poly 16",
     "delay": "1/8 dot",
     "chorus": "detune",
+    "level": "unity",
 }
 
 #: Title-bar dot accent color per module type -- per the accepted
@@ -173,6 +199,9 @@ DOT_COLOR_FOR_TYPE = {
     "voice": theme.LINEN_DIM,
     "delay": theme.AMBER,
     "chorus": theme.TEAL_PALE,
+    # Deliberately neither an effect colour nor a synth-core one: Level is
+    # a utility, and this is the codebase's "faintest legible tone".
+    "level": theme.LINEN_FAINT,
 }
 
 #: Which side of the Mix boundary each module type runs on (decision 56
@@ -183,8 +212,12 @@ DOT_COLOR_FOR_TYPE = {
 #:
 #: Synth-core stages are per-note: sixteen copies, one per held key.
 #: Effects live right of the boundary and run once, which is why a delay
-#: keeps its tail after note-off.
-MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES)
+#: keeps its tail after note-off. Level joins them here rather than
+#: defaulting to per-note (the engine declares it `POLY_EITHER` and would
+#: leave the choice to the patch, but the canvas pins every type key to one
+#: side): its reason to exist is turning down a once-only feedback loop
+#: (decision 65 §8), so that is the side a freshly dropped one lands on.
+MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES) | UTILITY_TYPES
 
 #: Modules that send knob movement rather than sound (#208's port type).
 #: Sound goes into a socket; only these two can grab a knob.
@@ -459,6 +492,12 @@ class SynthView(QtWidgets.QMainWindow):
         #: scanned once from every kit on disk. Refreshed on next Load in
         #: case a patch was saved meanwhile.
         self._sample_to_kit = {}
+        #: `{type_key: {attr: value}}` for `UTILITY_TYPES` -- the same shape
+        #: `patch.effects`'s `EffectSpec.params` gives an effect module, but
+        #: kept off the `Patch` entirely: a utility module has no fixed-
+        #: engine counterpart to persist for, and #209 (persistence) is a
+        #: separate ticket. In-memory only this pass, same as `_workspace`.
+        self._utility_params = {}
         self._sampler_engine = SamplerEngine()
         self._shown_once = False
         #: The canvas's patch, as a real engine graph (#207). Built before
@@ -777,6 +816,8 @@ class SynthView(QtWidgets.QMainWindow):
             return None
         if type_key in effects_audio.EFFECT_TYPES:
             return self._build_effect_module(type_key)
+        if type_key in UTILITY_TYPES:
+            return self._build_utility_module(type_key)
         return self._build_synth_module(type_key)
 
     def _specs_for_type(self, type_key):
@@ -823,6 +864,26 @@ class SynthView(QtWidgets.QMainWindow):
         for knob, spec in zip(window.knobs(), specs):
             knob.wheelStepped.connect(functools.partial(self._on_effect_knob_wheel, effect_spec, spec, knob))
         window.closed.connect(functools.partial(self._on_effect_module_closed, effect_spec))
+        return window
+
+    def _build_utility_module(self, type_key):
+        """`UTILITY_TYPES`' own path: a module with real engine backing but
+        no `Patch` section and no place on the fixed-engine effects bus.
+        Params live in `self._utility_params` rather than `patch.effects`,
+        for the reason `UTILITY_TYPES`'s docstring gives."""
+        defaults = UTILITY_DEFAULTS.get(type_key, {})
+        params = self._utility_params.setdefault(type_key, dict(defaults))
+        specs = UTILITY_PARAM_SPECS.get(type_key, ())
+        knob_specs = [
+            (spec.label, synth_params.format_value(spec, params.get(spec.attr, defaults.get(spec.attr, 0.0))), None)
+            for spec in specs
+        ]
+        title = _DRAWER_TITLES.get(type_key, type_key.title())
+        window = ModuleWindow(type_key, title, tag=TAG_FOR_TYPE.get(type_key, ""),
+                               dot_color=DOT_COLOR_FOR_TYPE.get(type_key, theme.COPPER), knob_specs=knob_specs)
+        for knob, spec in zip(window.knobs(), specs):
+            knob.wheelStepped.connect(functools.partial(self._on_utility_knob_wheel, type_key, spec, knob))
+        window.closed.connect(functools.partial(self._on_utility_module_closed, type_key))
         return window
 
     # -- the patch layer (ticket #211) --------------------------------------
@@ -887,18 +948,21 @@ class SynthView(QtWidgets.QMainWindow):
         places is a mapping that rots.
         """
         patch = self.current_patch
-        if patch is None:
-            return {}
         values = {}
-        for _title, specs in synth_params.sections_for(patch):
-            for spec in specs:
-                try:
-                    values.setdefault(spec.section, {})[spec.attr] = \
-                        synth_params.read(patch, spec)
-                except AttributeError:
-                    continue
-        for effect in patch.effects:
-            values.setdefault(effect.type, {}).update(effect.params)
+        if patch is not None:
+            for _title, specs in synth_params.sections_for(patch):
+                for spec in specs:
+                    try:
+                        values.setdefault(spec.section, {})[spec.attr] = \
+                            synth_params.read(patch, spec)
+                    except AttributeError:
+                        continue
+            for effect in patch.effects:
+                values.setdefault(effect.type, {}).update(effect.params)
+        # `UTILITY_TYPES` live in `self._utility_params`, not on `patch` at
+        # all -- see that dict's own comment for why.
+        for type_key, params in self._utility_params.items():
+            values.setdefault(type_key, {}).update(params)
         return values
 
     def _rebuild_graph(self):
@@ -928,6 +992,12 @@ class SynthView(QtWidgets.QMainWindow):
     def _on_effect_module_closed(self, effect_spec, _type_key):
         if effect_spec in self.current_patch.effects:
             self.current_patch.effects.remove(effect_spec)
+
+    def _on_utility_module_closed(self, type_key, _type_key):
+        # Symmetry with `_on_effect_module_closed`: reopening starts from
+        # the module's own default rather than from whatever was dialled in
+        # before it was last closed.
+        self._utility_params.pop(type_key, None)
 
     def _open_default_modules(self):
         for type_key in DEFAULT_MODULES:
@@ -972,6 +1042,15 @@ class SynthView(QtWidgets.QMainWindow):
         effect_spec.params[spec.attr] = value
         knob.set_display(synth_params.format_value(spec, value), _rotation_for(spec, value))
         self._knob_reached_engine(effect_spec.type, spec.attr, value)
+
+    def _on_utility_knob_wheel(self, type_key, spec, knob, direction):
+        defaults = UTILITY_DEFAULTS.get(type_key, {})
+        params = self._utility_params.setdefault(type_key, dict(defaults))
+        current = params.get(spec.attr, defaults.get(spec.attr, 0.0))
+        value = synth_params.step_value(spec, current, direction, coarse=knob.last_shift)
+        params[spec.attr] = value
+        knob.set_display(synth_params.format_value(spec, value), _rotation_for(spec, value))
+        self._knob_reached_engine(type_key, spec.attr, value)
 
     def _knob_reached_engine(self, type_key, attr, value):
         """One knob edit, to all sixteen of that module's voices.
