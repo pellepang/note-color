@@ -1287,3 +1287,53 @@ One-liners; full detail in `docs/DECISIONS.md`.
 - Bipolar feedback (a negative comb cancels the fundamental — half of a flanger)
   and mix defaulting to half (the interference is the effect, not the wet signal).
   No damping: at 5 ms the tail is gone before dulling could be heard.
+
+### 65 — the first merge: the canvas's patch becomes the sound (#207)
+- **The graph arrives beside the old engine, never instead of it** (decision 56 §7).
+  `SoundEngine.set_graph()` copies `set_effects()`'s idiom exactly — activate off
+  the audio thread, install by a single attribute store — and the graph's block is
+  added into the same mix before the effects bus and the soft-clip. So the clip
+  sits *outside* every loop and can never stabilise one, exactly as decision 63 §7
+  predicted.
+- **Two voice pools on purpose.** A graph note goes to `PolyGraph.note_on()` and
+  spends none of `VoiceManager`'s budget; the pads and the old synth keep theirs.
+  Different lifetimes, different stealing, different owners. The one thing that
+  had to reach both is panic.
+- **Where the sound comes out: anything you do not patch onward.** No Out node —
+  every once-only node Mix can reach that feeds nothing further is an output, all
+  summed, and Mix itself when nothing follows it. Chosen on failure modes: it
+  cannot be silently got wrong, where a missing cable to an explicit Out is a
+  finished-looking patch that makes no sound. **An explicit Out node is the
+  alternative and is the owner's call on #211.**
+- **A feedback loop forced the rule's real form**: in `MIX → Delay → Bypass →
+  Delay` every node feeds something, so "no outgoing cable" finds nothing and the
+  patch goes silent. The test is "feeds nothing *new*" — a node is an output when
+  everything it feeds can reach it back. Identical to the short rule on any patch
+  without a loop.
+- **A canvas node with no engine module becomes a wire, and the status bar says
+  so** (`modules/passthrough.Passthrough`). Leaving it out would make the cables
+  lie; refusing to build would silence the canvas over one missing effect.
+  `lfo`/`filter_env`/`voice` are absent instead, correctly: none can be an end of
+  a sound cable, so nothing leaves the signal path. Both are named to the user.
+- **`patch_graph.PatchGraph.judge()` is now a delegation**, as its docstring
+  promised. The canvas gains the loop-through-Mix refusal it never had. Three
+  things stay behind: modulation (no engine layer until #208), two sentences about
+  the canvas's own furniture, and the duplicate sentence, because the engine's
+  names a port and this canvas draws unlabelled holes.
+- **`ModuleGraph.add()` takes a host `poly` and `title`** — the two facts a host
+  knows better than a module. Without the first, the canvas and the engine
+  disagree about an unpatched Filter and the default chain's first cable is
+  refused on an empty canvas.
+- **A rebuild replaces all sixteen voices, so held keys are re-triggered after
+  one** — otherwise a held chord stops dead during the exact gesture that exists
+  to show that moving a cable changes the sound.
+- **Measured in a real `sounddevice` callback** (`scripts/graph_callback_cost.py`):
+  **48.2% of the block budget at 16 voices**, 0 xruns, against decision 55's ~70%
+  revisit trigger and the old fixed engine's 30.7%. The seam stays shut. p99
+  exceeds the deadline with no xruns reported, which is prototype #100's ring
+  buffer hiding overruns; the mean is what the trigger asks about.
+- Two things found and left: `StateVariableFilter` allocates a block per call via
+  `scipy.signal.lfilter` (predates this, now on the callback path), and **any graph
+  loop around the Delay has gain ≥ 1 once its Fdbk knob is above zero**, because a
+  mix-controlled delay is unity-gain and the canvas has no attenuator on the
+  once-only side. A simple Level module is the owner's call.
