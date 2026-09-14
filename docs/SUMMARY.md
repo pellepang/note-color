@@ -1137,3 +1137,31 @@ One-liners; full detail in `docs/DECISIONS.md`.
   `ndarray.take(..., mode="wrap")` does not, and the wrap replaced a modulo too.
 - Shipped against it: `WavetableOscillator` (per-note) and `Delay` (once-only),
   reusing `synth_engine.py`'s tables rather than forking them.
+
+### 60 — graph execution order, the cycle rule and the staged swap (ticket #203)
+- **Two objects, two threads.** `ModuleGraph` is the editable patch (may allocate,
+  may raise, never in a callback); `CompiledGraph` is a flat tuple of steps with
+  every buffer bound, immutable. An edit builds a replacement off the audio thread
+  and the host rebinds **one attribute** — no lock, no queue, no torn state,
+  because nothing is mutated in place. No incremental path, deliberately.
+- **A cable leaving a module with `block_delay >= 1` does not constrain the
+  order** — its output was computed a block ago. Cutting those edges turns a legal
+  feedback loop into an ordinary DAG: the cycle is *ordered*, not solved.
+- **That collapses the cycle rule into the same fact.** "Does this cable close a
+  cycle among the constraining edges?" is decision 56 §4 exactly — a loop with a
+  delay has already vanished from that graph. One search, not two. The refusal
+  names every module in the loop.
+- **Kahn's algorithm, ties broken by insertion order**, so two identical compiles
+  give identical orders; a graph that reorders itself makes ordering bugs
+  unreproducible. `compile()` still raises `CycleError` on an illegal cycle forced
+  past `judge()`.
+- **Several cables on one input are summed**; one cable binds straight through to
+  the producer's buffer (no module writes to its inputs, so a copy is pure cost);
+  an unconnected input reads a shared zero buffer, so no branch enters the
+  callback. **This contradicts #204's "Mix is the only place summing happens"** and
+  is flagged there — decision 56 §3's rule is about the *poly boundary*, and osc1 +
+  osc2 into one filter inside one voice is a different operation Mix cannot do.
+- **`Verdict(ok, code, reason)`**: a code to style and branch on *and* a sentence
+  for the person holding the cable. Neither substitutes for the other.
+- **Stability is the patch's business.** A unity-gain loop through a delay runs
+  away and nothing refuses it — that is what a real modular does.

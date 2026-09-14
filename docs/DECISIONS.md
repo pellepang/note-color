@@ -64,3 +64,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The patch canvas's settled look: cables with weight, and a labelled stripe (issue #210)](decisions/57-the-patch-canvas-s-settled-look-cables-with-weight-and-a-labelled-stripe-issue-210.md)
 - [The quality dial, the conversion cache and long-run UX (issue #134)](decisions/58-the-quality-dial-the-conversion-cache-and-long-run-ux-issue-134.md)
 - [The graph module contract, and plugin hosting moved into the design (ticket #202, map #179)](decisions/59-the-graph-module-contract-and-plugin-hosting-moved-into-the-design-issue-202.md)
+- [Graph execution order, the cycle rule, and the staged swap (ticket #203, map #179)](decisions/60-graph-execution-order-the-cycle-rule-and-the-staged-swap-issue-203.md)
