@@ -17,6 +17,7 @@ simple enough that the expected number can be read straight out of the test.
 import numpy as np
 import pytest
 
+from notecolor.settings import config
 from notecolor.audio.graph import contract, graph, poly
 from notecolor.audio.graph.contract import (
     Activation, Module, ModuleDescriptor, ParamSpec, audio_in, audio_out,
@@ -174,11 +175,14 @@ def test_every_voice_gets_its_own_copy_of_every_per_note_module():
 
 
 def test_sixteen_held_notes_sum_at_mix():
+    """The raw sum, scaled by the fixed headroom constant (#222) --
+    `PolyGraph.process()` applies `config.GRAPH_MIX_HEADROOM` once, at Mix,
+    before anything downstream runs."""
     p = patch(voices=16)
     for pitch in range(60, 76):
         p.note_on(pitch, frequency=float(pitch))
     p.process(BLOCK)
-    assert np.allclose(p.buffer("mix"), sum(range(60, 76)))
+    assert np.allclose(p.buffer("mix"), sum(range(60, 76)) * config.GRAPH_MIX_HEADROOM)
 
 
 def test_the_once_only_side_runs_once_over_the_summed_signal():
@@ -186,8 +190,24 @@ def test_the_once_only_side_runs_once_over_the_summed_signal():
     p.note_on(60, frequency=10.0)
     p.note_on(64, frequency=20.0)
     p.process(BLOCK)
-    assert np.allclose(p.buffer("mix"), 30.0)
-    assert np.allclose(p.buffer("out"), 15.0)
+    assert np.allclose(p.buffer("mix"), 30.0 * config.GRAPH_MIX_HEADROOM)
+    assert np.allclose(p.buffer("out"), 15.0 * config.GRAPH_MIX_HEADROOM)
+
+
+def test_mix_headroom_scales_the_sum_by_a_fixed_constant():
+    """#222: a *fixed* headroom, not a 1/N normalisation -- doubling the
+    notes held must double the pre-clip peak, not leave it unchanged."""
+    one = patch(voices=4)
+    one.note_on(60, frequency=1.0)
+    one.process(BLOCK)
+
+    two = patch(voices=4)
+    two.note_on(60, frequency=1.0)
+    two.note_on(64, frequency=1.0)
+    two.process(BLOCK)
+
+    assert np.allclose(one.buffer("mix"), 1.0 * config.GRAPH_MIX_HEADROOM)
+    assert np.allclose(two.buffer("mix"), 2.0 * config.GRAPH_MIX_HEADROOM)
 
 
 def test_a_voice_renders_its_own_note_not_the_last_one():
@@ -213,7 +233,8 @@ def test_a_knob_edit_reaches_every_voice():
     p.note_on(60, frequency=100.0)
     p.note_on(64, frequency=100.0)
     p.process(BLOCK)
-    assert np.allclose(p.buffer("mix"), 100.0)  # two voices at half level
+    # two voices at half level, then the fixed headroom (#222)
+    assert np.allclose(p.buffer("mix"), 100.0 * config.GRAPH_MIX_HEADROOM)
 
 
 # -- voice lifecycle ---------------------------------------------------------
@@ -255,7 +276,7 @@ def test_a_restarted_slot_does_not_inherit_the_old_note_s_state():
     assert p.active_voices == []
     p.note_on(72, frequency=5.0)
     p.process(BLOCK)
-    assert np.allclose(p.buffer("mix"), 5.0)
+    assert np.allclose(p.buffer("mix"), 5.0 * config.GRAPH_MIX_HEADROOM)
 
 
 def test_running_out_of_slots_steals_the_oldest_released_voice_first():

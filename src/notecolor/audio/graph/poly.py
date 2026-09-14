@@ -520,6 +520,16 @@ class PolyGraph:
         one input also sum, at a jack the canvas marks (decision 60 §3, the
         owner's call) -- but that is two signals inside one voice, not a
         voice count collapsing.
+
+        The sum is scaled by `config.GRAPH_MIX_HEADROOM` (#222) right here,
+        once, before the once-only side runs -- so a downstream filter or
+        delay sees the same headroom-adjusted signal the speakers do, not a
+        hot one it has to cope with separately. A fixed constant, not a
+        1/N or 1/sqrt(active) normalisation: either of those would duck a
+        held chord the instant another note joined it, which is a
+        compressor nobody asked for and makes the instrument feel unstable
+        under the hands. See `config.GRAPH_MIX_HEADROOM` for the
+        measurements behind the value.
         """
         mix = self._mix_buffer
         mix[:frames] = 0.0
@@ -532,6 +542,7 @@ class PolyGraph:
                        out=mix[:frames])
             if voice.note.finished:
                 voice.active = False
+        np.multiply(mix[:frames], config.GRAPH_MIX_HEADROOM, out=mix[:frames])
         self._mono_compiled.process(frames)
 
     def output_block(self, frames):

@@ -602,12 +602,19 @@ def test_the_graph_matches_the_fixed_engine(request):
         voice.render(reference, BLOCK)
         blocks.append((poly.buffer("mix")[:BLOCK].copy(), reference))
 
+    # `PolyGraph.process()` scales the Mix sum by `config.GRAPH_MIX_HEADROOM`
+    # (#222) before the once-only side runs; `SynthVoice` has no such stage
+    # and never will (decision 56 §7 keeps the fixed engine untouched), so
+    # the reference is scaled by the same constant for the comparison --
+    # the same `np.multiply` the graph itself applies, so bit-exactness
+    # survives it.
     first_graph, first_reference = blocks[0]
     assert np.any(first_reference != 0.0)           # the comparison is not of silence
-    assert np.array_equal(first_graph, first_reference)
+    assert np.array_equal(first_graph, first_reference * config.GRAPH_MIX_HEADROOM)
 
     for index, (got, want) in enumerate(blocks):
-        assert np.max(np.abs(got - want)) < 1e-10, f"block {index} diverged"
+        assert np.max(np.abs(got - want * config.GRAPH_MIX_HEADROOM)) < 1e-10, \
+            f"block {index} diverged"
 
     # And the note really did end on both sides, at the same block.
     assert voice.finished

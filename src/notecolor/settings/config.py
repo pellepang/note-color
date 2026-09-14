@@ -579,6 +579,22 @@ POLYPHONY_SYNTH_VIEW = 16        # voice cap while the GUI Synth View is open (#
                                   # voices is also more than a two-row key band can physically ask for; the
                                   # figure is worth revisiting when MIDI input lands (#173), because a
                                   # sustain pedal can hold far more notes than ten fingers can.
+GRAPH_MIX_HEADROOM = 0.3         # fixed gain applied at the Mix node before the once-only side runs (#222).
+                                  # `PolyGraph.process()` sums every held voice at unity, so peak amplitude
+                                  # scales with notes held and a three-note chord already drove
+                                  # `sound_engine.py`'s `np.tanh` soft clip into audible waveshaping. Decision:
+                                  # a *fixed* constant, not 1/N or 1/sqrt(active voices) -- either would duck a
+                                  # held chord the moment another note joined it, which is a compressor nobody
+                                  # asked for. Measured (default chain, saw -> filter -> amp env -> Mix, full
+                                  # sustain, project owner's machine): unity peak before the clip is 1.01 at
+                                  # one note, 2.43 at three, 3.32 at four, 5.95 at eight, 10.29 at sixteen.
+                                  # 0.3 brings three notes to 0.73 (tanh 0.62, mild compression, not yet
+                                  # audibly distorted) and one note to 0.30 (tanh 0.30, essentially linear --
+                                  # not weak, just no longer clipped range). Eight and sixteen notes still
+                                  # saturate hard (tanh 0.95 and 1.00) -- that is the trade this constant makes
+                                  # on purpose: an ordinary chord stays clean, a cluster nobody plays as a
+                                  # single chord does not get free headroom at its expense. `Level` (#218) is
+                                  # the escape hatch for a patch that wants a different trade.
 SYNTH_KEY_DIM_LIGHTNESS = 0.20   # lightness of an idle key in the input layer -- the same "visible but plainly
                                   # off" floor DIM_LIGHTNESS gives the wheel view's inactive wedges.
 SYNTH_KEY_LIT_LIGHTNESS = 0.62   # lightness of a key while its note is sounding.
