@@ -159,6 +159,89 @@ distinction does not blur later.
 
 ## Measured cost, against the 70% trigger
 
+**Re-measured for issue #229**, on an idle machine, in a real
+`sounddevice` callback -- decision 65's own method, not the wall-clock
+`PolyGraph.process()` loop the paragraphs below (kept for the record) used
+the first time. `scripts/mod_callback_cost.py` is the harness: it wraps
+`SoundEngine._callback` itself with `time.perf_counter()`, exactly the way
+`scripts/graph_callback_cost.py` measured decision 65's 48.2%, against a
+real output stream on the machine's real default device (`HDA Intel PCH`,
+via PipeWire/ALSA). 512 frames / 44100 Hz = 11.61ms budget, 16 voices
+(`config.POLYPHONY_SYNTH_VIEW`), held for the whole run.
+
+Machine state at measurement time: `uptime` load average 0.5-1.0 on 4
+cores (down from the 8.4 the first measurement ran under), one unrelated
+`visualnote` process left running from an earlier session holding a
+steady ~30% of one core (a GUI/TUI process, not another measurement --
+left running rather than killed, since stopping another process is
+outside this task's scope; noted as an honest limitation, not edited
+around). The baseline row below (47.1% mean) lands within a point of
+decision 65's own 48.2% for the same unmodified patch shape, which is
+the cross-check that this machine, right now, is a fair comparison point.
+
+Three patches, 16 voices, at least three runs each (worst case: five),
+10 seconds/run, first 10 blocks of each run dropped as PortAudio/page-fault
+warm-up:
+
+| patch | mean | p99 | max | xruns |
+|---|---|---|---|---|
+| baseline (osc → filter → amp env → mix), no modulation | 47.1% | 90.6% | 117.4% | 0 / 3 runs |
+| realistic (LFO → filter cutoff, Mod Envelope → resonance) | 53.8% | 176.3% | 229.7% | 0 / 3 runs |
+| worst case (stage 2's full destination set + Mod Envelope, `_wide_patch()` verbatim) | **60.2%** | 178.3%\* | 266.8% | **6 flags across 4 of 5 runs** |
+
+\*p99 varied run to run (107-208%); the mean across runs is given, not a
+p99-of-p99s.
+
+**The mean is under decision 55's 70% trigger, with real margin, in all
+three patches.** That is not the whole answer. `PortAudio`'s status flags
+-- `SoundEngine.callback_status_count`, the only ground-truth pass/fail
+signal a ring buffer allows (see `scripts/graph_callback_cost.py`'s own
+docstring) -- came back **nonzero in four of five worst-case runs**, at
+1-2 flags per run, on a machine load-averaging under 1.0. Neither the
+baseline nor the realistic patch produced a single flag across three runs
+each, despite the realistic patch's own p99 already sitting at 176% of
+budget. So the picture is not "60% flat" and not "a mean that hides an
+occasional tail spike" in the abstract -- it is a patch whose tail
+already reaches into real, driver-reported dropouts at the exact voice
+cap the Synth View ships with, on hardware that is not under load. That
+is decision 55's trigger in substance -- sustained cost that glitches a
+real callback at the voice cap -- even though the summary mean sits ten
+points under the stated number.
+
+**Read: near the trigger, not clear of it.** The honest comparison to
+the previous (contended-machine, ratio-projected) 62.2% figure is that
+this clean measurement reads *lower* by mean (60.2%) but adds something
+the projection could not see at all: actual xruns. A ratio-calibrated
+projection has no way to surface a real-device failure mode; only the
+callback decision 55 asks for does. Decision 55's revisit -- named in
+decision 55 itself and in decision 56 §6, which lists the compiled-core
+seam (#145, deliberately shut but shaped to open) among the options -- is
+due, and is not started here; see issue #229 for the disposition.
+
+**Headroom for #228 (per-sample interpolated delay reads, for a real
+chorus):** none, in the worst-case patch -- it already xruns before
+#228's added per-sample cost lands, and #228's own destination (delay
+`time`) is exactly the modulation path the worst-case patch's `ShortDelay`
+sits on. In the realistic patch there is nominal mean headroom (70 - 53.8
+= ~16 points) but its p99 is already 176% of budget with zero xruns
+observed in three runs -- not proof #228 is free there, only that three
+ten-second samples did not catch a tail event #228 might tip into one.
+The baseline patch (no delay module at all in this measurement) has the
+most headroom (~23 points) but is not where #228's cost would land. No
+scenario measured here supports #228 proceeding as planned without first
+resolving the compiled-core question decision 55's revisit raises.
+
+No allocation beyond what stage 1 and `filter.py`'s own documented
+`lfilter` departure already accounted for:
+`tests/test_synth_graph_mod_stage2.py::test_process_allocates_nothing_extra_with_the_wide_patch_patched`
+extends stage 1's proof to a patch carrying the Mod Envelope and every
+newly-wired destination at once.
+
+### Superseded: the original contended-machine projection
+
+Kept for the record, not as the number to design against -- see above for
+the clean re-measurement.
+
 512 frames / 44100 Hz = 11.61ms budget, at 16 voices, same methodology
 decision 66 and decision 65 used (wall-clock around `PolyGraph.process()`,
 `sounddevice` not involved). This run's machine was under real contention
@@ -189,32 +272,12 @@ and that the discrepancy really is environmental rather than a regression
 stage 2 introduced.
 
 Applying stage 2's own measured ratio (13.59 / 2.88 = 4.72x baseline) to
-decision 66's calibrated baseline (1.53ms) projects **1.53 x 4.72 =
+decision 66's calibrated baseline (1.53ms) projected **1.53 x 4.72 =
 7.22ms, 62.2% of budget** for the full wide-destination-plus-Mod-Envelope
 patch on a machine running at decision 66's own speed -- under the 70%
-trigger, but close enough to it that it is flagged here rather than
-declared safely clear. Two things worth naming rather than leaving
-implicit:
-
-- **This patch modulates every newly-wired destination at once** (filter
-  cutoff, resonance, key tracking; oscillator pulse width and fine; noise
-  level; delay feedback and mix), which is a stress test of "how expensive
-  can this get", not a claim about what a typical patch does. A patch
-  modulating one or two of these costs close to the stage-1-shape row.
-- **Re-measurement on a quiet machine is worth doing before this ships**,
-  precisely because 62% is close enough to 70% that contention noise could
-  tip a real reading either side of the trigger. This decision does not
-  block on that remeasurement -- nothing here is irreversible, and the
-  chunked/elementwise approach is the same one already proved in stage 1
-  -- but it is named so the next agent (or the owner, on real hardware)
-  does not have to rediscover the calibration method to get a trustworthy
-  number.
-
-No allocation beyond what stage 1 and `filter.py`'s own documented
-`lfilter` departure already accounted for:
-`tests/test_synth_graph_mod_stage2.py::test_process_allocates_nothing_extra_with_the_wide_patch_patched`
-extends stage 1's proof to a patch carrying the Mod Envelope and every
-newly-wired destination at once.
+trigger by that projection, but close enough to it that it was flagged
+rather than declared safely clear, which is why issue #229 asked for the
+clean re-measurement above.
 
 ## What fought the spec, and what is left open
 
@@ -229,13 +292,18 @@ newly-wired destination at once.
 - **Delay `time` modulation** is the one named destination this stage
   does not wire, for the reasons in §2 above -- recorded as follow-up
   work rather than solved partially.
-- **The 62% projected cost** is close enough to decision 55's 70% trigger
-  that it is worth a clean re-measurement before the wide destination set
-  is considered fully settled; see "Measured cost" above.
+- **Re-measured for #229 on an idle machine, in a real callback: 60.2%
+  mean, but real PortAudio xruns in four of five worst-case runs.**
+  Decision 55's revisit is due (see "Measured cost" above); not started
+  here. #228 (per-sample interpolated delay reads) has no measured
+  headroom to proceed as planned against the worst-case patch.
 - **Nothing here could be verified without a real audio device**, and
-  nothing needed to be -- every claim is measured as an array property
-  (unipolar range, buffer-vs-scalar divergence, finiteness, allocation),
-  the same convention every graph test in this stream already uses.
+  nothing needed to be for this decision's own claims -- every claim in
+  §§1-3 is measured as an array property (unipolar range, buffer-vs-scalar
+  divergence, finiteness, allocation), the same convention every graph
+  test in this stream already uses. The cost section above is the
+  exception, and needed a real device precisely because decision 55's
+  trigger is defined against one.
 
 ## Index
 
