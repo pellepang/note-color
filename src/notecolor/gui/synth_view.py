@@ -39,6 +39,7 @@ from notecolor.gui.synth_workspace import (
     Canvas, Drawer, ModuleWindow, SYNTH_CORE_MODULES, CLAP_TYPE_KEY,
 )
 from notecolor.gui.patch_canvas import PatchLayer
+from notecolor.gui import graph_format
 from notecolor.gui import patch_graph
 from notecolor.gui import patch_bridge
 from notecolor.gui.patch_bridge import PatchBridge
@@ -1157,9 +1158,134 @@ class SynthView(QtWidgets.QMainWindow):
             return
         for path in paths:
             if patch_format.patch_name_for_path(path) == name:
-                self._apply_patch(patch_format.load_patch(path))
+                self._load_patch_file(path)
                 self._sample_to_kit = {}  # re-scan kits lazily next pad hit
                 return
+
+    def _load_patch_file(self, path):
+        """Load any patch file -- version 2 or the old fixed-topology one
+        -- through `graph_format` (#209, decision 69; wired for #230). A
+        version 2 file's saved graph plays outright; a version 1 file is
+        migrated in memory via `migrate_fixed_patch()` and the file on disk
+        is never rewritten -- only an explicit Save produces a version 2
+        file.
+
+        The graph format is synth-only (decision 69 §2's own boundary): a
+        migrated patch whose `engine` is not `"synth"` has nothing for it
+        to migrate (`migrate_fixed_patch()`'s own notice says so), so that
+        case keeps going through the old fixed-topology `_apply_patch()`
+        instead -- the same path Load has always used for a sampler kit or
+        an SF2 program, neither of which the graph format has a single
+        field for.
+        """
+        result = graph_format.load_graph_patch(path)
+        if result.migrated:
+            patch = patch_format.load_patch(path)
+            if patch.engine != "synth":
+                self._apply_patch(patch)
+                self._announce_loader_notices(result.notices)
+                return
+        else:
+            patch = patch_format.new_patch(name=result.name, engine="synth")
+        self._stash_outgoing_workspace(patch)
+        self._apply_graph_result(patch, result)
+
+    def _stash_outgoing_workspace(self, incoming_patch):
+        if self.current_patch is not None and self.current_patch is not incoming_patch:
+            self._workspace[self.current_patch.name] = self._snapshot_workspace()
+
+    def _announce_loader_notices(self, notices):
+        """The loader's notices (a missing module, an old LFO destination
+        with nothing to land on, a non-synth patch) reaching the person who
+        opened the file, not just a log -- #230's own requirement. #227 is
+        the standing complaint that this status-bar mechanism only whispers;
+        it is what exists today, so it is what this uses (`PatchLayer.
+        _announce()`, already the convention for "patched"/"unplugged" --
+        reached the same cross-module way `graph_format.py` already reaches
+        into `patch_format._dump_value()`)."""
+        if notices:
+            self.patch_layer._announce(" · ".join(notices))
+
+    def _apply_graph_result(self, patch, result):
+        """Rebuild the canvas from a loaded or migrated graph (#209, #230).
+
+        Every non-Mix node the result named becomes a real module window --
+        skipping any this build cannot construct at all, which
+        `graph_format.py` has already named in `result.notices` -- wired
+        with the saved settings/parameters, then the saved cables restored
+        through the same accept/refuse gate a live drag already goes
+        through (`PatchLayer.restore()`). Window position and the keyboard
+        band are deliberately untouched: neither is patch content
+        (decision 69's boundary -- #169, #213).
+        """
+        self._utility_params = {}
+        patch.effects = []
+        for spec in result.graph.nodes():
+            if spec.is_mix:
+                continue
+            node_id = spec.node_id
+            parameters = result.parameters.get(node_id, {})
+            settings = result.settings.get(node_id, {})
+            if node_id in effects_audio.EFFECT_TYPES:
+                patch.effects.append(
+                    patch_format.EffectSpec(type=node_id, params=dict(parameters)))
+            elif node_id in GRAPH_ONLY_TYPES:
+                values = self._utility_params.setdefault(
+                    node_id, dict(UTILITY_DEFAULTS.get(node_id, {})))
+                values.update({
+                    param_id: patch_bridge.choice_name_of(node_id, param_id, value)
+                    for param_id, value in parameters.items()
+                })
+            else:
+                section = getattr(patch, node_id, None)
+                if section is None:
+                    continue
+                for param_id, value in parameters.items():
+                    if hasattr(section, param_id):
+                        setattr(section, param_id,
+                                patch_bridge.choice_name_of(node_id, param_id, value))
+                waveform = settings.get("waveform")
+                if waveform is not None and hasattr(section, "waveform"):
+                    section.waveform = waveform
+
+        self.current_patch = patch
+        for window in list(self.canvas.windows()):
+            window.request_close()
+        for spec in result.graph.nodes():
+            if spec.is_mix:
+                continue
+            window = self._module_factory(spec.node_id, QtCore.QPoint(0, 0))
+            if window is not None:
+                self.canvas.add_window(window)
+        self.canvas.tidy()
+        self.patch_layer.restore(
+            [(c.source, c.dest, c.knob, c.depth) for c in result.graph.cables])
+        self._workspace.pop(patch.name, None)
+        self._register_patch_live(patch)
+        self._refresh_patchbar()
+        self._on_patch_status(self._patch_summary(), False)
+        self._announce_loader_notices(result.notices)
+
+    def _graph_snapshot_parameters(self):
+        """Every knob on screen, in the shape `save_graph_patch()` wants:
+        `{node_id: {param_id: float}}`, exactly `contract.ParamBlock.
+        snapshot()`'s own shape (decision 69 §6). `_graph_parameters()`
+        already has these values keyed by the same `node_id` -- a choice
+        knob (`filter.type`) just still holds its display name there
+        rather than the engine's own position float, the one thing that
+        method was never asked to convert; `patch_bridge.position_of()`
+        does that conversion (silently dropping a name nothing recognises,
+        the same as an unmapped construction key), so this is the
+        one-line difference between the two rather than a second reader
+        of the same knobs."""
+        snapshot = {}
+        for node_id, values in self._graph_parameters().items():
+            for param_id, value in values.items():
+                numeric = patch_bridge.position_of(node_id, param_id, value)
+                if numeric is None:
+                    continue
+                snapshot.setdefault(node_id, {})[param_id] = float(numeric)
+        return snapshot
 
     def _open_save_dialog(self):
         name, ok = QtWidgets.QInputDialog.getText(
@@ -1167,8 +1293,27 @@ class SynthView(QtWidgets.QMainWindow):
         if not ok or not name:
             return
         path = os.path.join(patch_format.patches_dir(), f"{slugify(name)}.toml")
+        self._save_patch_file(path, name)
+
+    def _save_patch_file(self, path, name):
+        """Save the current patch under `name` at `path` -- a version 2
+        graph file (#209, decision 69; wired for #230) for a synth patch,
+        the old fixed-topology format for anything else.
+
+        The canvas's real graph, not the old `Patch` object, is what gets
+        written for a synth patch, so modulation cables and an arbitrary
+        chain survive a save. Sampler/SF2 patches have no equivalent in the
+        graph format at all -- it has no field for a zone list or an SF2
+        program -- so they keep the old format, unchanged.
+        """
         self.current_patch.name = name
-        patch_format.save_patch(self.current_patch, path)
+        if self.current_patch.engine == "synth":
+            graph_format.save_graph_patch(
+                path, name, self.patch_layer.graph,
+                settings=self._graph_settings(),
+                parameters=self._graph_snapshot_parameters())
+        else:
+            patch_format.save_patch(self.current_patch, path)
         self._register_patch_live(self.current_patch)
         self._refresh_patchbar()
 
@@ -1236,8 +1381,7 @@ class SynthView(QtWidgets.QMainWindow):
         self._on_patch_status(self._patch_summary(), False)
 
     def _apply_patch(self, patch):
-        if self.current_patch is not None and self.current_patch is not patch:
-            self._workspace[self.current_patch.name] = self._snapshot_workspace()
+        self._stash_outgoing_workspace(patch)
         self.current_patch = patch
         self._register_patch_live(patch)
         snapshot = self._workspace.get(patch.name)

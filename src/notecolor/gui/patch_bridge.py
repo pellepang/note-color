@@ -154,6 +154,27 @@ def position_of(node_id, param_id, value):
     return float(options.index(value))
 
 
+def choice_name_of(node_id, param_id, value):
+    """`position_of()`'s reverse: a saved graph-patch parameter (#209,
+    always a plain float -- `ParamBlock.snapshot()`'s shape) back into
+    whatever the canvas's own `Patch`-backed fields expect to hold, for a
+    knob whose display is a discrete choice rather than a number. Used by
+    `synth_view._apply_graph_result()` (#230) to put a loaded value back
+    where the fixed `Patch` attribute it drives (`filter.type`,
+    `noise.colour`, ...) can show it. A `param_id` not in `CHOICE_OPTIONS`
+    is a plain number already and is returned unchanged."""
+    options = CHOICE_OPTIONS.get((node_id, param_id))
+    if options is None:
+        return value
+    try:
+        index = int(round(float(value)))
+    except (TypeError, ValueError):
+        return value
+    if 0 <= index < len(options):
+        return options[index]
+    return value
+
+
 def _waveform(cfg):
     wanted = cfg.get("waveform", "saw")
     from notecolor.audio.graph.modules.oscillator import WAVEFORMS

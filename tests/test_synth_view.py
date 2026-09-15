@@ -27,6 +27,8 @@ from notecolor.tui import synth_params  # noqa: E402
 from notecolor.tui.synth_layout import NOTE_CHANNEL, PAD_CHANNEL  # noqa: E402
 from notecolor.notation.score_audition import PIANO_LOWER_ROW, pitch_for_key  # noqa: E402
 from notecolor.audio.sound_engine import midi_pitch  # noqa: E402
+from notecolor.gui import graph_format  # noqa: E402
+from notecolor.gui import patch_graph  # noqa: E402
 from notecolor.gui import synth_keyboard as sk  # noqa: E402
 from notecolor.gui.synth_view import SynthView, _FOOTER_MAX_HEIGHT  # noqa: E402
 
@@ -798,3 +800,169 @@ def test_footer_keeps_its_height_when_the_window_is_resized(app):
         QtWidgets.QApplication.processEvents()
         assert footer.isVisible() is True
         assert footer.height() == target, f"lost its height at window height {height}"
+
+
+# --- #230: Save/Load wired to graph_format (#209, decision 69) -----------
+
+
+def test_saving_a_graph_with_a_modulation_cable_and_reloading_restores_it(app, tmp_path):
+    """Save must write the canvas's *real* graph (`save_graph_patch()`),
+    not the old fixed-topology `Patch` -- a modulation cable is exactly
+    the thing the old format could never carry."""
+    view, _controller, patch = _make_view()
+    view.canvas.spawn_module("lfo", QtCore.QPoint(20, 20))
+    QtWidgets.QApplication.processEvents()
+    assert "lfo" in {w.type_key for w in view.canvas.windows()}
+
+    view._utility_params["lfo"]["rate"] = 6.0
+    patch.filter.cutoff = 5000.0
+    patch.filter.type = "hp"
+
+    cable = view.patch_layer.graph.connect(
+        "lfo", patch_graph.Target("knob", "filter", "Cutoff"))
+    view.patch_layer.graph.set_depth(cable, 0.42)
+
+    path = tmp_path / "mod_test.toml"
+    view._save_patch_file(str(path), "Mod Test")
+
+    text = path.read_text()
+    assert text.startswith("version = 2")
+
+    other, _controller2, _patch2 = _make_view()
+    other._load_patch_file(str(path))
+
+    assert other.current_patch.name == "Mod Test"
+    assert other.current_patch.engine == "synth"
+    open_types = {w.type_key for w in other.canvas.windows()}
+    assert {"osc1", "filter", "amp_env", "lfo"} <= open_types
+
+    cables = [(c.source, c.knob, c.depth) for c in other.patch_layer.graph.cables]
+    assert ("lfo", ("filter", "Cutoff"), pytest.approx(0.42)) in cables
+    # The default chain (osc1->filter->amp_env->mix) survives too.
+    dests = {(c.source, c.dest) for c in other.patch_layer.graph.cables if c.dest}
+    assert {("osc1", "filter"), ("filter", "amp_env"), ("amp_env", "mix")} <= dests
+
+    assert other.current_patch.filter.cutoff == pytest.approx(5000.0)
+    assert other.current_patch.filter.type == "hp"
+    assert other._utility_params["lfo"]["rate"] == pytest.approx(6.0)
+
+
+def test_loading_never_rewrites_a_version_2_file_on_disk(app, tmp_path):
+    view, _controller, _patch = _make_view()
+    path = tmp_path / "roundtrip.toml"
+    view._save_patch_file(str(path), "Roundtrip")
+    before = path.read_text()
+
+    other, _controller2, _patch2 = _make_view()
+    other._load_patch_file(str(path))
+
+    assert path.read_text() == before
+
+
+def _old_format_synth_patch(tmp_path, name="Old Fixed"):
+    patch = patch_format.new_patch(name=name, engine="synth")
+    patch.osc1.waveform = "square"
+    patch.filter.cutoff = 2000.0
+    patch.filter.type = "hp"
+    patch.osc2.level = 0.4
+    patch.lfo.depth = 0.5
+    patch.lfo.rate = 3.0
+    patch.lfo.destination = "filter"
+    patch.effects.append(patch_format.EffectSpec(
+        type="delay", params={"time": 0.2, "feedback": 0.3, "mix": 0.4, "damping": 0.1}))
+    path = tmp_path / "old_fixed.toml"
+    patch_format.save_patch(patch, str(path))
+    return path
+
+
+def test_loading_a_real_old_format_patch_file_migrates_it_onto_the_canvas(app, tmp_path):
+    """A version 1 file has none of `graph_format`'s `version` key at
+    all (decision 69 §1) -- `load_graph_patch()` migrates it in memory
+    via `migrate_fixed_patch()`, and Load must reach that path rather
+    than the old flat `_apply_patch()` alone, or the LFO's modulation
+    cable and the effects chain would never make it onto the canvas."""
+    path = _old_format_synth_patch(tmp_path)
+    text_before = path.read_text()
+    assert "version" not in text_before.split("\n")[0]
+
+    view, _controller, _patch = _make_view()
+    view._load_patch_file(str(path))
+
+    assert view.current_patch.name == "Old Fixed"
+    assert view.current_patch.engine == "synth"
+    open_types = {w.type_key for w in view.canvas.windows()}
+    assert {"osc1", "filter", "amp_env", "osc2", "lfo", "delay"} <= open_types
+
+    assert view.current_patch.filter.cutoff == pytest.approx(2000.0)
+    assert view.current_patch.filter.type == "hp"  # a choice value, round-tripped
+
+    cables = [(c.source, c.knob) for c in view.patch_layer.graph.cables]
+    assert ("lfo", ("filter", "Cutoff")) in cables
+
+    # Loading never rewrites the file (decision 69, #230's own requirement).
+    assert path.read_text() == text_before
+
+
+def test_loading_a_non_synth_old_patch_falls_back_to_the_old_apply_and_notices(app, tmp_path):
+    """The graph format is synth-only (decision 69 §2): a sampler/SF2
+    patch has nothing for `migrate_fixed_patch()` to build, so Load must
+    keep going through the old fixed-topology path for it rather than
+    leaving the canvas empty."""
+    zones = [patch_format.Zone(sample="kick.wav", low_key=36, high_key=36, root_key=36)]
+    patch = patch_format.Patch(name="A Kit", engine="sampler", zones=zones)
+    path = tmp_path / "kit.toml"
+    patch_format.save_patch(patch, str(path))
+
+    view, _controller, _patch = _make_view()
+    notices = []
+    view.patch_layer.statusChanged.connect(lambda text, _refusal: notices.append(text))
+    view._load_patch_file(str(path))
+
+    assert view.current_patch.name == "A Kit"
+    assert view.current_patch.engine == "sampler"
+    assert view.current_patch.zones == zones
+    assert any("sampler" in text for text in notices)
+
+
+def test_loading_a_file_naming_a_missing_module_skips_it_and_announces_a_notice(app, tmp_path):
+    """`graph_format.py` already turns an unknown `module` id into a
+    nameable notice instead of a `KeyError` (decision 69 §4); Load must
+    let that notice reach the user (#230, #227) and must not crash trying
+    to open a window for a module type this build has never heard of."""
+    graph = patch_graph.PatchGraph()
+    graph.add_node(patch_graph.NodeSpec("mix", "MIX", side=patch_graph.SIDE_BOUNDARY, is_mix=True))
+    graph.add_node(patch_graph.NodeSpec("osc1", "OSC 1", can_in=False))
+    graph.add_node(patch_graph.NodeSpec("filter", "FILTER"))
+    graph.add_node(patch_graph.NodeSpec("amp_env", "AMP ENV"))
+    graph.add_node(patch_graph.NodeSpec("reverb1", "Reverb", side=patch_graph.SIDE_MONO))
+    graph.cables.append(patch_graph.Cable(source="osc1", dest="filter"))
+    graph.cables.append(patch_graph.Cable(source="filter", dest="amp_env"))
+    graph.cables.append(patch_graph.Cable(source="amp_env", dest="reverb1"))
+    graph.cables.append(patch_graph.Cable(source="reverb1", dest="mix"))
+    path = tmp_path / "missing_module.toml"
+    graph_format.save_graph_patch(str(path), "Missing Module", graph)
+
+    view, _controller, _patch = _make_view()
+    notices = []
+    view.patch_layer.statusChanged.connect(lambda text, _refusal: notices.append(text))
+    view._load_patch_file(str(path))
+
+    assert view.current_patch.name == "Missing Module"
+    open_types = {w.type_key for w in view.canvas.windows()}
+    assert open_types == {"osc1", "filter", "amp_env"}
+    assert any("reverb1" in text for text in notices)
+
+
+def test_saving_a_sampler_patch_keeps_the_old_fixed_format(app, tmp_path):
+    """The graph format has no field for a zone list at all -- Save must
+    not attempt it for anything but a synth patch."""
+    zones = [patch_format.Zone(sample="kick.wav", low_key=36, high_key=36, root_key=36)]
+    patch = patch_format.Patch(name="A Kit", engine="sampler", zones=zones)
+    view, _controller, _patch = _make_view(patch=patch)
+    path = tmp_path / "kit_save.toml"
+    view._save_patch_file(str(path), "A Kit")
+
+    text = path.read_text()
+    assert "version" not in text.split("\n")[0]
+    reloaded = patch_format.load_patch(str(path))
+    assert reloaded.zones[0].sample == "kick.wav"
