@@ -74,3 +74,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The Mod Envelope, broader destinations, and the modulation-cycle refusal (issue #208 stage 2 of 3, issue #225)](decisions/67-the-mod-envelope-broader-destinations-and-the-modulation-cycle-refusal-issue-208.md)
 - [The canvas plays modulation: the depth ring, and the dual-output jack (issue #208)](decisions/68-the-canvas-plays-modulation-the-depth-ring-and-the-dual-output-jack-issue-208.md)
 - [Patch persistence for an arbitrary graph, and migrating old patches (issue #209)](decisions/69-patch-persistence-for-an-arbitrary-graph-and-migrating-old-patches-issue-209.md)
+- [Realtime scheduling for the audio callback thread, a read-only CPU governor check, and what re-measuring on this machine could and could not show (issue #232)](decisions/70-realtime-scheduling-for-the-audio-callback-thread-issue-232.md)

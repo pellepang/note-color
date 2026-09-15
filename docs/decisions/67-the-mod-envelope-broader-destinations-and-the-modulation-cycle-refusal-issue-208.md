@@ -159,6 +159,57 @@ distinction does not blur later.
 
 ## Measured cost, against the 70% trigger
 
+**Re-measured again for issue #232**, with decision 70's realtime-scheduling
+code in place -- see decision 70 for the full method and reasoning. Same
+harness (`scripts/mod_callback_cost.py`), same three patches, same machine.
+Every run in this measurement shows the code correctly detecting this
+machine's `powersave` governor and correctly being *denied* `SCHED_FIFO`
+(no root, no configured `rtprio` limit) -- so this is a measurement of the
+graceful-degradation path, not of realtime scheduling's benefit, which
+remains unverified for lack of a machine that can grant it (decision 70 §5).
+Ambient load this session (an interactive desktop, not a quiet machine)
+settled to 1.2-1.6 rather than the #229 run's 0.5-1.0, and could not be
+brought lower -- disclosed rather than edited around, per this section's own
+established precedent for exactly this kind of confound.
+
+| patch | runs | mean | p99 | max | xruns |
+|---|---|---|---|---|---|
+| baseline | 3 x 10s | 45.7% | 108.5%\* | 193.1%\* | **4 flags across 2 of 3 runs** |
+| realistic | 3 x 10s | 52.7% | 159.2%\* | 225.9%\* | **1 flag in 1 of 3 runs** |
+| worst case | 5 x 10s | 61.1% | 176.4%\* | 249.7%\* | **5 flags across 3 of 5 runs** |
+
+\*p99 and max varied run to run; the mean across runs is given, not a
+percentile-of-percentiles. See decision 70 §6 for every individual run.
+
+**Read against the #229 figures directly below (kept, not superseded by
+number -- both are honest measurements of different things):** the mean
+figures land within a few points of #229's (baseline 45.7% vs. 47.1%,
+realistic 52.7% vs. 53.8%, worst 61.1% vs. 60.2%), consistent with "nothing
+computational changed," which is exactly what a denied realtime-priority
+request predicts. The one real difference -- baseline and realistic each
+produced an xrun this session where #229's clean run produced none in
+either -- reads as ambient-load noise around the identical underlying
+mechanism (#231's own point: xrun exposure tracks a governor-ramp event's
+timing against the machine's recent idle history, not the patch alone) more
+than as a regression, and it directly reinforces #231's caution about the
+realistic patch below: a patch clean across three samples can still xrun on
+a fourth, unrelated to any code change.
+
+**Decision 55's revisit and #228's headroom, re-answered for #232's own
+question ("does the fix change either read"):** no. See decision 70 §7 for
+the full argument; in short, the fix aimed at the actual mechanism (DVFS
+ramp lag under `SCHED_OTHER`) now exists and degrades safely everywhere
+tried, but its effect could not be measured on this machine, so decision
+55's trigger is left exactly where #231 put it -- not decisively required,
+now for a narrower reason (an unmeasured fix rather than no fix) -- and
+#228 has, if anything, less apparent headroom than before, since the
+realistic patch's own "clean" result did not survive being re-sampled once.
+
+### Superseded: the #229 clean re-measurement
+
+Kept for the record alongside the #232 re-measurement above, per this
+section's own established convention -- see above for the current reading.
+
 **Re-measured for issue #229**, on an idle machine, in a real
 `sounddevice` callback -- decision 65's own method, not the wall-clock
 `PolyGraph.process()` loop the paragraphs below (kept for the record) used
@@ -297,6 +348,16 @@ clean re-measurement above.
   Decision 55's revisit is due (see "Measured cost" above); not started
   here. #228 (per-sample interpolated delay reads) has no measured
   headroom to proceed as planned against the worst-case patch.
+- **Re-measured again for #232, with decision 70's realtime-scheduling
+  fix in place: consistent with #229's figures (61.1% mean at worst
+  case), because the fix was denied realtime priority on this same
+  machine (no root, no configured `rtprio`) and so ran exactly as
+  before.** Decision 55's revisit remains not decisively required, now
+  for a narrower reason than #231 left it (an unmeasured fix rather than
+  no fix at all) -- see decision 70 §§5-7. #228 still has no measured
+  headroom; the realistic patch's own "0 xruns in 3" result did not
+  survive being re-sampled once, reinforcing #231's caution rather than
+  answering it.
 - **Nothing here could be verified without a real audio device**, and
   nothing needed to be for this decision's own claims -- every claim in
   §§1-3 is measured as an array property (unipolar range, buffer-vs-scalar
