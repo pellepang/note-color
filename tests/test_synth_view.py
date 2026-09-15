@@ -286,6 +286,84 @@ def test_closing_the_level_window_resets_its_stored_gain(app):
     assert "level" not in view._utility_params
 
 
+# --- #223: a real drag between two modules, one of them drawer-added ----
+#
+# A read-only diagnosis (see the issue) rebuilt the default chain's
+# `NodeSpec`/`Cable` shapes by hand and found the engine side blameless --
+# cables reach `graph.connect()` and the compiled graph runs the cabled
+# path. It explicitly could not clear two things: Qt's own drag-and-drop
+# gesture (`patch_canvas.py`'s `SocketWidget` -> `PatchLayer.drag_release`)
+# and a module added from the drawer rather than opened by default. Both
+# are exercised here, together, because the diagnosis's live lead --
+# "a drag that leaves a module unpatched produces exactly this symptom" --
+# is specifically about a drawer-added module cabled in by hand.
+
+
+class _GraphCapableStubEngine:
+    """Just enough of `SoundEngine` for `PatchBridge._engine()` to accept
+    it (`set_graph` and `block_size`) -- `StubSoundEngine` above does not
+    carry either, which is why no existing test here ever drove
+    `view.bridge` past "pending parameters"."""
+
+    def __init__(self):
+        self.sample_rate = 44100
+        self.block_size = 512
+        self.graph = None
+
+    def set_graph(self, graph, activate=True):
+        self.graph = graph
+
+
+def test_a_real_drag_wires_a_drawer_added_module_into_the_engine(app):
+    """Reproduces neither hypothesis #223 raised, on purpose: this drives
+    the actual Qt widgets rather than the graph underneath them. Osc 2 is
+    added the same way the drawer adds it (`Canvas.spawn_module`, the
+    method `dropEvent()` itself calls once past the DnD transport), and
+    the cable from its spare Out jack to Filter's spare In jack is made by
+    sending real `QMouseEvent`s to the `SocketWidget`s -- press, move,
+    release -- exactly as `PatchLayer` receives them from a live drag."""
+    view, _controller, _patch = _make_view()
+    view.bridge.sound_engine_provider = _GraphCapableStubEngine
+    view.resize(1000, 700)
+    QtWidgets.QApplication.processEvents()
+
+    view.canvas.spawn_module("osc2", QtCore.QPoint(20, 400))
+    QtWidgets.QApplication.processEvents()
+
+    layer = view.patch_layer
+
+    def spare(node_id, io):
+        sockets = [s for (n, i, _slot), s in layer._sockets.items()
+                   if n == node_id and i == io]
+        return max(sockets, key=lambda s: s.slot)
+
+    source = spare("osc2", "out")
+    dest = spare("filter", "in")
+    dest_global = dest.mapToGlobal(dest.rect().center())
+
+    QtWidgets.QApplication.sendEvent(source, QtGui.QMouseEvent(
+        QtCore.QEvent.MouseButtonPress, QtCore.QPointF(source.rect().center()),
+        QtCore.QPointF(source.mapToGlobal(source.rect().center())),
+        QtCore.Qt.LeftButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
+    QtWidgets.QApplication.sendEvent(source, QtGui.QMouseEvent(
+        QtCore.QEvent.MouseMove, QtCore.QPointF(source.rect().center()),
+        QtCore.QPointF(dest_global),
+        QtCore.Qt.NoButton, QtCore.Qt.LeftButton, QtCore.Qt.NoModifier))
+    QtWidgets.QApplication.sendEvent(source, QtGui.QMouseEvent(
+        QtCore.QEvent.MouseButtonRelease, QtCore.QPointF(source.rect().center()),
+        QtCore.QPointF(dest_global),
+        QtCore.Qt.LeftButton, QtCore.Qt.NoButton, QtCore.Qt.NoModifier))
+    QtWidgets.QApplication.processEvents()
+
+    assert ("osc2", "filter", None) in [
+        (c.source, c.dest, c.knob) for c in layer.graph.cables]
+
+    assert view.bridge.active
+    assert view.bridge.error == ""
+    connections = view.bridge.playing.graph.connections
+    assert any(c.source == "osc2" and c.dest == "filter" for c in connections)
+
+
 # --- keyboard preview / release -----------------------------------------
 
 
