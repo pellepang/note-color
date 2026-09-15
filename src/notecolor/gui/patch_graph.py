@@ -41,6 +41,18 @@ SIDE_BOUNDARY = "boundary"  # the Mix node; belongs to neither side
 
 KIND_AUDIO = "audio"
 KIND_MOD = "mod"
+#: A module that sends both -- today only the LFO (#208's deliberate
+#: softening, decision 66 §5): "an LFO is, mechanically, just a slow
+#: oscillator", so it keeps both a Mod jack and an Out jack rather than
+#: forcing the canvas to pick one kind for the node. Nothing else earns
+#: this without its own justification -- see the module docstring and
+#: decision 66.
+KIND_BOTH = "both"
+
+#: Bipolar, per decision 66 §4: a fraction of the destination knob's own
+#: range, -1..+1.
+DEPTH_MIN = -1.0
+DEPTH_MAX = 1.0
 
 
 @dataclass(frozen=True)
@@ -75,11 +87,18 @@ class Cable:
     is recomputed every draw; they live on the cable rather than in a
     side table so nothing has to be kept in step with the cable list as
     cables come and go.
+
+    `depth` only means anything for a `knob` cable: decision 66 §4's
+    depth, -1..+1, edited live at the destination's dashed ring
+    (`PatchLayer`'s ring-drag gesture) and carried into the engine's own
+    `ModuleGraph.mod_depths` slot on every rebuild -- see
+    `patch_bridge.build_graph()`.
     """
 
     source: str
     dest: str | None = None
     knob: tuple[str, str] | None = None
+    depth: float = 1.0
     uid: int = 0
     #: Particle position/velocity in canvas coordinates; `None` until the
     #: cable has been laid out once.
@@ -183,6 +202,10 @@ class PatchGraph:
         #: these two -- means "answer it yourself", which is what keeps this
         #: class usable on its own and what every test below relies on.
         self.engine_judge = None
+        #: `engine_judge_modulation(source_id, dest_id, knob_label) ->
+        #: audio.graph.Verdict | None`, `PatchBridge`'s counterpart for a
+        #: mod cable (#208). Same "None means answer it yourself" contract.
+        self.engine_judge_modulation = None
 
     # -- nodes ---------------------------------------------------------
 
@@ -213,8 +236,18 @@ class PatchGraph:
     def in_cables(self, node_id):
         return [c for c in self.cables if c.dest == node_id]
 
-    def out_cables(self, node_id):
-        return [c for c in self.cables if c.source == node_id]
+    def out_cables(self, node_id, kind=None):
+        """This node's outgoing cables, or just the ones of one `kind`.
+
+        The filter matters for a `KIND_BOTH` node (today only the LFO):
+        its Mod cables and its Out cables are two separate jack columns,
+        each with its own slot numbering, so a cable's jack is never
+        shared with the other kind's cables (decision 57 §4's "every
+        cable owns a jack" applied to a node with two output kinds)."""
+        cables = [c for c in self.cables if c.source == node_id]
+        if kind is not None:
+            cables = [c for c in cables if c.kind == kind]
+        return cables
 
     def knob_cables(self, node_id, knob_label):
         return [c for c in self.cables
@@ -222,21 +255,60 @@ class PatchGraph:
 
     def slot_of(self, cable, io):
         """Which jack a cable occupies: its index among that module's
-        cables on that side. A cable's jack is therefore its own -- nothing
-        sums invisibly at a shared input (decision 57 §4)."""
-        listing = self.out_cables(cable.source) if io == "out" else self.in_cables(cable.dest)
+        cables on that side. For an output, scoped to the cable's own kind
+        and then offset past every other kind's jacks (`_kind_offset()`),
+        so a `KIND_BOTH` node's two jack columns still get one flat,
+        never-colliding slot number each -- the same `(node_id, "out",
+        slot)` key the canvas has always used, unchanged by a node having
+        more than one output kind. A cable's jack is therefore its own --
+        nothing sums invisibly at a shared input (decision 57 §4)."""
+        if io == "out":
+            listing = self.out_cables(cable.source, kind=cable.kind)
+            index = listing.index(cable) if cable in listing else -1
+            return index if index < 0 else index + self._kind_offset(cable.source, cable.kind)
+        listing = self.in_cables(cable.dest)
         return listing.index(cable) if cable in listing else -1
+
+    def _kind_offset(self, node_id, kind):
+        """How many output jacks of *other* kinds come before `kind`'s own
+        column, for a node with more than one output kind
+        (`output_groups()`'s fixed order) -- zero for every node with only
+        one."""
+        offset = 0
+        for k, count in self.output_groups(node_id):
+            if k == kind:
+                return offset
+            offset += count
+        return offset
+
+    def output_groups(self, node_id):
+        """Which output kinds this node draws jacks for, and how many of
+        each (its cables of that kind, plus one spare) -- decision 57 §4
+        applied to a node offering more than one kind of output.
+
+        One group for an ordinary node; two, `KIND_AUDIO` then `KIND_MOD`,
+        for a `KIND_BOTH` node -- fixed order, so the canvas and this class
+        never disagree about which stack sits on top.
+        """
+        spec = self._nodes.get(node_id)
+        if spec is None or not spec.can_out:
+            return ()
+        kinds = (KIND_AUDIO, KIND_MOD) if spec.out_kind == KIND_BOTH else (spec.out_kind,)
+        return tuple((kind, len(self.out_cables(node_id, kind=kind)) + 1) for kind in kinds)
 
     def socket_counts(self, node_id):
         """`(in_count, out_count)`: as many jacks as there are cables, plus
         one spare on each side the node accepts (decision 57 §4). The spare
         is what you plug the next cable into; it is drawn as a dashed empty
-        hole by the canvas."""
+        hole by the canvas. `out_count` is the *total* across every output
+        kind (`output_groups()`) -- what the canvas needs to reserve enough
+        vertical room for, not the per-kind slot numbering `slot_of()` uses."""
         spec = self._nodes.get(node_id)
         if spec is None:
             return (0, 0)
-        return (len(self.in_cables(node_id)) + 1 if spec.can_in else 0,
-                len(self.out_cables(node_id)) + 1 if spec.can_out else 0)
+        in_count = len(self.in_cables(node_id)) + 1 if spec.can_in else 0
+        out_count = sum(n for _, n in self.output_groups(node_id))
+        return (in_count, out_count)
 
     def connect(self, source_id, target: Target):
         """Plugs a cable in. Callers are expected to have asked `judge()`
@@ -255,6 +327,14 @@ class PatchGraph:
             self.cables.remove(cable)
             return True
         return False
+
+    def set_depth(self, cable, value):
+        """The ring's write path on the canvas side (decision 66 §4, #210
+        §3): stored on the cable itself, clipped the same -1..+1 the engine
+        clips to, so a value read back before the next rebuild already
+        matches what `set_modulation_depth()` wrote live."""
+        cable.depth = min(max(float(value), DEPTH_MIN), DEPTH_MAX)
+        return cable.depth
 
     # -- reachability and loops (decision 56 §4) ------------------------
 
@@ -337,9 +417,11 @@ class PatchGraph:
         rules the canvas argues about and the rules the sound obeys are one
         set of rules. Three things stay here, each for a stated reason:
 
-        - **Modulation cables.** A knob is not an engine port until #208.
-          The engine has no rule to delegate to; these are still judged by
-          the copy below, and that copy is the only one there is.
+        - **Modulation cables, with no engine attached.** #208 gave the
+          engine a real rule for these (`judge_modulation()`), delegated to
+          the same way sound cables are (`_engine_verdict_modulation()`);
+          the copy below only still answers when there is no engine to ask,
+          same as every sound-cable check below it.
         - **Two checks the engine cannot phrase as well.** "That module is
           no longer on the canvas" and "X has nothing to take sound in" are
           about the canvas's own furniture; the engine's equivalents talk
@@ -358,17 +440,26 @@ class PatchGraph:
         source = self._nodes.get(source_id)
         if source is None:
             return Verdict(False, "That module is no longer on the canvas.")
-        source_is_mod = source.out_kind == KIND_MOD
+        # A `KIND_BOTH` node (today only the LFO, #208's softening) can do
+        # either -- which one a given cable is doing is decided by which
+        # jack it left from and where it lands, never by the node alone.
+        source_sends_mod = source.out_kind in (KIND_MOD, KIND_BOTH)
+        source_sends_audio = source.out_kind in (KIND_AUDIO, KIND_BOTH)
         dest = self._nodes.get(target.node_id)
         if dest is None:
             return Verdict(False, "That module is no longer on the canvas.")
 
         if target.kind == "knob":
-            if not source_is_mod:
+            if not source_sends_mod:
                 return Verdict(False, (
                     f"{source.title} sends sound, not knob movement. Sound goes "
                     f"into a square socket; only an LFO or an envelope can grab "
                     f"a knob."))
+            engine = self._engine_verdict_modulation(source_id, target.node_id, target.knob, dest, source)
+            if engine is not None:
+                return engine
+            if source_id == target.node_id:
+                return Verdict(False, f"{source.title} cannot modulate its own knob.")
             if source.side == SIDE_POLY and self.effective_side(target.node_id) == SIDE_MONO:
                 return Verdict(False, (
                     f"{source.title} runs once per held note, and {dest.title} "
@@ -379,7 +470,7 @@ class PatchGraph:
             return Verdict(True)
 
         # A sound cable, into a socket.
-        if source_is_mod:
+        if not source_sends_audio:
             return Verdict(False, (
                 f"{source.title} sends knob movement, not sound. Drop it on the "
                 f"knob you want it to turn."))
@@ -438,6 +529,30 @@ class PatchGraph:
             return Verdict(False, f"{source.title} is already patched into {dest.title}.")
         return Verdict(False, verdict.reason)
 
+    def _engine_verdict_modulation(self, source_id, dest_id, label, dest, source):
+        """The engine's answer to one modulation cable (#208), translated,
+        or `None` when there is no engine to ask -- `_engine_verdict()`'s
+        counterpart for a knob rather than a socket.
+
+        Same two deliberate translations: the engine's `Verdict.code` is
+        used and dropped, and a duplicate keeps this file's sentence
+        ("already on that knob") rather than the engine's, which names a
+        parameter id the user has never seen spelled out. Every other
+        sentence -- not modulatable, self-modulation, the poly-boundary
+        refusal -- is `judge_modulation()`'s own wording, unedited: the
+        brief's own instruction (#208/#210) is to use it, not improve it.
+        """
+        if self.engine_judge_modulation is None:
+            return None
+        verdict = self.engine_judge_modulation(source_id, dest_id, label)
+        if verdict is None:
+            return None
+        if verdict.ok:
+            return Verdict(True)
+        if verdict.code == REFUSE_DUPLICATE:
+            return Verdict(False, f"{source.title} is already on that knob.")
+        return Verdict(False, verdict.reason)
+
     def _is_delay(self, node_id):
         spec = self._nodes.get(node_id)
         return bool(spec and spec.is_delay)
@@ -447,18 +562,27 @@ class PatchGraph:
     def snapshot(self):
         """Cables as plain tuples, for the per-patch workspace state
         `synth_view` already keeps. Particle state is deliberately not
-        saved: a restored cable settles into its hang on the first frame."""
-        return [(c.source, c.dest, c.knob) for c in self.cables]
+        saved: a restored cable settles into its hang on the first frame.
+        The fourth entry is `depth`, meaningful only for a knob cable
+        (`1.0`, the engine's own default, for a sound cable that never
+        reads it)."""
+        return [(c.source, c.dest, c.knob, c.depth) for c in self.cables]
 
     def restore(self, entries):
         self.cables = []
-        for source, dest, knob in entries:
+        for entry in entries:
+            # A workspace saved before depth existed carries 3-tuples;
+            # both shapes restore the same way, `depth` defaulting to the
+            # engine's own unity value.
+            source, dest, knob = entry[0], entry[1], entry[2]
+            depth = entry[3] if len(entry) > 3 else 1.0
             if source not in self._nodes:
                 continue
             if knob is not None:
                 if knob[0] not in self._nodes:
                     continue
-                self.connect(source, Target("knob", knob[0], knob[1]))
+                cable = self.connect(source, Target("knob", knob[0], knob[1]))
+                cable.depth = depth
             elif dest in self._nodes:
                 self.connect(source, Target("socket", dest))
 

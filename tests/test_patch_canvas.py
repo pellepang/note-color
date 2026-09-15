@@ -277,6 +277,101 @@ def test_modulation_lands_on_a_knob(fixture):
     assert [c.knob for c in cables] == [("filter", "Cutoff")]
 
 
+# -- the LFO's two outputs (#208's softening) -----------------------------
+
+def test_a_dual_output_module_gets_two_jack_columns(fixture):
+    fixture.open(_poly("lfo", "LFO", can_in=False, out_kind=pg.KIND_BOTH))
+    outs = fixture.sockets("lfo", "out")
+    # One spare of each kind, stacked flat: Out (audio, square) above Mod
+    # (round) -- decision 57 §4's "one more than the used amount", doubled
+    # per output kind rather than shared between them.
+    assert [s.kind for s in outs] == [pg.KIND_AUDIO, pg.KIND_MOD]
+    assert all(s.spare for s in outs)
+
+
+def test_each_output_kind_grows_its_own_spare_independently(fixture):
+    fixture.open(_poly("lfo", "LFO", can_in=False, out_kind=pg.KIND_BOTH))
+    fixture.open(_poly("filter", "FILTER"), at=(300, 40))
+    fixture.open(_poly("filter2", "FILTER 2"), at=(300, 200))
+    fixture.layer.graph.connect("lfo", pg.Target("socket", "filter"))
+    fixture.layer.relayout()
+
+    outs = fixture.sockets("lfo", "out")
+    assert [s.kind for s in outs] == [pg.KIND_AUDIO, pg.KIND_AUDIO, pg.KIND_MOD]
+    assert [s.spare for s in outs] == [False, True, True]
+
+
+def test_the_lfo_s_audio_jack_patches_sound_like_any_other_source(fixture):
+    fixture.open(_poly("lfo", "LFO", can_in=False, out_kind=pg.KIND_BOTH))
+    fixture.open(_poly("filter", "FILTER"), at=(300, 40))
+    verdict = fixture.layer.graph.judge("lfo", pg.Target("socket", "filter"))
+    assert verdict.ok
+
+
+# -- the depth ring (decision 66 §4, #210 §3) -----------------------------
+
+def _mouse_event(kind, point, button=QtCore.Qt.LeftButton, buttons=None):
+    buttons = button if buttons is None else buttons
+    return QtGui.QMouseEvent(kind, QtCore.QPointF(*point), QtCore.QPointF(*point),
+                             button, buttons, QtCore.Qt.NoModifier)
+
+
+def test_the_ring_is_found_under_the_cursor_and_names_its_cable(fixture):
+    fixture.open(_poly("lfo", "LFO", can_in=False, out_kind=pg.KIND_MOD))
+    fixture.open(_poly("filter", "FILTER"), at=(300, 40))
+    cable = fixture.layer.graph.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    fixture.layer.relayout()
+    fixture.layer._tick()
+
+    cx, cy, radius = fixture.layer._knob_ring("filter", "Cutoff")
+    assert fixture.layer._ring_hit((cx, cy - radius)) == ("filter", "Cutoff", cable)
+    assert fixture.layer._ring_hit((cx, cy - radius - 40)) is None  # well clear of it
+
+
+def test_dragging_the_ring_changes_the_cables_depth_live(fixture):
+    fixture.open(_poly("lfo", "LFO", can_in=False, out_kind=pg.KIND_MOD))
+    fixture.open(_poly("filter", "FILTER"), at=(300, 40))
+    cable = fixture.layer.graph.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    cable.depth = 0.0
+    fixture.layer.relayout()
+    fixture.layer._tick()
+
+    cx, cy, radius = fixture.layer._knob_ring("filter", "Cutoff")
+    top = (cx, cy - radius)
+    started = fixture.layer._try_start_depth_drag(
+        fixture.canvas, _mouse_event(QtCore.QEvent.MouseButtonPress, top))
+    assert started is True
+    assert fixture.layer._turning == ("filter", "Cutoff")
+
+    changes = []
+    fixture.layer.depth_changed = lambda *args: changes.append(args)
+    lifted = (top[0], top[1] - 60)  # dragging up: depth should rise
+    fixture.layer._update_depth_drag(
+        _mouse_event(QtCore.QEvent.MouseMove, lifted, buttons=QtCore.Qt.NoButton))
+    assert cable.depth > 0.0
+    assert changes == [("lfo", "filter", "Cutoff", cable.depth)]
+
+    fixture.layer._end_depth_drag()
+    assert fixture.layer._depth_drag is None
+    assert fixture.layer._turning is None
+    assert "depth ·" in fixture.statuses[-1][0]
+
+
+def test_a_second_press_on_the_ring_does_not_start_two_drags(fixture):
+    fixture.open(_poly("lfo", "LFO", can_in=False, out_kind=pg.KIND_MOD))
+    fixture.open(_poly("filter", "FILTER"), at=(300, 40))
+    fixture.layer.graph.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    fixture.layer.relayout()
+    fixture.layer._tick()
+
+    cx, cy, radius = fixture.layer._knob_ring("filter", "Cutoff")
+    top = (cx, cy - radius)
+    assert fixture.layer._try_start_depth_drag(
+        fixture.canvas, _mouse_event(QtCore.QEvent.MouseButtonPress, top)) is True
+    assert fixture.layer._try_start_depth_drag(
+        fixture.canvas, _mouse_event(QtCore.QEvent.MouseButtonPress, top)) is False
+
+
 # -- unplugging ---------------------------------------------------------
 
 def test_clicking_a_cable_pulls_it_out(fixture):

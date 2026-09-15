@@ -69,9 +69,10 @@ from notecolor.audio.graph import contract
 from notecolor.audio.graph.contract import Activation
 from notecolor.audio.graph.graph import ModuleGraph
 from notecolor.audio.graph.modules.delay import Delay
-from notecolor.audio.graph.modules.envelope import AmpEnvelope
+from notecolor.audio.graph.modules.envelope import AmpEnvelope, ModEnvelope
 from notecolor.audio.graph.modules.filter import FILTER_TYPES, StateVariableFilter
 from notecolor.audio.graph.modules.level import Level
+from notecolor.audio.graph.modules.lfo import SHAPES as LFO_SHAPES, Lfo
 from notecolor.audio.graph.modules.noise import COLOURS as NOISE_COLOURS, Noise
 from notecolor.audio.graph.modules.oscillator import WavetableOscillator
 from notecolor.audio.graph.modules.passthrough import Passthrough
@@ -91,12 +92,30 @@ MODULE_FACTORIES = {
     "amp_env": lambda cfg: AmpEnvelope(),
     "delay": lambda cfg: Delay(),
     "level": lambda cfg: Level(),
+    # `mode` is always "per_note" here: the canvas offers one "lfo" type
+    # key, never dropped on the once-only side (it is not in `MONO_TYPES`),
+    # so the construction choice #208's module docstring describes as
+    # fixed-at-drop never has a second value to choose on this canvas yet.
+    "lfo": lambda cfg: Lfo(mode="per_note"),
+    # Per-note only, no mode switch -- decision 67: "a DAHDSR without a
+    # note's gate to key off has no cycle to run."
+    "mod_env": lambda cfg: ModEnvelope(),
 }
 
 #: Canvas nodes that are deliberately absent from the engine graph: they
-#: cannot be an end of a sound cable, so leaving them out takes nothing out
-#: of the signal path. See the module docstring.
-NOT_IN_ENGINE = frozenset({"lfo", "filter_env", "voice"})
+#: cannot be an end of a sound cable and send no modulation the engine can
+#: route yet, so leaving them out takes nothing out of the signal path.
+#: See the module docstring. `lfo` and `mod_env` are *not* here -- #208
+#: gave them real modules (`lfo` a sound path too, via its softened Out
+#: jack; `mod_env` a Mod jack only, decision 67). `filter_env` stays until
+#: it has one of its own.
+NOT_IN_ENGINE = frozenset({"filter_env", "voice"})
+
+#: A modulation source's Mod-out port id, by canvas type key -- what
+#: `build_graph()` names as the `source_port` half of `ModConnection`.
+#: `filter_env` has no entry -- it has no engine module yet (stage 2, #208
+#: §"what is left open"), so no source port to name.
+MOD_SOURCE_PORTS = {"lfo": "mod", "mod_env": "mod"}
 
 #: Construction settings a factory reads, per type key. Anything not listed
 #: reaches the module as a parameter instead.
@@ -113,6 +132,12 @@ CONSTRUCTION_KEYS = {"osc1": ("waveform",), "osc2": ("waveform",)}
 CHOICE_OPTIONS = {
     ("filter", "type"): FILTER_TYPES,
     ("noise", "colour"): NOISE_COLOURS,
+    ("lfo", "shape"): LFO_SHAPES,
+    # `retrigger` is a real 0/1 `ParamSpec` (steps=2), not a string on the
+    # engine side -- this entry exists only because the canvas shows it as
+    # an "off"/"on" choice for a nicer knob than a raw 0/1 int, `synth_view.
+    # UTILITY_PARAM_SPECS["lfo"]`'s own reason for choosing `KIND_CHOICE`.
+    ("lfo", "retrigger"): ("off", "on"),
 }
 
 
@@ -136,36 +161,59 @@ def _waveform(cfg):
 
 
 def carries_sound(spec):
-    """Does a canvas node sit on the sound path at all?
+    """Does a canvas node sit on the *sound* path at all?
 
-    True for anything that can take sound in or send sound out; false for a
-    modulation source (its cable goes onto a knob, never into a socket) and
-    for `voice`, which has no jacks. This is asked of the canvas's own
-    `NodeSpec` rather than of a type-key list, so a node type added to the
-    drawer later is classified by what it declares.
+    True for anything that can take sound in or send sound out (including
+    a `KIND_BOTH` node's softened Out jack); false for a mod-only source
+    (its cable goes onto a knob, never into a socket) and for `voice`,
+    which has no jacks. This is asked of the canvas's own `NodeSpec` rather
+    than of a type-key list, so a node type added to the drawer later is
+    classified by what it declares. A node failing this can still be built
+    -- see `sends_modulation()` and `module_for()`.
     """
     if spec.node_id in NOT_IN_ENGINE:
         return False
-    return bool(spec.can_in or (spec.can_out and spec.out_kind == pg.KIND_AUDIO))
+    return bool(spec.can_in
+                or (spec.can_out and spec.out_kind in (pg.KIND_AUDIO, pg.KIND_BOTH)))
+
+
+def sends_modulation(spec):
+    """Does a canvas node have a *real* Mod jack -- one an engine module
+    actually emits, rather than #208's remaining "no module yet" case
+    (`filter_env`, `NOT_IN_ENGINE`)?
+
+    A mod-only source has no sound-path fallback the way an unrecognised
+    sound node becomes a `Passthrough`: there is no such thing as a wire
+    that passes modulation through unchanged and does nothing else, so a
+    mod-only type key with no factory stays out of the engine entirely
+    rather than becoming some invented stand-in.
+    """
+    if spec.node_id in NOT_IN_ENGINE:
+        return False
+    return spec.out_kind in (pg.KIND_MOD, pg.KIND_BOTH) and spec.node_id in MODULE_FACTORIES
 
 
 def module_for(spec, settings=None):
     """The engine module one canvas node becomes, or `None` for a node that
-    is not on the sound path.
+    is on neither the sound path nor a real modulation route.
 
-    A type key with no factory becomes a `Passthrough` rather than nothing
-    -- see `modules/passthrough.py`. The caller can tell the two apart by
-    asking `MODULE_FACTORIES`, which is what `build_graph()` does to fill in
-    `notices`.
+    A type key on the sound path with no factory becomes a `Passthrough`
+    rather than nothing -- see `modules/passthrough.py`. The caller can
+    tell the two apart by asking `MODULE_FACTORIES`, which is what
+    `build_graph()` does to fill in `notices`. A mod-only node (`lfo`
+    excepted -- it carries sound too, `KIND_BOTH`) has no such fallback:
+    see `sends_modulation()`.
     """
     if spec.is_mix:
         return MixModule()
-    if not carries_sound(spec):
-        return None
-    factory = MODULE_FACTORIES.get(spec.node_id)
-    if factory is None:
-        return Passthrough(name=spec.title)
-    return factory(dict(settings or {}))
+    if carries_sound(spec):
+        factory = MODULE_FACTORIES.get(spec.node_id)
+        if factory is None:
+            return Passthrough(name=spec.title)
+        return factory(dict(settings or {}))
+    if sends_modulation(spec):
+        return MODULE_FACTORIES[spec.node_id](dict(settings or {}))
+    return None
 
 
 def takes_sound_in(type_key):
@@ -186,6 +234,57 @@ def takes_sound_in(type_key):
                for p in module.ports())
 
 
+#: `(type_key, canvas label) -> param_id`, for the knobs where the canvas's
+#: own label (abbreviated to fit a knob, `tui/synth_params.py`'s and
+#: `synth_view.EFFECT_PARAM_SPECS`'s house style -- "Reso", "EnvAmt")
+#: doesn't read letter-for-letter like the engine `ParamSpec.name` beside
+#: it. Most labels do match (`filter.py`'s own "Reso" for `resonance`), so
+#: `param_id_for_label()` tries that first and this table only carries the
+#: exceptions: `oscillator.py`'s `pulse_width` is named "Width" there but
+#: "PW" on the canvas (`_osc_specs`); `filter.py`'s `key_tracking` is
+#: "Key" there but "KeyTrk" on the canvas; `delay.py`'s `feedback` and
+#: `damping` are "Feedback"/"Damping" there but "Fdbk"/"Damp" on the
+#: canvas (`EFFECT_PARAM_SPECS`). Found by a mod cable onto Delay's
+#: Feedback silently doing nothing in a screenshot check -- the exact
+#: "rots" `_graph_parameters()`'s own docstring already warns a
+#: hand-kept second mapping does, so this one stays as small as the real
+#: mismatches, not a wholesale retyping of every label.
+LABEL_ALIASES = {
+    ("osc1", "PW"): "pulse_width",
+    ("osc2", "PW"): "pulse_width",
+    ("filter", "KeyTrk"): "key_tracking",
+    ("delay", "Fdbk"): "feedback",
+    ("delay", "Damp"): "damping",
+}
+
+
+def param_id_for_label(type_key, label):
+    """The engine parameter a canvas knob's display label names, or `None`
+    -- a knob with no engine parameter behind it yet (`filter.env_amount`)
+    or a label belonging to a type key the engine has no module for.
+
+    Matched by name first: most engine `ParamSpec.name`s are written to
+    read exactly like the knob beside them (`filter.py`'s "Reso" for
+    `resonance`, `oscillator.py`'s "Fine" for `fine`), the same convention
+    `CHOICE_OPTIONS` already leans on for a choice's options. `LABEL_
+    ALIASES` above covers the labels that do not, so this is what lets a
+    modulation cable's destination -- a knob the user sees a *label* on,
+    never a parameter id -- become a real `ModConnection` (#208) without a
+    second, hand-kept label table for every knob, only for the exceptions.
+    """
+    alias = LABEL_ALIASES.get((type_key, label))
+    if alias is not None:
+        return alias
+    factory = MODULE_FACTORIES.get(type_key)
+    if factory is None:
+        return None
+    module = factory({})
+    for spec in module.parameters():
+        if spec.name == label:
+            return spec.param_id
+    return None
+
+
 def poly_for(spec):
     """The side of Mix the canvas has put this node on, in the engine's own
     vocabulary. Mix itself declares its own -- it is the boundary, not a
@@ -200,9 +299,9 @@ def build_graph(specs, cables, settings=None):
     """A `ModuleGraph` for what is on the canvas, plus the notices the user
     should be told about it.
 
-    `specs` are `patch_graph.NodeSpec`s, `cables` are `patch_graph.Cable`s
-    (only the ones with a `dest` -- a knob cable is modulation, which has no
-    engine layer yet), and `settings` is `{type_key: {name: value}}` for the
+    `specs` are `patch_graph.NodeSpec`s, `cables` are `patch_graph.Cable`s --
+    both sound cables (`dest` set) and modulation cables (`knob` set,
+    #208) -- and `settings` is `{type_key: {name: value}}` for the
     construction choices in `CONSTRUCTION_KEYS`.
 
     Returns `(graph, notices)`. `notices` is a list of plain sentences, in
@@ -223,15 +322,38 @@ def build_graph(specs, cables, settings=None):
         if not spec.is_mix and spec.node_id not in MODULE_FACTORIES:
             notices.append(f"{spec.title} passes sound through unchanged")
     for cable in cables:
-        if cable.dest is None:
+        if cable.dest is not None:
+            if cable.source in built and cable.dest in built:
+                # `force_connect`, not `connect`: the canvas has already
+                # judged every cable it accepted, and a restored workspace
+                # may hold one that predates a rule. A cable the engine
+                # cannot build shows up as a refusal from `activate()`,
+                # where it can be reported, not as a cable silently dropped
+                # here.
+                graph.force_connect(cable.source, "out", cable.dest, "in")
             continue
-        if cable.source in built and cable.dest in built:
-            # `force_connect`, not `connect`: the canvas has already judged
-            # every cable it accepted, and a restored workspace may hold one
-            # that predates a rule. A cable the engine cannot build shows up
-            # as a refusal from `activate()`, where it can be reported, not
-            # as a cable silently dropped here.
-            graph.force_connect(cable.source, "out", cable.dest, "in")
+        if cable.knob is None:
+            continue
+        dest_id, label = cable.knob
+        if cable.source not in built or dest_id not in built:
+            continue
+        source_port = MOD_SOURCE_PORTS.get(cable.source)
+        param_id = param_id_for_label(dest_id, label)
+        if source_port is None or param_id is None:
+            # Either the source has no engine Mod jack yet (`filter_env`,
+            # stage 2) or the destination knob has no engine parameter yet
+            # (`filter.env_amount`) -- both already covered by the "turns
+            # nothing yet" / "does nothing yet" notices at build time
+            # (`patch_bridge`'s module docstring), so a cable onto one is
+            # silently inert here rather than a second thing to report.
+            continue
+        # `force_connect_modulation`, not `connect_modulation`: same reason
+        # as the sound-cable path above -- the canvas has already judged
+        # this cable, and a restored workspace's leftover poly-crossing
+        # cable is `PolyGraph.activate()`'s `illegal_mod` check to catch
+        # and report, not this function's.
+        graph.force_connect_modulation(cable.source, source_port, dest_id, param_id,
+                                        depth=cable.depth)
     return graph, notices
 
 
@@ -389,6 +511,54 @@ class PatchBridge:
         except contract.ContractError:
             return False
         return True
+
+    # -- modulation (#208) -----------------------------------------------------
+
+    def set_modulation_depth(self, source_id, dest_id, label, value):
+        """The ring's write path (decision 66 §4, #210 §3's dashed ring),
+        live and without a rebuild -- `ModuleGraph.set_modulation_depth()`
+        edits a shared array slot every voice's `ModRoute` already reads,
+        so a value written here is audible on the very next block.
+
+        Silently does nothing when there is no graph playing, or when
+        `label` does not name a real engine parameter -- the same "a knob
+        that waits is better than one that raises" convention
+        `set_parameter()` already follows.
+        """
+        if self.playing is None:
+            return False
+        source_port = MOD_SOURCE_PORTS.get(source_id)
+        param_id = param_id_for_label(dest_id, label)
+        if source_port is None or param_id is None:
+            return False
+        return self.playing.graph.set_modulation_depth(
+            source_id, source_port, dest_id, param_id, value)
+
+    def judge_modulation(self, source_id, dest_id, label):
+        """The engine's verdict on one modulation cable, or None when there
+        is no graph to ask, or when either end has no engine module or the
+        knob names no real engine parameter -- in every such case
+        `patch_graph` falls back to its own copy of the rules, the same
+        contract `judge()` above keeps for a sound cable.
+
+        `label` is the display text the knob was registered under
+        (`Knob.label()`'s docstring: "the half of its identity the patch
+        layer keys modulation cables on"), turned into the engine's
+        `param_id` by `param_id_for_label()` -- the canvas never learns the
+        word `param_id`, the same way it never learns the word `port`.
+        """
+        poly = self.poly
+        if poly is None:
+            return None
+        if poly.graph.node(source_id) is None or poly.graph.node(dest_id) is None:
+            return None
+        source_port = MOD_SOURCE_PORTS.get(source_id)
+        if source_port is None:
+            return None
+        param_id = param_id_for_label(dest_id, label)
+        if param_id is None:
+            return None
+        return poly.judge_modulation(source_id, source_port, dest_id, param_id)
 
     # -- notes ---------------------------------------------------------------
 

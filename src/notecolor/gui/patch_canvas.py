@@ -82,6 +82,29 @@ MESSAGE_MS = 4000
 #: a wheel step has no "let go" to end the highlight the way a drag does.
 WHEEL_LIT_MS = 700
 
+#: How close the cursor has to land to a knob's dashed ring to grab it
+#: (decision 66 §4, #210 §3): a band around the ring rather than the exact
+#: radius, the same generosity `CABLE_HIT_TOLERANCE` gives a cable.
+RING_HIT_TOLERANCE = 7.0
+
+#: Concentric rings step outward by this much per extra source stacked on
+#: one knob, so "every source currently tugging on that knob" (decision
+#: 66 §4's own words) is legible as more than one source rather than one
+#: ring nobody can tell apart.
+RING_STACK_STEP = 4.0
+
+#: Vertical drag pixels for a full -1..+1 sweep of a connection's depth --
+#: a guess (matched to `Knob.DRAG_PIXELS_PER_STEP`'s own scale for a
+#: full-range drag), not measured against the real hand yet; the owner's
+#: to re-judge on the real canvas, the same the way decision 57 §5 flags
+#: sag/swing/resting-brightness as prototype guesses.
+DEPTH_DRAG_PIXELS_PER_UNIT = 120.0
+
+#: Degrees of arc at full depth (|1.0|) -- half the ring, a common
+#: modulation-depth convention (Massive/Serum-style). A judgment call, not
+#: settled by decision 57/66; flagged in the same place.
+DEPTH_ARC_MAX_DEGREES = 180.0
+
 #: The Mix stripe's fixed width, and where across the canvas it sits.
 #: Decision 57 §1: the stripe costs ~150px of canvas permanently, which is
 #: exactly why it was a design call and not a setting.
@@ -327,7 +350,16 @@ class PatchLayer(QtCore.QObject):
         self._focused_node = None
         self._turning = None      # (node_id, knob label) while a knob is moving
         self._drag = None
+        self._depth_drag = None   # a ring is being dragged (decision 66 §4)
         self._refusal = None      # {"text", "point"}
+        #: `depth_changed(source_id, dest_id, label, value)`, set by
+        #: `synth_view` to `PatchBridge.set_modulation_depth` -- the ring's
+        #: write path is live and needs no rebuild (`ModuleGraph.
+        #: set_modulation_depth()`), so a value dragged here reaches the
+        #: audio thread on the very next block. `None` -- no bridge, or a
+        #: headless test -- just means the cable's own `depth` field (still
+        #: updated below) is all that changes.
+        self.depth_changed = None
 
         self._awake = WAKE_FRAMES
         self._timer = QtCore.QTimer(self)
@@ -427,9 +459,16 @@ class PatchLayer(QtCore.QObject):
             self._reserve_for_sockets(spec.node_id, max(in_count, out_count))
             for slot in range(in_count):
                 wanted[(spec.node_id, "in", slot)] = (pg.KIND_AUDIO, slot == in_count - 1)
-            for slot in range(out_count):
-                kind = spec.out_kind
-                wanted[(spec.node_id, "out", slot)] = (kind, slot == out_count - 1)
+            # More than one group only for a `KIND_BOTH` node (today only
+            # the LFO, #208's softening): its Out jacks stack above its Mod
+            # jacks, flat slot numbers running straight through both --
+            # `PatchGraph.slot_of()`'s `_kind_offset()` computes the exact
+            # same numbers, so a cable always finds the jack it was given.
+            offset = 0
+            for kind, count in self.graph.output_groups(spec.node_id):
+                for i in range(count):
+                    wanted[(spec.node_id, "out", offset + i)] = (kind, i == count - 1)
+                offset += count
 
         for key in [k for k in self._sockets if k not in wanted]:
             socket = self._sockets.pop(key)
@@ -699,10 +738,15 @@ class PatchLayer(QtCore.QObject):
 
     def paint_rings(self, p):
         """The dashed ring every modulated knob wears -- brighter while
-        that knob is being turned (decision 57 §3). Painted here rather
-        than in `Knob.paintEvent` for two reasons: the ring sits outside
-        the knob's own rect and would be clipped, and decision 57 settles
-        the knob's painting as unchanged."""
+        that knob is being turned (decision 57 §3), one concentric ring per
+        source stacked on it (decision 66 §4: "showing every source
+        currently tugging on that knob"), each carrying a filled arc for
+        its own depth -- clockwise from noon for a positive depth,
+        counter-clockwise for a negative one, swept out to
+        `DEPTH_ARC_MAX_DEGREES` at the full bipolar extreme. Painted here
+        rather than in `Knob.paintEvent` for two reasons: the ring sits
+        outside the knob's own rect and would be clipped, and decision 57
+        settles the knob's painting as unchanged."""
         for (node_id, label), _knob in self._knobs.items():
             cables = self.graph.knob_cables(node_id, label)
             target = self._drag_knob_target()
@@ -712,19 +756,46 @@ class PatchLayer(QtCore.QObject):
             ring = self._knob_ring(node_id, label)
             if ring is None:
                 continue
-            cx, cy, radius = ring
+            cx, cy, base_radius = ring
             if is_target:
                 ok = self._drag.get("ok", False)
                 colour = _qcolour(theme.CLAY_RED if not ok else theme.CORAL)
                 pen = QtGui.QPen(colour, 1)
-            else:
-                lit = any(self._is_lit(c) for c in cables)
+                p.setPen(pen)
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawEllipse(QtCore.QPointF(cx, cy), base_radius, base_radius)
+                continue
+            for index, cable in enumerate(cables):
+                radius = base_radius + index * RING_STACK_STEP
+                being_dragged = (self._depth_drag is not None
+                                  and self._depth_drag["cable"] is cable)
+                lit = being_dragged or self._is_lit(cable)
                 alpha = 255 if lit else int(255 * self.appearance.resting_brightness * 0.85)
                 pen = QtGui.QPen(_qcolour(pg.ROLE_COLOURS[pg.KIND_MOD], alpha), 1)
                 pen.setStyle(QtCore.Qt.DashLine)
-            p.setPen(pen)
-            p.setBrush(QtCore.Qt.NoBrush)
-            p.drawEllipse(QtCore.QPointF(cx, cy), radius, radius)
+                p.setPen(pen)
+                p.setBrush(QtCore.Qt.NoBrush)
+                p.drawEllipse(QtCore.QPointF(cx, cy), radius, radius)
+                self._paint_depth_arc(p, cx, cy, radius, cable.depth,
+                                      alpha if not lit else 255, lit)
+
+    def _paint_depth_arc(self, p, cx, cy, radius, depth, alpha, lit):
+        if abs(depth) < 0.005:
+            return
+        span_degrees = DEPTH_ARC_MAX_DEGREES * min(abs(depth), 1.0)
+        # Qt's angle unit is 1/16th of a degree, zero at 3 o'clock,
+        # positive turning counter-clockwise -- 90*16 starts at noon, and a
+        # *negative* span sweeps clockwise, which is what a positive depth
+        # (turning the knob up) reads as.
+        start = 90 * 16
+        span = -span_degrees * 16 if depth > 0 else span_degrees * 16
+        rect = QtCore.QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
+        pen = QtGui.QPen(_qcolour(pg.ROLE_COLOURS[pg.KIND_MOD], min(255, alpha + 40)),
+                         2.6 if lit else 2.0)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        p.setPen(pen)
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawArc(rect, int(start), int(span))
 
     def _drag_knob_target(self):
         if self._drag is None:
@@ -855,14 +926,90 @@ class PatchLayer(QtCore.QObject):
     def eventFilter(self, obj, event):
         kind = event.type()
         if kind == QtCore.QEvent.MouseMove:
+            if self._depth_drag is not None:
+                self._update_depth_drag(event)
+                return True
             self._update_hover(self._to_canvas(obj, event))
         elif kind == QtCore.QEvent.MouseButtonPress:
+            if self._try_start_depth_drag(obj, event):
+                return True
             if self._try_unplug(obj, event):
                 return True
             self.clear_refusal()
+        elif kind == QtCore.QEvent.MouseButtonRelease:
+            if self._depth_drag is not None and event.button() == QtCore.Qt.LeftButton:
+                self._end_depth_drag()
+                return True
         elif kind == QtCore.QEvent.Leave and obj is self.canvas:
             self._update_hover(None)
         return False
+
+    # -- the depth-ring gesture (decision 66 §4, #210 §3) ---------------
+
+    def _ring_hit(self, point):
+        """Which cable's ring is under `point`, if any: the nearest source
+        by angle around the ring, among the knobs whose ring passes within
+        `RING_HIT_TOLERANCE` of the click -- the same generosity
+        `_cable_at()` gives a cable, and the mechanism a cable's own entry
+        angle around the ring (`_endpoints()`) already computes, reused
+        here as the natural way to pick one source out of several stacked
+        on the same knob: click near where *that* cable meets the ring."""
+        best, best_distance = None, RING_HIT_TOLERANCE
+        for (node_id, label) in list(self._knobs):
+            cables = self.graph.knob_cables(node_id, label)
+            if not cables:
+                continue
+            ring = self._knob_ring(node_id, label)
+            if ring is None:
+                continue
+            cx, cy, base_radius = ring
+            for index, cable in enumerate(cables):
+                radius = base_radius + index * RING_STACK_STEP
+                distance = abs(math.hypot(point[0] - cx, point[1] - cy) - radius)
+                if distance < best_distance:
+                    best, best_distance = (node_id, label, cable), distance
+        return best
+
+    def _try_start_depth_drag(self, obj, event):
+        if event.button() != QtCore.Qt.LeftButton or self._drag is not None \
+                or self._depth_drag is not None:
+            return False
+        hit = self._ring_hit(self._to_canvas(obj, event))
+        if hit is None:
+            return False
+        node_id, label, cable = hit
+        self._depth_drag = {
+            "node": node_id, "label": label, "cable": cable,
+            "start_y": event.globalPosition().y(), "start_depth": cable.depth,
+            "grabbed": obj,
+        }
+        obj.grabMouse()
+        self.clear_refusal()
+        self._turning = (node_id, label)
+        self._focused_node = node_id
+        self.wake()
+        return True
+
+    def _update_depth_drag(self, event):
+        drag = self._depth_drag
+        # Up increases depth (towards +1), matching `Knob`'s own vertical
+        # drag convention (`Knob.mouseMoveEvent`'s "up is more").
+        delta = (drag["start_y"] - event.globalPosition().y()) / DEPTH_DRAG_PIXELS_PER_UNIT
+        value = drag["start_depth"] + delta
+        cable = drag["cable"]
+        self.graph.set_depth(cable, value)
+        if self.depth_changed is not None:
+            self.depth_changed(cable.source, drag["node"], drag["label"], cable.depth)
+        self.wake()
+
+    def _end_depth_drag(self):
+        drag = self._depth_drag
+        drag["grabbed"].releaseMouse()
+        self._depth_drag = None
+        self._turning = None
+        cable = drag["cable"]
+        self._announce(f"depth · {self.cable_label(cable)} · {cable.depth:+.2f}")
+        self.wake()
 
     def _to_canvas(self, obj, event):
         point = event.position().toPoint()

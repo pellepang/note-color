@@ -106,14 +106,37 @@ def test_a_module_the_engine_cannot_play_becomes_a_wire_and_says_so():
     assert notices == ["Chorus passes sound through unchanged"]
 
 
-def test_a_modulation_source_is_not_in_the_engine_graph_at_all():
-    """An LFO's cable goes onto a knob, never into a socket, so it is not
-    an end of any sound cable and leaving it out removes nothing from the
-    signal path. It is still named, because its knobs do nothing yet."""
-    specs = _specs(pg.NodeSpec("lfo", "LFO", can_in=False, out_kind=pg.KIND_MOD))
+def test_a_modulation_source_with_no_engine_module_is_not_in_the_graph_at_all():
+    """`filter_env` (#208 stage 2's remaining gap, unlike `lfo`/`mod_env`)
+    has no engine module yet: its cable goes onto a knob, never into a
+    socket, so it is not an end of any sound cable and leaving it out
+    removes nothing from the signal path. It is still named, because its
+    knobs do nothing yet."""
+    specs = _specs(pg.NodeSpec("filter_env", "FILTER ENV", can_in=False, out_kind=pg.KIND_MOD))
     graph, notices = pb.build_graph(specs, [])
-    assert graph.node("lfo") is None
-    assert "LFO turns nothing yet" in notices
+    assert graph.node("filter_env") is None
+    assert "FILTER ENV turns nothing yet" in notices
+
+
+def test_the_lfo_is_a_real_engine_module_with_both_jacks():
+    """#208's deliberate softening: the LFO carries both an audio path
+    (`KIND_BOTH`) and a modulation one, so it must be a real engine module
+    rather than the "mod source has no module" case above."""
+    specs = _specs(pg.NodeSpec("lfo", "LFO", can_in=False, out_kind=pg.KIND_BOTH))
+    graph, notices = pb.build_graph(specs, [])
+    assert graph.node("lfo") is not None
+    assert notices == []
+
+
+def test_a_mod_only_source_with_a_real_module_still_gets_built():
+    """`mod_env` (#208 stage 2, decision 67) has no sound jack at all --
+    `KIND_MOD`, not `KIND_BOTH` -- but it does have an engine module, so it
+    is built like any other node with a factory rather than treated as
+    absent the way `filter_env` still is."""
+    specs = _specs(pg.NodeSpec("mod_env", "MOD ENV", can_in=False, out_kind=pg.KIND_MOD))
+    graph, notices = pb.build_graph(specs, [])
+    assert graph.node("mod_env") is not None
+    assert notices == []
 
 
 def test_the_canvas_decides_which_side_of_mix_a_module_is_on():
@@ -300,6 +323,24 @@ def test_an_oscillator_offers_no_hole_to_put_sound_into():
     assert pb.takes_sound_in("chorus") is True   # it becomes a wire
 
 
+def test_most_knob_labels_match_the_engine_parameter_by_name():
+    assert pb.param_id_for_label("filter", "Cutoff") == "cutoff"
+    assert pb.param_id_for_label("filter", "Reso") == "resonance"
+    assert pb.param_id_for_label("osc1", "Fine") == "fine"
+    assert pb.param_id_for_label("filter", "EnvAmt") is None  # no engine parameter yet
+
+
+def test_a_label_that_reads_differently_on_the_canvas_still_resolves():
+    """Found by a mod cable onto Delay's Feedback silently doing nothing:
+    the canvas abbreviates a few labels differently from the engine's own
+    `ParamSpec.name` (`LABEL_ALIASES`)."""
+    assert pb.param_id_for_label("osc1", "PW") == "pulse_width"
+    assert pb.param_id_for_label("osc2", "PW") == "pulse_width"
+    assert pb.param_id_for_label("filter", "KeyTrk") == "key_tracking"
+    assert pb.param_id_for_label("delay", "Fdbk") == "feedback"
+    assert pb.param_id_for_label("delay", "Damp") == "damping"
+
+
 # -- installing, swapping and failing ---------------------------------------
 
 def test_the_graph_is_handed_over_by_one_assignment_after_it_is_built():
@@ -413,6 +454,144 @@ def test_with_no_engine_attached_the_canvas_answers_everything_itself():
     verdict = canvas.judge("osc1", pg.Target("socket", "chorus"))
     assert not verdict.ok
     assert "MIX" in verdict.reason
+
+
+# -- modulation cables, delegated for real (#208) ----------------------------
+#
+# `_delegating_graph()` above never builds an "lfo" node into the bridge's
+# own engine graph (it is only ever added to the bare canvas), so the tests
+# above it prove the *fallback*, not the delegation. These build a real
+# `PatchBridge` with an LFO in it, wire `engine_judge_modulation` the way
+# `synth_view` does, and exercise `judge_modulation()`'s real wording.
+
+def _lfo():
+    return pg.NodeSpec("lfo", "LFO", can_in=False, out_kind=pg.KIND_BOTH)
+
+
+def _mod_delegating_graph(wired=False):
+    """`wired=True` also lays the default Osc -> Filter -> Amp Env -> Mix
+    sound chain, for a test that needs something to actually hear."""
+    specs = _specs(_lfo())
+    canvas = pg.PatchGraph()
+    for spec in specs:
+        canvas.add_node(spec)
+    if wired:
+        for source, dest in DEFAULT_CHAIN:
+            canvas.connect(source, pg.Target("socket", dest))
+    bridge = pb.PatchBridge(lambda: StubEngine())
+    canvas.engine_judge = bridge.judge
+    canvas.engine_judge_modulation = bridge.judge_modulation
+
+    def resync():
+        bridge.rebuild(canvas.nodes(), canvas.cables)
+
+    resync()
+    return canvas, bridge, resync
+
+
+def test_a_real_modulation_cable_is_accepted_by_the_engine():
+    canvas, _bridge, _resync = _mod_delegating_graph()
+    assert canvas.judge("lfo", pg.Target("knob", "filter", "Cutoff")).ok
+
+
+def test_the_engine_refuses_modulation_onto_a_non_modulatable_knob():
+    """`filter.type` is `modulatable=False` (a filter type has no
+    in-between positions) -- `judge_modulation()`'s own wording, used
+    verbatim rather than a canvas-invented sentence."""
+    canvas, _bridge, _resync = _mod_delegating_graph()
+    verdict = canvas.judge("lfo", pg.Target("knob", "filter", "Type"))
+    assert not verdict.ok
+    assert "does not take modulation" in verdict.reason
+
+
+def test_a_second_destination_on_the_same_source_is_still_fine():
+    canvas, _bridge, resync = _mod_delegating_graph()
+    canvas.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    resync()
+    assert canvas.judge("lfo", pg.Target("knob", "filter", "Reso")).ok
+
+
+def test_the_engine_refuses_the_lfo_modulating_its_own_rate():
+    canvas, _bridge, _resync = _mod_delegating_graph()
+    verdict = canvas.judge("lfo", pg.Target("knob", "lfo", "Rate"))
+    assert not verdict.ok
+    assert "cannot modulate its own knob" in verdict.reason
+
+
+def test_the_engine_keeps_the_canvas_duplicate_sentence_for_modulation_too():
+    canvas, _bridge, resync = _mod_delegating_graph()
+    canvas.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    resync()
+    verdict = canvas.judge("lfo", pg.Target("knob", "filter", "Cutoff"))
+    assert not verdict.ok
+    assert verdict.reason == "LFO is already on that knob."
+
+
+def test_a_connected_modulation_cable_reaches_the_engine_and_is_audible():
+    canvas, bridge, resync = _mod_delegating_graph()
+    canvas.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    resync()
+    assert bridge.playing is not None
+    mc = bridge.playing.graph.mod_connections
+    assert len(mc) == 1
+    assert (mc[0].source, mc[0].source_port, mc[0].dest, mc[0].param_id) == (
+        "lfo", "mod", "filter", "cutoff")
+
+
+def test_the_lfo_s_audio_jack_can_also_patch_into_a_socket():
+    """#208's softening: the same node's Out jack is an ordinary sound
+    cable, judged by the ordinary sound-cable rules."""
+    canvas, _bridge, _resync = _mod_delegating_graph()
+    assert canvas.judge("lfo", pg.Target("socket", "filter")).ok
+
+
+def test_the_ring_edits_depth_live_with_no_rebuild():
+    canvas, bridge, resync = _mod_delegating_graph()
+    canvas.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    resync()
+    revision_before = bridge.playing.graph.revision
+    assert bridge.set_modulation_depth("lfo", "filter", "Cutoff", -0.5)
+    assert bridge.playing.graph.revision == revision_before
+    index = bridge.playing.graph.mod_connections[0].depth_index
+    assert bridge.playing.graph.mod_depths[index] == pytest.approx(-0.5)
+
+
+def test_the_modulation_cable_is_actually_audible():
+    """End to end, the way #208 stage 1's own claim was measured
+    (`docs/decisions/66-...md`): an RMS swing across blocks, present with
+    the cable patched and absent with an unpatched (but still-running)
+    LFO in the same spot -- proving the *cable*, not just the LFO's own
+    sound, is what moves the filter."""
+    def _swing(depth):
+        canvas, bridge, resync = _mod_delegating_graph(wired=True)
+        if depth is not None:
+            cable = canvas.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+            canvas.set_depth(cable, depth)
+        resync()
+        bridge.set_parameter("lfo", "rate", 8.0)
+        bridge.note_on(60)
+        levels = []
+        for _ in range(24):
+            levels.append(float(np.sqrt(np.mean(bridge.playing.output_block(BLOCK) ** 2))))
+        return max(levels) - min(levels)
+
+    modulated = _swing(1.0)
+    unpatched = _swing(None)
+    assert modulated > unpatched * 3
+
+
+def test_a_cables_own_depth_survives_a_rebuild():
+    """The ring writes both places (`patch_canvas.PatchLayer.
+    _update_depth_drag()`): live, via `set_modulation_depth()`, and onto
+    the cable's own `depth` field, which is what a later rebuild
+    (`build_graph()`) reads back into the fresh graph's `mod_depths`."""
+    canvas, bridge, resync = _mod_delegating_graph()
+    cable = canvas.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    resync()
+    canvas.set_depth(cable, 0.3)
+    resync()
+    index = bridge.playing.graph.mod_connections[0].depth_index
+    assert bridge.playing.graph.mod_depths[index] == pytest.approx(0.3)
 
 
 # -- the audio thread allocates nothing --------------------------------------

@@ -60,10 +60,18 @@ SYNTH_CORE_MODULES = [
     ("noise", "Noise"),
     ("lfo", "LFO"),
     ("filter_env", "Filter Env"),
+    # The modulation layer's second source (#208 stage 2, decision 67):
+    # `graph/modules/envelope.ModEnvelope`, a DAHDSR emitted as `PORT_MOD`
+    # rather than multiplying an audio signal the way `filter_env`'s
+    # eventual engine module will. Distinct type key from `filter_env`
+    # rather than the same one gaining a module: `filter_env` still has
+    # none (`patch_bridge.NOT_IN_ENGINE`), and giving it one later should
+    # not silently reclassify every patch that already dropped one.
+    ("mod_env", "Mod Env"),
     ("voice", "Voice"),
     # A plain gain stage (#218) -- the engine has it (`graph/modules/
-    # level.py`), unlike `lfo`/`filter_env`, so it belongs here rather than
-    # with the unimplemented pair even though it is a utility rather than a
+    # level.py`), unlike `filter_env`, so it belongs here rather than with
+    # the unimplemented one even though it is a utility rather than a
     # synth-engine stage; there is no third drawer group for "utility".
     ("level", "Level"),
 ]

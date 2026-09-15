@@ -170,11 +170,80 @@ def _patched_canvas(refuse=False):
     return build
 
 
+def _modulation_canvas(refuse=None):
+    """The Synth View with the modulation layer (#208) actually wired: the
+    LFO's two jacks (Out to OSC 1's Level, Mod onto FILTER's Cutoff, two
+    different depths so the stacked ring shows), a Mod Envelope onto the
+    same knob (two sources on one ring), and -- with `refuse` -- one
+    modulation cable dropped and left refused on screen, to show how each
+    reads (see `_REFUSE_CASES`).
+    """
+    def build():
+        from PySide6 import QtCore, QtWidgets
+        from notecolor.gui import patch_graph
+
+        view = _synth_view()
+        view.resize(1280, 800)
+        view.show()
+        QtWidgets.QApplication.processEvents()
+        splitter = view.splitter
+        splitter.setSizes([sum(splitter.sizes()) - splitter.floor, splitter.floor])
+        QtWidgets.QApplication.processEvents()
+
+        for type_key in ("lfo", "mod_env", "delay"):
+            view.canvas.spawn_module(type_key, QtCore.QPoint(0, 0))
+        view.canvas.tidy()
+
+        layer = view.patch_layer
+        graph = layer.graph
+        sock = patch_graph.Target("socket", "filter")
+        if graph.judge("lfo", sock).ok:
+            graph.connect("lfo", sock)
+
+        cables_by_knob = {}
+        for source, node, knob, depth in (("lfo", "filter", "Cutoff", 0.6),
+                                          ("mod_env", "filter", "Cutoff", -0.35)):
+            target = patch_graph.Target("knob", node, knob)
+            verdict = graph.judge(source, target)
+            if verdict.ok:
+                cable = graph.connect(source, target)
+                graph.set_depth(cable, depth)
+                cables_by_knob[(source, node, knob)] = cable
+        layer.relayout()
+        # Nothing above went through the drag gesture (which fires
+        # `cablesChanged` itself), so the engine graph has to be told by
+        # hand -- otherwise the shot would show cables the bridge never
+        # actually built a `ModConnection` for.
+        view._rebuild_graph()
+
+        for _ in range(150):
+            layer._tick()
+
+        if refuse == "not_modulatable":
+            target = patch_graph.Target("knob", "osc1", "Octave")
+            layer.refuse(target, graph.judge("lfo", target).reason)
+        elif refuse == "poly_boundary":
+            # "Fdbk" is the canvas's own abbreviated label for `delay.
+            # feedback` (`EFFECT_PARAM_SPECS`) -- `param_id_for_label()`'s
+            # `LABEL_ALIASES` is what makes this resolve to a real engine
+            # parameter despite the canvas and the engine naming it
+            # differently.
+            target = patch_graph.Target("knob", "delay", "Fdbk")
+            layer.refuse(target, graph.judge("lfo", target).reason)
+        QtWidgets.QApplication.processEvents()
+        return view
+
+    return build
+
+
 #: name -> zero-argument builder returning the top-level widget to shoot.
 STATES = {
     "synth-view": _synth_view,
     "patch-canvas": _patched_canvas(),
     "patch-refusal": _patched_canvas(refuse=True),
+    "modulation-canvas": _modulation_canvas(),
+    "modulation-refusal-not-modulatable": _modulation_canvas(refuse="not_modulatable"),
+    "modulation-refusal-poly-boundary": _modulation_canvas(refuse="poly_boundary"),
     "drawer-expanded": _synth_view_drawer_expanded,
     "drawer-collapsed": _synth_view_drawer_collapsed,
     "footer-floor": _footer_at(0.0),

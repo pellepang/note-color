@@ -72,3 +72,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [The first merge: the canvas's patch becomes the sound (ticket #207, map #179)](decisions/65-the-first-merge-the-canvas-s-patch-becomes-the-sound-issue-207.md)
 - [The modulation layer: LFO, scalar-or-buffer parameters, and the poly boundary (issue #208, stage 1 of 3)](decisions/66-the-modulation-layer-lfo-scalar-or-buffer-params-and-the-poly-boundary-issue-208.md)
 - [The Mod Envelope, broader destinations, and the modulation-cycle refusal (issue #208 stage 2 of 3, issue #225)](decisions/67-the-mod-envelope-broader-destinations-and-the-modulation-cycle-refusal-issue-208.md)
+- [The canvas plays modulation: the depth ring, and the dual-output jack (issue #208)](decisions/68-the-canvas-plays-modulation-the-depth-ring-and-the-dual-output-jack-issue-208.md)

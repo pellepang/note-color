@@ -150,20 +150,79 @@ EFFECT_TITLES = {"delay": "Delay", "chorus": "Chorus"}
 #: Synth-View-only module must not make (decision 56 §7).
 UTILITY_TYPES = frozenset({"level"})
 
-#: Knob specs for `UTILITY_TYPES`, in the same shape `EFFECT_PARAM_SPECS`
-#: uses -- `spec.section` is unused (there is no `Patch` object underneath),
-#: kept as "params" for `synth_params.step_value()`'s sake, which only
-#: reads `spec.attr`/`spec.kind`/etc.
+#: The LFO shares `UTILITY_TYPES`' path for the identical reason (a graph
+#: module with no `Patch` section) but is kept out of `UTILITY_TYPES`
+#: itself: that set also feeds `MONO_TYPES` below, and an LFO belongs on
+#: the per-note side (`mode="per_note"`, `graph/modules/lfo.py`), not the
+#: once-only one a utility defaults to. `_module_factory()` and
+#: `_on_graph_knob_wheel()` check this alongside `UTILITY_TYPES`; nothing
+#: else needs to.
+#:
+#: Its knob specs replace the old fixed-engine "LFO" section
+#: (`tui/synth_params.py`'s `rate`/`depth`/`delay`/`waveform`/
+#: `destination`, none of which but `rate` name a real `audio/graph`
+#: parameter) rather than reusing it -- reusing it would have left
+#: Shape/Phase/Retrig unreachable from this window and Depth/Delay/Dest
+#: doing nothing, which is worse than a knob panel that matches what the
+#: module actually has (#208's own `Lfo.parameters()`). Destination is
+#: gone outright: it used to be a fixed choice because the fixed engine
+#: had nowhere else to say it; on this canvas the destination is whichever
+#: knob the Mod cable is dropped on.
+GRAPH_ONLY_TYPES = UTILITY_TYPES | {"lfo", "mod_env"}
+
+#: Knob specs for `UTILITY_TYPES` and the LFO, in the same shape
+#: `EFFECT_PARAM_SPECS` uses -- `spec.section` is unused (there is no
+#: `Patch` object underneath), kept as "params" for
+#: `synth_params.step_value()`'s sake, which only reads
+#: `spec.attr`/`spec.kind`/etc. Every `attr` here is the engine module's own
+#: `ParamSpec.param_id` (`patch_bridge.param_id_for_label()` matches by
+#: *label*, not attr, but keeping them equal is what makes the match land).
 UTILITY_PARAM_SPECS = {
     "level": (
         synth_params.ParamSpec("params", "level", "Level", synth_params.KIND_FLOAT,
                                 -2.0, 2.0, 0.05),
     ),
+    "lfo": (
+        synth_params.ParamSpec("params", "rate", "Rate", synth_params.KIND_FLOAT,
+                                0.02, 20.0, 1.2, synth_params.SCALE_LOG, unit="Hz", digits=2),
+        synth_params.ParamSpec("params", "shape", "Shape", synth_params.KIND_CHOICE,
+                                options=("sine", "triangle", "square", "saw")),
+        synth_params.ParamSpec("params", "phase", "Phase", synth_params.KIND_FLOAT,
+                                0.0, 1.0, 0.05, unit="turns"),
+        synth_params.ParamSpec("params", "retrigger", "Retrig", synth_params.KIND_CHOICE,
+                                options=("off", "on")),
+    ),
+    # Matches `graph/modules/envelope.ModEnvelope.parameters()` one for
+    # one, `Vel` included -- decision 67: unipolar, no amount/polarity knob
+    # of its own (depth lives on the cable's ring instead).
+    "mod_env": (
+        synth_params.ParamSpec("params", "delay", "Delay", synth_params.KIND_FLOAT,
+                                0.0, 30.0, 1.3, synth_params.SCALE_LOG, unit="s", digits=3),
+        synth_params.ParamSpec("params", "attack", "Attack", synth_params.KIND_FLOAT,
+                                0.001, 30.0, 1.3, synth_params.SCALE_LOG, unit="s", digits=3),
+        synth_params.ParamSpec("params", "hold", "Hold", synth_params.KIND_FLOAT,
+                                0.0, 30.0, 1.3, synth_params.SCALE_LOG, unit="s", digits=3),
+        synth_params.ParamSpec("params", "decay", "Decay", synth_params.KIND_FLOAT,
+                                0.001, 30.0, 1.3, synth_params.SCALE_LOG, unit="s", digits=3),
+        synth_params.ParamSpec("params", "sustain", "Sustain", synth_params.KIND_FLOAT,
+                                0.0, 1.0, 0.05),
+        synth_params.ParamSpec("params", "release", "Release", synth_params.KIND_FLOAT,
+                                0.001, 30.0, 1.3, synth_params.SCALE_LOG, unit="s", digits=3),
+        synth_params.ParamSpec("params", "velocity", "Vel", synth_params.KIND_FLOAT,
+                                0.0, 1.0, 0.05),
+    ),
 }
 
 #: Mirrors `graph/modules/level.Level.parameters()`'s own default (unity
 #: gain) -- a freshly dropped Level should not need to be found by ear.
-UTILITY_DEFAULTS = {"level": {"level": 1.0}}
+#: `lfo`'s and `mod_env`'s mirror `graph/modules/lfo.Lfo.parameters()`'s
+#: and `graph/modules/envelope.ModEnvelope.parameters()`'s own defaults.
+UTILITY_DEFAULTS = {
+    "level": {"level": 1.0},
+    "lfo": {"rate": 2.0, "shape": "sine", "phase": 0.0, "retrigger": "on"},
+    "mod_env": {"delay": 0.0, "attack": 0.005, "hold": 0.0, "decay": 0.1,
+                "sustain": 0.8, "release": 0.2, "velocity": 0.0},
+}
 
 #: Short descriptive tag shown small/dim next to a module window's title,
 #: per the accepted prototype's mock data -- covers every synth-core type
@@ -176,6 +235,7 @@ TAG_FOR_TYPE = {
     "amp_env": "ADSR",
     "filter_env": "ADSR",
     "lfo": "sine→pitch",
+    "mod_env": "DAHDSR→mod",
     "voice": "poly 16",
     "delay": "1/8 dot",
     "chorus": "detune",
@@ -196,6 +256,7 @@ DOT_COLOR_FOR_TYPE = {
     "amp_env": theme.CORAL,
     "filter_env": theme.CLAY_RED,
     "lfo": theme.AMBER,
+    "mod_env": theme.CLAY_RED,
     "voice": theme.LINEN_DIM,
     "delay": theme.AMBER,
     "chorus": theme.TEAL_PALE,
@@ -220,12 +281,22 @@ DOT_COLOR_FOR_TYPE = {
 MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES) | UTILITY_TYPES
 
 #: Modules that send knob movement rather than sound (#208's port type).
-#: Sound goes into a socket; only these two can grab a knob.
-MOD_SOURCE_TYPES = frozenset({"lfo", "filter_env"})
+#: Sound goes into a socket; only these can grab a knob -- plus
+#: `DUAL_OUTPUT_TYPES` below, which can do either. `filter_env` has no
+#: engine module yet (`patch_bridge.NOT_IN_ENGINE`); `mod_env` (#208 stage
+#: 2, decision 67) does.
+MOD_SOURCE_TYPES = frozenset({"lfo", "filter_env", "mod_env"})
 
-#: Modules with nothing to take sound *in*: the generators, and the two
+#: The one module with *both* an audio jack and a Mod jack (#208's
+#: deliberate softening of decision 56 §5, `modules/lfo.py`'s own
+#: docstring: "an LFO is, mechanically, just a slow oscillator"). Checked
+#: before `MOD_SOURCE_TYPES` in `_node_spec_for()`, since "lfo" is in both
+#: sets and this is the one that should win.
+DUAL_OUTPUT_TYPES = frozenset({"lfo"})
+
+#: Modules with nothing to take sound *in*: the generators, and the
 #: modulation sources.
-NO_AUDIO_IN_TYPES = frozenset({"noise", "lfo", "filter_env", "voice"})
+NO_AUDIO_IN_TYPES = frozenset({"noise", "lfo", "filter_env", "mod_env", "voice"})
 
 #: `voice` is the patch's polyphony/glide settings rather than a stage
 #: sound passes through, so it carries no jacks at all. It is on the
@@ -557,6 +628,9 @@ class SynthView(QtWidgets.QMainWindow):
         #: cannot drift (#207).
         self.patch_layer.cablesChanged.connect(self._rebuild_graph)
         self.patch_layer.graph.engine_judge = self.bridge.judge
+        self.patch_layer.graph.engine_judge_modulation = self.bridge.judge_modulation
+        #: The ring's write path (#208, decision 66 §4): live, no rebuild.
+        self.patch_layer.depth_changed = self.bridge.set_modulation_depth
         self.canvas.windowAdded.connect(self._on_window_added)
         self.canvas.windowFocused.connect(
             lambda window: self.patch_layer.set_focused_node(window.type_key))
@@ -816,7 +890,7 @@ class SynthView(QtWidgets.QMainWindow):
             return None
         if type_key in effects_audio.EFFECT_TYPES:
             return self._build_effect_module(type_key)
-        if type_key in UTILITY_TYPES:
+        if type_key in GRAPH_ONLY_TYPES:
             return self._build_utility_module(type_key)
         return self._build_synth_module(type_key)
 
@@ -905,7 +979,8 @@ class SynthView(QtWidgets.QMainWindow):
             can_in=(type_key not in NO_AUDIO_IN_TYPES
                     and patch_bridge.takes_sound_in(type_key)),
             can_out=type_key not in NO_AUDIO_OUT_TYPES,
-            out_kind=(patch_graph.KIND_MOD if type_key in MOD_SOURCE_TYPES
+            out_kind=(patch_graph.KIND_BOTH if type_key in DUAL_OUTPUT_TYPES
+                      else patch_graph.KIND_MOD if type_key in MOD_SOURCE_TYPES
                       else patch_graph.KIND_AUDIO),
             is_delay=type_key == DELAY_TYPE,
         )
