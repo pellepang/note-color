@@ -476,7 +476,7 @@ class ModuleGraph:
                 f"{self.title(source)} is already modulating {spec.name} on "
                 f"{self.title(dest)}."))
 
-        return ACCEPT
+        return self._mod_cycle_verdict(src, dst)
 
     def _add_mod_connection(self, source, source_port, dest, param_id, depth):
         """Off the audio thread only -- grows `mod_depths`, which the
@@ -581,26 +581,68 @@ class ModuleGraph:
             f"loop needs a Delay module, so the sound comes back one block "
             f"later instead of instantly."))
 
+    def _mod_cycle_verdict(self, src, dst) -> Verdict:
+        """#225: a cycle built purely from modulation edges (or a mix of
+        modulation and audio edges) gets the same `Verdict` refusal an
+        audio-only cycle already has, instead of surfacing as `compile()`'s
+        `CycleError`.
+
+        Settles the sub-question #225 left open by reusing exactly
+        `_cycle_verdict()`'s reasoning: Bitwig's rule (decision 56 §4) is
+        that a loop is legal through a module that guarantees its output is
+        a whole block behind its input (`is_delayed`), and nothing about
+        that guarantee is specific to what kind of port carries it -- a
+        hypothetical modulation-delay module would legalise a mod-only loop
+        through it for the identical reason a `Delay` legalises an audio
+        one. No module emitting `PORT_MOD` reports `block_delay >= 1`
+        today, so in practice every modulation cycle is refused; the
+        moment one exists, this rule (and `_ordering_edges()`'s matching
+        exception) already knows what to do with it, and nothing here has
+        to change.
+
+        Asked as the same ordering question `_cycle_verdict()` asks: would
+        accepting this cable let `dst`'s node reach back to `src`'s over
+        the ordering edges that already include every modulation cable
+        (`_ordering_edges()`)?
+        """
+        if src.is_delayed:
+            return ACCEPT
+        path = self._ordering_path(dst.node_id, src.node_id)
+        if path is None:
+            return ACCEPT
+        named = " → ".join(self.title(n) for n in path) + f" → {self.title(dst.node_id)}"
+        return Verdict(False, REFUSE_CYCLE, (
+            f"That closes a modulation loop with no Delay in it ({named}). "
+            f"A modulation source cannot be tugged by something its own "
+            f"signal already reaches -- there is no Delay module for "
+            f"modulation to come back through a block later, the way an "
+            f"audio feedback loop can."))
+
     def _ordering_edges(self):
         """The cables that constrain execution order: every audio/mod-port
         cable except those leaving a module whose output is already a
-        block old, plus every modulation-routing-table entry -- a knob's
-        modulation has to be computed from a value the source already
-        produced this block, exactly like an audio cable, and reuses the
-        same ordering machinery rather than a second copy of it.
+        block old, plus every modulation-routing-table entry with the same
+        exception -- a knob's modulation has to be computed from a value
+        the source already produced this block, exactly like an audio
+        cable, and reuses the same ordering machinery rather than a second
+        copy of it.
 
-        Known gap, left for #211's canvas work: a cycle built only from mod
-        edges (or a mix of mod and audio edges) is not yet given a graceful
-        `Verdict` refusal the way an audio-only cycle is by
-        `_cycle_verdict()` -- it surfaces as `compile()`'s `CycleError`
-        instead, which is safe (nothing runs on a graph that would not
-        terminate) but not yet a sentence aimed at the person holding the
-        cable.
+        A modulation cable is excluded from the constraint on the same
+        condition as an audio one (`is_delayed`), for #225's reason: no
+        `PORT_MOD`-emitting module reports `block_delay >= 1` today, so
+        this exception is presently dead code rather than reachable, but it
+        is the right rule to have already written down if a future
+        modulation-delay module ever needs it (see `judge_modulation()`'s
+        `_mod_cycle_verdict()`, which asks the identical question before a
+        cable is ever accepted, so the case this method's own ordering
+        would otherwise raise `CycleError` over never reaches `compile()`
+        through the front door).
         """
         edges = [c for c in self.connections if not self._nodes[c.source].is_delayed]
         edges += [Connection(c.source, c.source_port, c.dest, "")
                   for c in self.mod_connections
-                  if c.source in self._nodes and c.dest in self._nodes]
+                  if c.source in self._nodes and c.dest in self._nodes
+                  and not self._nodes[c.source].is_delayed]
         return edges
 
     def _ordering_path(self, start, goal):

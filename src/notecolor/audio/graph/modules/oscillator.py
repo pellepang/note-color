@@ -24,6 +24,17 @@ the ordinary scalar path otherwise -- the same branch shape `filter.py`
 uses for `cutoff`/`resonance`. `octave` and `semitones` cannot receive a
 mod cable at all (`modulatable=False`): a waveform pitched by whole
 semitones mid-sweep is a different instrument, not a bend.
+
+**`pulse_width` (#208 stage 2, decision 67).** A PWM square -- an LFO
+slowly walking the width knob -- is a real, common patch, and unlike
+`fine` it needs no chunked coefficient recompute to get it: `pulse_width`
+only ever enters `process()` inside vectorized array arithmetic already
+(the phase-shift subtraction and the `2*width - 1` DC correction the
+pulse-from-saw trick needs), so going from scalar to per-sample buffer is
+the same `out=` substitution `level` already makes, not a new control-rate
+scheme. It has no effect on the other three waveforms, the same as it
+always did -- the knob exists on every instance because it is a parameter,
+not a per-waveform capability.
 """
 
 from __future__ import annotations
@@ -180,13 +191,25 @@ class WavetableOscillator(Module):
         if self._is_pulse:
             # pulse(p, d) = saw(p - d) - saw(p) + (2d - 1), read from the saw
             # table -- `synth_engine.pulse_from_saw()` in place.
-            width = values[p["pulse_width"]]
-            np.subtract(self._phases[:n], width, out=self._shifted[:n])
+            width_live = mod_active is not None and mod_active[p["pulse_width"]]
+            if width_live:
+                width_buf = ctx.param_buffers[p["pulse_width"]]
+                np.subtract(self._phases[:n], width_buf[:n], out=self._shifted[:n])
+            else:
+                width = values[p["pulse_width"]]
+                np.subtract(self._phases[:n], width, out=self._shifted[:n])
             np.mod(self._shifted[:n], 1.0, out=self._shifted[:n])
             self._read_into(table, self._shifted, out, n)
             self._read_into(table, self._phases, self._scratch, n)
             np.subtract(out[:n], self._scratch[:n], out=out[:n])
-            out[:n] += 2.0 * width - 1.0
+            if width_live:
+                # DC correction 2*width - 1, per sample: reuses `_scratch`,
+                # already spent above and free until the level scaling below.
+                np.multiply(width_buf[:n], 2.0, out=self._scratch[:n])
+                self._scratch[:n] -= 1.0
+                np.add(out[:n], self._scratch[:n], out=out[:n])
+            else:
+                out[:n] += 2.0 * width - 1.0
         else:
             self._read_into(table, self._phases, out, n)
 

@@ -48,6 +48,35 @@ says port it rather than rewrite it. Taken:
   it is worth having for the same reason it is worth having there: it is
   exact, not approximate, so any drift fails loudly.
 
+**Modulated feedback/damping/mix, and why `time` is not among them (#208
+stage 2, decision 67).** `feedback`, `damping` and `mix` each enter the
+recurrence as a plain per-sample scale -- never as a read offset -- so
+giving them a live modulation buffer is the same `out=` array substitution
+`noise.py`'s `level` gets, applied inside `_damp()` and `_copy_in()`. A
+slow LFO breathing the feedback or the wet mix is an ordinary, safe patch.
+
+`time` is different in kind and stays `modulatable=False`. This module
+computes its read offset **once a block** (`delay = int(values[...] *
+sample_rate)`, floored to whole frames) and reads one contiguous window at
+that fixed offset; a live modulation buffer would ask it to read a
+*different* offset every sample within the block, which this module's
+single contiguous `_copy_out()` cannot do without turning into a per-sample
+gather with linear interpolation between two ring positions -- exactly
+the read `oscillator.py`'s `_read_into()` already does for its wavetable,
+but here layered on a ring that also has to keep the read strictly behind
+the write for the block-delay guarantee (see "The guarantee" above) even
+as that offset moves. That is real, well-understood DSP (a chorus *is*
+exactly this: a short delay whose time an LFO sweeps, read with
+interpolation so the pitch it induces sweeps smoothly instead of
+crackling on every integer-sample jump) but it is a rewrite of this
+module's read path and its invariants, not a knob-level change like the
+other three, and it is called out here rather than attempted: this stage
+leaves `time` unmodulated on both `Delay` and `ShortDelay` and names the
+gap instead of shipping a half-interpolated read that crackles. A
+dedicated interpolating-read delay (or a variant of `short_delay.py`,
+which already reads sub-block and is the module actually shaped for a
+chorus/flanger use) is the natural home for it later.
+
 Deliberately **not** taken:
 
 - **Sub-delay chunking.** `effects.py` splits a block into chunks no longer
@@ -148,8 +177,12 @@ class Delay(Module):
 
     def parameters(self):
         return (
+            # `modulatable=False`: see the module docstring's "Modulated
+            # feedback/damping/mix, and why `time` is not among them"
+            # section -- a live buffer here would need a per-sample
+            # interpolated ring read this module does not have.
             ParamSpec("time", "Time", 0.001, self.max_seconds, min(0.25, self.max_seconds),
-                      unit="s", log=True),
+                      unit="s", log=True, modulatable=False),
             # Capped below 1.0: a delay at unity *internal* feedback never
             # decays. That cap is about this module's own recursion and is
             # not a stability policy for the patch -- the loop a cable makes
@@ -197,6 +230,15 @@ class Delay(Module):
         # repeat N-1 instead of darkening everything once.
         self._prev = np.zeros(activation.max_block, dtype=np.float64)
         self._damped = np.zeros(activation.max_block, dtype=np.float64)
+        # Only touched when `damping` or `mix` carries a live modulation
+        # buffer (#208 stage 2): the elementwise counterparts of the
+        # scalar arithmetic `_damp()` and `process()` otherwise do with
+        # `out=` already, one array each for the same reason `filter.py`
+        # keeps separate cutoff/resonance scratch -- reused across blocks,
+        # never reallocated.
+        self._damp_half = np.zeros(activation.max_block, dtype=np.float64)
+        self._damp_invhalf = np.zeros(activation.max_block, dtype=np.float64)
+        self._mix_inv = np.zeros(activation.max_block, dtype=np.float64)
 
     def reset(self):
         """Silence the line without reallocating.
@@ -222,18 +264,28 @@ class Delay(Module):
         source = ctx.inputs[self._in_index]
         out = ctx.outputs[self._out_index]
         values = ctx.params
+        p = self._p
+        mod_active = ctx.param_mod_active
 
-        delay = int(values[self._p["time"]] * ctx.sample_rate)
+        delay = int(values[p["time"]] * ctx.sample_rate)
         # The guarantee, applied here and not at the knob: however short the
         # user asks for, the read stays a whole block behind the write.
         delay = min(max(delay, self._min_frames), self._max_frames)
-        feedback = values[self._p["feedback"]]
-        damping = values[self._p["damping"]]
-        mix = values[self._p["mix"]]
+
+        feedback_live = mod_active is not None and mod_active[p["feedback"]]
+        damping_live = mod_active is not None and mod_active[p["damping"]]
+        mix_live = mod_active is not None and mod_active[p["mix"]]
+        feedback_buf = ctx.param_buffers[p["feedback"]] if feedback_live else None
+        damping_buf = ctx.param_buffers[p["damping"]] if damping_live else None
+        mix_buf = ctx.param_buffers[p["mix"]] if mix_live else None
+        feedback = values[p["feedback"]]
+        damping = values[p["damping"]]
+        mix = values[p["mix"]]
 
         read = (self._write - delay) % self._size
         self._copy_out(read, n)
-        self._copy_in(source, feedback, self._damp(damping, n), n)
+        tail = self._damp(damping, damping_buf, n)
+        self._copy_in(source, feedback, feedback_buf, tail, n)
         self._write = (self._write + n) % self._size
 
         # Whether the line went non-finite this block. A sum rather than a
@@ -248,27 +300,50 @@ class Delay(Module):
             self.nonfinite_blocks += 1
 
         # out = dry*(1-mix) + wet*mix, in place, in the host's buffer.
-        np.multiply(self._wet[:n], mix, out=out[:n])
-        np.multiply(source[:n], 1.0 - mix, out=self._wet[:n])
+        if mix_buf is not None:
+            np.multiply(self._wet[:n], mix_buf[:n], out=out[:n])
+            np.subtract(1.0, mix_buf[:n], out=self._mix_inv[:n])
+            np.multiply(source[:n], self._mix_inv[:n], out=self._wet[:n])
+        else:
+            np.multiply(self._wet[:n], mix, out=out[:n])
+            np.multiply(source[:n], 1.0 - mix, out=self._wet[:n])
         np.add(out[:n], self._wet[:n], out=out[:n])
 
-    def _damp(self, damping, n):
+    def _damp(self, damping, damping_buf, n):
         """The signal that goes back into the ring: `self._wet`, optionally
         softened by a one-zero average of it with its own previous sample.
 
         Returns the array to feed back, so the caller has no branch and
         neither array is copied when damping is off. One carried sample of
         state (`_damp_prev`), which is what keeps this transparent to how
-        the host happens to split its blocks.
+        the host happens to split its blocks. `damping_buf`, when not
+        `None`, is a live per-sample modulation buffer (#208 stage 2) and
+        takes the same shape with `self._damp_half`/`_damp_invhalf` standing
+        in for the scalar `half`/`1.0 - half`.
         """
-        if damping <= 0.0:
+        if damping_buf is None:
+            if damping <= 0.0:
+                return self._wet
+            half = damping * 0.5
+            np.copyto(self._prev[1:n], self._wet[:n - 1])
+            self._prev[0] = self._damp_prev
+            self._damp_prev = self._wet[n - 1]
+            np.multiply(self._wet[:n], 1.0 - half, out=self._damped[:n])
+            np.multiply(self._prev[:n], half, out=self._prev[:n])
+            np.add(self._damped[:n], self._prev[:n], out=self._damped[:n])
+            return self._damped
+
+        if float(np.max(damping_buf[:n])) <= 0.0:
             return self._wet
-        half = damping * 0.5
+        half = self._damp_half
+        inv_half = self._damp_invhalf
+        np.multiply(damping_buf[:n], 0.5, out=half[:n])
+        np.subtract(1.0, half[:n], out=inv_half[:n])
         np.copyto(self._prev[1:n], self._wet[:n - 1])
         self._prev[0] = self._damp_prev
         self._damp_prev = self._wet[n - 1]
-        np.multiply(self._wet[:n], 1.0 - half, out=self._damped[:n])
-        np.multiply(self._prev[:n], half, out=self._prev[:n])
+        np.multiply(self._wet[:n], inv_half[:n], out=self._damped[:n])
+        np.multiply(self._prev[:n], half[:n], out=self._prev[:n])
         np.add(self._damped[:n], self._prev[:n], out=self._damped[:n])
         return self._damped
 
@@ -279,18 +354,26 @@ class Delay(Module):
         if first < n:
             np.copyto(self._wet[first:n], self._buffer[:n - first])
 
-    def _copy_in(self, source, feedback, tail, n):
+    def _copy_in(self, source, feedback, feedback_buf, tail, n):
         """Write `source + feedback * tail` into the ring at the write head,
         where `tail` is the delayed signal already read (damped or not) --
         which is what makes the internal feedback path exactly as long as the
-        delay and not one block longer."""
+        delay and not one block longer. `feedback_buf`, when not `None`, is
+        a live per-sample modulation buffer (#208 stage 2), sliced the same
+        way `tail` already is for the ring's wraparound."""
         write = self._write
         first = min(n, self._size - write)
         target = self._buffer[write:write + first]
-        np.multiply(tail[:first], feedback, out=target)
+        if feedback_buf is not None:
+            np.multiply(tail[:first], feedback_buf[:first], out=target)
+        else:
+            np.multiply(tail[:first], feedback, out=target)
         np.add(target, source[:first], out=target)
         if first < n:
             rest = n - first
             target = self._buffer[:rest]
-            np.multiply(tail[first:n], feedback, out=target)
+            if feedback_buf is not None:
+                np.multiply(tail[first:n], feedback_buf[first:n], out=target)
+            else:
+                np.multiply(tail[first:n], feedback, out=target)
             np.add(target, source[first:n], out=target)

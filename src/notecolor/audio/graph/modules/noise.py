@@ -25,6 +25,13 @@ That follows #111's rule -- refuse to open rather than open degraded --
 rather than contradicting it, but a white-only noise source on an install
 without the `[synth]` extra is a thing this design gives up.
 
+**Modulated level (#208 stage 2, decision 67).** Noise's `level` is used in
+exactly the same shape `oscillator.py`'s already-modulatable `level` is --
+one final `np.multiply` -- so it gets the identical `ctx.param_buffers`
+substitution, checked before either colour's early-out. `colour` stays
+`modulatable=False`: it is `ftype` all over again, a stepped choice between
+two whole DSP paths, not a value a cable should be able to sweep through.
+
 **Independent streams per voice.** Each instance owns its own
 `numpy.random.Generator`, made at construction, rather than sharing
 `synth_engine`'s module-level `_RNG`. Sixteen voices drawing from one
@@ -121,12 +128,24 @@ class Noise(Module):
         if n <= 0:
             return
         values = ctx.params
-        level = values[self._p["level"]]
-        if level <= 0.0:
-            # The host's buffers are reused; a module that returns without
-            # writing leaks the previous block into the mix.
-            out[:n] = 0.0
-            return
+        mod_active = ctx.param_mod_active
+        level_live = mod_active is not None and mod_active[self._p["level"]]
+        level_buf = ctx.param_buffers[self._p["level"]] if level_live else None
+        if level_live:
+            # `np.max` rather than `level_buf[:n] > 0.0`: a comparison
+            # without `out=` allocates the boolean array it returns, and
+            # this is only checking for "silent the whole block" -- the
+            # same guard `oscillator.py`'s `level` uses.
+            if float(np.max(level_buf[:n])) <= 0.0:
+                out[:n] = 0.0
+                return
+        else:
+            level = values[self._p["level"]]
+            if level <= 0.0:
+                # The host's buffers are reused; a module that returns
+                # without writing leaks the previous block into the mix.
+                out[:n] = 0.0
+                return
 
         # `Generator.random(out=)` fills a buffer we own. `uniform(-1, 1)`
         # would have been the direct translation of `synth_engine._noise()`
@@ -143,6 +162,13 @@ class Noise(Module):
             pink, zf = self._lfilter(
                 synth_engine.PINK_B, synth_engine.PINK_A, white[:n], zi=self._pink_zi)
             np.copyto(self._pink_zi, zf)
-            np.multiply(pink, level * config.SYNTH_PINK_GAIN, out=out[:n])
+            if level_live:
+                np.multiply(pink, level_buf[:n], out=out[:n])
+                np.multiply(out[:n], config.SYNTH_PINK_GAIN, out=out[:n])
+            else:
+                np.multiply(pink, level * config.SYNTH_PINK_GAIN, out=out[:n])
         else:
-            np.multiply(white[:n], level, out=out[:n])
+            if level_live:
+                np.multiply(white[:n], level_buf[:n], out=out[:n])
+            else:
+                np.multiply(white[:n], level, out=out[:n])

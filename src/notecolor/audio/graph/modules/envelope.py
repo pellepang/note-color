@@ -34,6 +34,45 @@ which in this patch would be a VCA module that exists only to be its
 partner. Decision 56 §5's modulation cables are for knobs; a gain applied to
 sound is sound. When #208 brings a modulation layer, an envelope with a mod
 output is a *different* module and can be added beside this one.
+
+## `ModEnvelope` (#208 stage 2, decision 67): the sibling this predicted
+
+Same DAHDSR shape, same `synth_engine.DahdsrEnvelope`, imported the same
+way -- but a `PORT_MOD` output instead of an audio in/out pair, so it can
+land on a knob (a filter's cutoff, an oscillator's `fine`) the way an LFO
+does, rather than multiplying a signal the way this module does.
+
+**Unipolar, deliberately, and no amount knob of its own.**
+`DahdsrEnvelope.block_into()` already walks 0 (rest) up through `sustain`
+to 1 (peak) and back down -- an ordinary envelope shape, never negative.
+Two knob-free choices follow from taking that shape as-is rather than
+inventing a bipolar variant:
+
+- **Unipolar (0..1), not bipolar (-1..+1).** A bipolar envelope would need
+  a rest position that is not zero (the shape has no natural "middle" the
+  way an LFO's sine does), which turns "at rest" into a number someone has
+  to remember rather than the silence/zero it already reads as. An analog
+  filter envelope is unipolar for the same reason: it *opens* a filter from
+  wherever it was sitting, it does not swing through it.
+- **No amount/polarity knob on the module.** Decision 66 §4 already put
+  depth on the *cable* -- bipolar, -1..+1, a fraction of the destination's
+  range, edited at the destination knob's ring (#210 §4). A second
+  amount/polarity control here would duplicate exactly that number in a
+  second place a patch note would have to keep in sync. Negative sweep
+  (an envelope that *closes* a filter instead of opening it) is what a
+  negative cable depth already is; this module has nothing to add.
+
+**Per-note only, no mode switch.** Unlike the LFO, there is no "global"
+variant: a DAHDSR is inherently keyed to a note's gate (`ctx.note.gate`
+starting/ending a cycle), and a once-only instance has no note to key off.
+`descriptor().poly` is unconditionally `POLY_PER_NOTE`.
+
+**Does not end the note.** `AmpEnvelope` stays the one module that sets
+`note.finished` (decision 61 §4) -- this module's own envelope reaching its
+idle tail is not that signal, and `process()` never touches the field, even
+after `env.finished` goes true internally. A patch with a Mod Envelope and
+no Amp Envelope still drones exactly as one with no envelope at all always
+has; this module gives it a shape to modulate with, not a lifespan.
 """
 
 from __future__ import annotations
@@ -43,7 +82,7 @@ import numpy as np
 from notecolor.audio import synth_engine
 from notecolor.audio.graph import contract
 from notecolor.audio.graph.contract import (
-    Module, ModuleDescriptor, ParamSpec, audio_in, audio_out,
+    Module, ModuleDescriptor, ParamSpec, audio_in, audio_out, mod_out,
 )
 
 #: Longest any stage may be set to, matching `patch_format.Envelope`'s own
@@ -202,3 +241,109 @@ class AmpEnvelope(Module):
                 # The answer decision 61 §4 leaves to a module: this voice
                 # has faded, and `PolyGraph` may have its slot back.
                 note.finished = True
+
+
+class ModEnvelope(Module):
+    """A DAHDSR envelope emitted as modulation -- a sibling of
+    `AmpEnvelope`, sharing its shape and its `DahdsrEnvelope`, but writing
+    a `PORT_MOD` output instead of multiplying an audio input. See the
+    module docstring's "`ModEnvelope`" section for the unipolar-and-no-
+    amount-knob reasoning.
+
+    Per-note, like `AmpEnvelope` -- there is no once-only variant, because
+    a DAHDSR without a note's gate to key off has no cycle to run.
+    """
+
+    def __init__(self):
+        self._env = None
+
+    # -- scan ---------------------------------------------------------------
+
+    def descriptor(self):
+        return ModuleDescriptor(
+            module_id="env.dahdsr.mod",
+            name="Mod Env",
+            poly=contract.POLY_PER_NOTE,
+            category="modulator",
+        )
+
+    def ports(self):
+        return (mod_out("mod", "Mod"),)
+
+    def parameters(self):
+        return (
+            ParamSpec("delay", "Delay", 0.0, MAX_STAGE_SECONDS, 0.0, unit="s"),
+            ParamSpec("attack", "Attack", MIN_RAMP_SECONDS, MAX_STAGE_SECONDS,
+                      0.005, unit="s", log=True),
+            ParamSpec("hold", "Hold", 0.0, MAX_STAGE_SECONDS, 0.0, unit="s"),
+            ParamSpec("decay", "Decay", MIN_RAMP_SECONDS, MAX_STAGE_SECONDS,
+                      0.1, unit="s", log=True),
+            ParamSpec("sustain", "Sustain", 0.0, 1.0, 0.8),
+            ParamSpec("release", "Release", MIN_RAMP_SECONDS, MAX_STAGE_SECONDS,
+                      0.2, unit="s", log=True),
+            # Note-velocity sensitivity of the envelope's own peak, the same
+            # knob and the same curve `AmpEnvelope` gives its gain -- 0
+            # ignores velocity, 1.0 makes velocity 0 a flat-zero envelope.
+            # Not to be confused with the cable's modulation depth (decision
+            # 66 §4): this scales the *shape* by how hard the note was
+            # played, before any depth is applied at the destination.
+            ParamSpec("velocity", "Vel", 0.0, 1.0, 0.0),
+        )
+
+    # -- lifecycle ----------------------------------------------------------
+
+    def _allocate(self, activation):
+        self._mod_index = self.port_index("mod", contract.DIRECTION_OUT)
+        self._p = {spec.param_id: i for i, spec in enumerate(self.parameters())}
+        self._env = synth_engine.DahdsrEnvelope(_Spec(), activation.sample_rate)
+        self._env.preallocate(activation.max_block)
+        self._gain = np.zeros(activation.max_block, dtype=np.float64)
+
+    def reset(self):
+        """Restart the envelope for a new note -- see `AmpEnvelope.reset()`;
+        the same reasoning, the same order (knobs before restart)."""
+        if self._env is None or self.activation is None:
+            return
+        self._configure(self.params.values, self.activation.sample_rate)
+        self._env.restart()
+
+    def _configure(self, values, rate):
+        """Identical to `AmpEnvelope._configure()` -- kept as a separate
+        copy rather than a shared free function because the two modules'
+        `_p` dicts are built independently and a shared function taking
+        both would just be passing the same six lookups through an extra
+        frame."""
+        env = self._env
+        p = self._p
+        env.delay_samples = int(round(values[p["delay"]] * rate))
+        env.hold_samples = int(round(values[p["hold"]] * rate))
+        env.attack_samples = max(1, int(round(values[p["attack"]] * rate)))
+        env.decay_samples = max(1, int(round(values[p["decay"]] * rate)))
+        env.release_samples = max(1, int(round(values[p["release"]] * rate)))
+        env.sustain = min(max(float(values[p["sustain"]]), 0.0), 1.0)
+
+    # -- the audio thread ---------------------------------------------------
+
+    def process(self, ctx):
+        n = ctx.frames
+        out = ctx.outputs[self._mod_index]
+        if n <= 0:
+            return
+        values = ctx.params
+        env = self._env
+        self._configure(values, ctx.sample_rate)
+
+        note = ctx.note
+        if note is not None and not note.gate:
+            env.note_off()
+
+        env.block_into(out[:n])
+
+        if note is not None:
+            amount = values[self._p["velocity"]]
+            scale = 1.0 - amount * (1.0 - note.velocity)
+            if scale != 1.0:
+                np.multiply(out[:n], scale, out=out[:n])
+        # Deliberately never touches `note.finished` -- see the module
+        # docstring's "Does not end the note" section. `AmpEnvelope` is the
+        # only module decision 61 §4 lets reclaim a voice slot.
