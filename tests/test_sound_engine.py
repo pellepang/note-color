@@ -514,3 +514,142 @@ def test_stopping_the_engine_silences_the_graph_too():
     engine.set_graph(graph, activate=False)
     engine.stop()
     assert graph.silenced == 1
+
+
+# --------------------------------------------------------------------------
+# Realtime scheduling and CPU governor detection (issue #232, decision 70)
+# --------------------------------------------------------------------------
+
+class TestRealtimeSchedulingGracefulDegradation:
+    """The one path this whole feature must never break: a caller with no
+    `rtprio` permission (the ordinary case on almost every default install)
+    must still get a fully working synth, with a clear message, never a
+    crash and never a hard requirement for root. Simulated by monkeypatching
+    `os.sched_setscheduler` to raise the exact error a denied request raises
+    on a real machine -- this repo's own dev machine has `RLIMIT_RTPRIO == 0`
+    (checked directly: `os.sched_setscheduler(0, os.SCHED_FIFO, ...)` raises
+    `PermissionError` here right now), so this is not a hypothetical branch."""
+
+    def test_denied_request_reports_false_and_a_message_and_does_not_raise(self, monkeypatch):
+        def deny(pid, policy, param):
+            raise PermissionError("Operation not permitted")
+
+        monkeypatch.setattr(sound_engine.os, "sched_setscheduler", deny)
+        active, message = sound_engine._try_realtime_scheduling()
+        assert active is False
+        assert "unavailable" in message
+        assert "normal priority" in message
+
+    def test_granted_request_reports_true_and_the_priority_used(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            sound_engine.os, "sched_setscheduler",
+            lambda pid, policy, param: calls.append((pid, policy, param)),
+        )
+        active, message = sound_engine._try_realtime_scheduling()
+        assert active is True
+        assert "SCHED_FIFO" in message
+        assert len(calls) == 1
+        assert calls[0][0] == 0  # the calling thread, not the process
+
+    def test_platform_with_no_realtime_scheduling_degrades_the_same_way(self, monkeypatch):
+        monkeypatch.delattr(sound_engine.os, "sched_setscheduler", raising=False)
+        active, message = sound_engine._try_realtime_scheduling()
+        assert active is False
+        assert "normal priority" in message
+
+    def test_unexpected_os_error_also_degrades_rather_than_raising(self, monkeypatch):
+        def boom(pid, policy, param):
+            raise OSError("kernel says no")
+
+        monkeypatch.setattr(sound_engine.os, "sched_setscheduler", boom)
+        active, message = sound_engine._try_realtime_scheduling()
+        assert active is False
+        assert "normal priority" in message
+
+    def test_callback_still_renders_correctly_when_realtime_priority_is_denied(self, monkeypatch):
+        """The part that must never break: a denied request must not stop
+        the synth from making sound."""
+        def deny(pid, policy, param):
+            raise PermissionError()
+
+        monkeypatch.setattr(sound_engine.os, "sched_setscheduler", deny)
+        engine = make_engine()
+        engine.note_on(60)
+        outdata = np.zeros((100, 1), dtype=np.float32)
+        engine._callback(outdata, 100, None, None)
+        assert engine.realtime_priority_active is False
+        assert not np.allclose(outdata[:, 0], 0.0)
+
+    def test_the_request_is_only_ever_attempted_once(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            sound_engine.os, "sched_setscheduler",
+            lambda pid, policy, param: calls.append(1),
+        )
+        engine = make_engine()
+        outdata = np.zeros((100, 1), dtype=np.float32)
+        for _ in range(5):
+            engine._callback(outdata, 100, None, None)
+        assert len(calls) == 1
+
+    def test_stopping_and_restarting_asks_again(self, monkeypatch):
+        """A restart opens a new stream, backed by a new OS thread whose
+        scheduling policy starts over -- so the grant must be re-requested,
+        not assumed to still hold."""
+        calls = []
+        monkeypatch.setattr(
+            sound_engine.os, "sched_setscheduler",
+            lambda pid, policy, param: calls.append(1),
+        )
+        engine = make_engine()
+        outdata = np.zeros((100, 1), dtype=np.float32)
+        engine._callback(outdata, 100, None, None)
+        engine.stop()
+        assert engine.realtime_priority_active is None
+        engine._callback(outdata, 100, None, None)
+        assert len(calls) == 2
+
+
+class TestCpuGovernorDetection:
+    """Detect-and-tell, never change (issue #232's second question) -- see
+    `_detect_cpu_governor()`'s own docstring for the reasoning."""
+
+    def test_powersave_is_reported_with_a_message(self, tmp_path, monkeypatch):
+        governor_file = tmp_path / "scaling_governor"
+        governor_file.write_text("powersave\n")
+        real_open = open
+        monkeypatch.setattr("builtins.open", lambda path, *a, **k: real_open(str(governor_file)))
+        governor, message = sound_engine._detect_cpu_governor()
+        assert governor == "powersave"
+        assert "powersave" in message
+        assert "cpupower" in message or "performance" in message
+
+    def test_performance_governor_is_silent(self, tmp_path, monkeypatch):
+        governor_file = tmp_path / "scaling_governor"
+        governor_file.write_text("performance\n")
+        real_open = open
+        monkeypatch.setattr("builtins.open", lambda path, *a, **k: real_open(str(governor_file)))
+        governor, message = sound_engine._detect_cpu_governor()
+        assert governor == "performance"
+        assert message == ""
+
+    def test_missing_sysfs_file_is_unknown_not_an_error(self, monkeypatch):
+        def missing(path, *a, **k):
+            raise FileNotFoundError(path)
+
+        monkeypatch.setattr("builtins.open", missing)
+        governor, message = sound_engine._detect_cpu_governor()
+        assert governor is None
+        assert message == ""
+
+    def test_ensure_started_checks_the_governor_before_opening_the_stream(self, monkeypatch):
+        """Exercised without a real device: `_check_cpu_governor()` is the
+        piece `ensure_started()` calls, kept separately callable exactly
+        like `_callback()` is, per this suite's own "pure logic
+        unit-tested, real I/O smoke-tested" convention."""
+        engine = make_engine()
+        monkeypatch.setattr(sound_engine, "_detect_cpu_governor", lambda: ("powersave", "CPU governor is 'powersave' -- ... performance ..."))
+        engine._check_cpu_governor()
+        assert engine.cpu_governor == "powersave"
+        assert "powersave" in engine.cpu_governor_message

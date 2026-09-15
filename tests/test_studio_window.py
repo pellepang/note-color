@@ -604,6 +604,12 @@ def test_the_block_listener_error_counter_starts_at_zero_and_counts(monkeypatch)
     engine._frame_clock = 0
     engine._block_listener = None
     engine.block_listener_error_count = 0
+    # #232's realtime-priority request: attempted once from inside
+    # `_callback` itself, on whichever thread calls it -- pre-set to
+    # "already attempted" so this hand-assembled engine doesn't need every
+    # attribute `_ensure_realtime_priority()` also touches.
+    engine.realtime_priority_active = False
+    engine.realtime_priority_message = ""
     assert engine.block_listener_error_count == 0
 
     def explode(_frames):

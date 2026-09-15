@@ -75,6 +75,7 @@ plain NumPy buffer, and only `ensure_started()`/`stop()` need a real
 from dataclasses import dataclass, field
 from typing import Optional, Protocol
 
+import os
 import threading
 
 import numpy as np
@@ -82,6 +83,97 @@ import numpy as np
 from notecolor.settings import config
 from notecolor.settings.config_store import store
 from notecolor.audio.effects import EffectsChain
+
+
+# --------------------------------------------------------------------------
+# Realtime scheduling for the audio callback thread (issue #232, decision 70)
+# --------------------------------------------------------------------------
+
+#: A fixed, modest `SCHED_FIFO` priority to ask for -- not tuned, just
+#: comfortably inside the 1-99 range and well clear of the 90s kernel
+#: watchdogs typically claim. JACK's own default (10) lands in the same
+#: neighbourhood every pro-audio guide recommends, which is the point:
+#: this is the standard ask, not a number picked for this machine.
+AUDIO_THREAD_RT_PRIORITY = 10
+
+
+def _try_realtime_scheduling():
+    """Asks the OS for `SCHED_FIFO` on the *calling* thread and returns
+    `(active, message)`.
+
+    Deliberately reached for directly with `os.sched_setscheduler` rather
+    than through `sounddevice`/PortAudio: neither exposes a scheduling or
+    priority knob anywhere in their public API (checked -- `OutputStream`'s
+    constructor takes no such argument, and PortAudio's own thread-priority
+    hooks are host-API-internal, used automatically only by its JACK
+    backend, not its ALSA/PipeWire ones this project runs on). There is
+    also no Python `threading.Thread` object to call `setpriority` on ahead
+    of time -- PortAudio spawns and owns the real OS thread that calls back
+    into this module; the *first* call this function makes must therefore
+    happen from inside that thread, i.e. from inside `_callback` itself, the
+    only place this module could ever mean by "the audio thread". POSIX
+    scheduling calls apply to whatever OS thread makes them; passing `pid=0`
+    to `sched_setscheduler` means "the calling thread", not "the process"
+    (`man 2 sched_setscheduler`), which is exactly what is wanted here.
+
+    Never raises. The overwhelmingly common outcome on a default install is
+    `PermissionError` -- Linux caps every thread's realtime priority at 0
+    (`RLIMIT_RTPRIO`) unless an admin has configured otherwise (an
+    `/etc/security/limits.d` rule, or membership of an `audio`/`realtime`
+    group) -- and that is reported as the ordinary, expected case, not a
+    fault requiring root: the synth must still play, just at normal
+    scheduling, which is what every caller of this function already got
+    before this existed. Also covers: a platform with no realtime
+    scheduling exposed to Python at all (no `os.sched_setscheduler`, e.g.
+    Windows), and any other `OSError` a kernel might raise."""
+    if not hasattr(os, "sched_setscheduler"):
+        return False, "realtime scheduling unavailable on this platform -- running at normal priority"
+    try:
+        lo = os.sched_get_priority_min(os.SCHED_FIFO)
+        hi = os.sched_get_priority_max(os.SCHED_FIFO)
+        priority = max(lo, min(hi, AUDIO_THREAD_RT_PRIORITY))
+        os.sched_setscheduler(0, os.SCHED_FIFO, os.sched_param(priority))
+        return True, f"realtime scheduling active: SCHED_FIFO priority {priority}"
+    except PermissionError:
+        return False, (
+            "realtime scheduling unavailable (no rtprio permission) -- running at "
+            "normal priority; ask an administrator for an /etc/security/limits.d "
+            "rtprio rule or audio/realtime group membership to enable it -- not "
+            "required, the synth works either way"
+        )
+    except OSError as exc:
+        return False, f"realtime scheduling unavailable ({exc}) -- running at normal priority"
+
+
+def _detect_cpu_governor():
+    """Best-effort read of cpu0's `scaling_governor` and returns
+    `(governor_or_None, message_or_"")`. `None` covers every platform and
+    kernel configuration without this sysfs file -- non-Linux entirely, a
+    Linux kernel with no `cpufreq` subsystem (some minimal Pi/embedded
+    images), or a container without `/sys` mounted through -- treated as
+    "unknown", never as an error.
+
+    Deliberately read-only (issue #232's second question): flipping a
+    system-wide governor from inside an application needs root and would
+    silently change every other process's power/performance tradeoff on
+    the machine for as long as this one app happened to be running --
+    exactly the kind of intrusive, hard-to-reverse side effect this
+    project avoids elsewhere (`SessionState`/`SoundEngine` never touch a
+    system setting either). Detecting `powersave` and saying so, once, is
+    the whole of what this does."""
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") as f:
+            governor = f.read().strip()
+    except OSError:
+        return None, ""
+    if governor == "powersave":
+        return governor, (
+            "CPU governor is 'powersave' -- the core can downclock between "
+            "callbacks and cause timing spikes under load; 'performance' or "
+            "'schedutil' avoids this (root, e.g. cpupower frequency-set -g "
+            "performance) -- not changed automatically"
+        )
+    return governor, ""
 
 
 # --------------------------------------------------------------------------
@@ -416,6 +508,16 @@ class SoundEngine:
         self._pending_offs = {}
         self._pending_lock = threading.Lock()
         self.callback_status_count = 0
+        #: Set from inside `_callback`'s first invocation, on the real
+        #: audio thread -- see `_try_realtime_scheduling()`. `None` means
+        #: "not attempted yet" (no block has rendered), distinct from
+        #: `False` ("attempted, denied or unsupported").
+        self.realtime_priority_active = None
+        self.realtime_priority_message = ""
+        #: Set from `ensure_started()`, before the stream opens -- a plain
+        #: sysfs read, no audio thread involved. See `_detect_cpu_governor()`.
+        self.cpu_governor = None
+        self.cpu_governor_message = ""
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -431,6 +533,7 @@ class SoundEngine:
             return
         import sounddevice as sd
 
+        self._check_cpu_governor()
         self._stream = sd.OutputStream(
             samplerate=self.sample_rate, blocksize=self.block_size, channels=1,
             dtype="float32", callback=self._callback,
@@ -449,6 +552,11 @@ class SoundEngine:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        # A restart opens a new stream, which PortAudio backs with a new OS
+        # thread -- the old thread's SCHED_FIFO grant does not carry over,
+        # so the next `ensure_started()` must ask again and re-report.
+        self.realtime_priority_active = None
+        self.realtime_priority_message = ""
         self.voices.clear()
         self.effects.reset()
         if self.graph is not None:
@@ -581,6 +689,28 @@ class SoundEngine:
             self.voices.release_voice(voice_id)
         return due
 
+    # -- realtime scheduling and the CPU governor (issue #232, decision 70) --
+
+    def _check_cpu_governor(self):
+        """Read-only, called once from `ensure_started()` before the stream
+        opens -- see `_detect_cpu_governor()`. Never touches the setting."""
+        self.cpu_governor, self.cpu_governor_message = _detect_cpu_governor()
+        if self.cpu_governor_message:
+            print(f"[audio] {self.cpu_governor_message}")
+        return self.cpu_governor
+
+    def _ensure_realtime_priority(self):
+        """Requests `SCHED_FIFO` for whichever thread calls this, the first
+        time it's called -- see `_try_realtime_scheduling()`. Called from
+        `_callback()` itself, since that is the only thread this can ever
+        mean. Idempotent: `realtime_priority_active` starts `None`
+        ("not attempted") and is only ever set once, to `True` or `False`."""
+        if self.realtime_priority_active is not None:
+            return
+        self.realtime_priority_active, self.realtime_priority_message = _try_realtime_scheduling()
+        if self.realtime_priority_message:
+            print(f"[audio] {self.realtime_priority_message}")
+
     # -- the audio callback ------------------------------------------------
 
     def set_block_listener(self, listener):
@@ -601,6 +731,7 @@ class SoundEngine:
         self._block_listener = listener
 
     def _callback(self, outdata, frames, time_info, status):
+        self._ensure_realtime_priority()
         if status:
             self.callback_status_count += 1
         listener = self._block_listener
