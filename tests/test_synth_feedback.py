@@ -289,9 +289,12 @@ def test_the_loop_repeats_the_signal_and_decays_at_the_loop_gain():
     note = NoteContext(frequency=220.0)
 
     # The oscillator is the excitation; silence it after one block so what is
-    # left is only what the loop is carrying.
+    # left is only what the loop is carrying. `set_immediate()` rather than
+    # `set()`: this test's claim is about the loop's exact timing, not
+    # about #208's smoothing, so the cutoff has to be instant rather than
+    # faded over the next ~8ms.
     compiled.process(BLOCK, note=note)
-    g.node("osc").module.params.set("level", 0.0)
+    g.node("osc").module.params.set_immediate("level", 0.0)
 
     levels = block_levels(compiled, "echo", 8, note)
     assert levels[0] > 0.0, "nothing came back out of the loop"

@@ -235,10 +235,30 @@ class ParamSpec:
         return self.clamp(value)
 
 
+#: The parameter half of #224 (decision 56 §5's smoothing freebie): a knob
+#: edit ramps to its new value over roughly this long rather than jumping,
+#: which is what turns a jump into a fade instead of a zipper or a click.
+#: Short enough that it reads as "immediate" to a person turning a knob,
+#: long enough that a single-block step is not a discontinuity -- one block
+#: at 512 frames / 44100 Hz is 11.61ms, so 8ms converges the bulk of a jump
+#: within the first block and the remainder within the second.
+DEFAULT_SMOOTH_SECONDS = 0.008
+
+#: Below this fraction of a parameter's own range, the gap between its
+#: edited value and its audible one is treated as settled rather than
+#: still ramping -- so a param that has finished fading stops materialising
+#: a buffer for it (contract rule 2, and the reason most parameters never
+#: pay for one at all: see `ParamBlock.buffers`).
+_SETTLE_FRACTION = 1e-4
+
+
 class ParamBlock:
-    """The out-of-band parameter channel: one preallocated float64 array,
-    one slot per parameter, written by whichever thread holds the knob and
-    read by the audio thread.
+    """The out-of-band parameter channel.
+
+    `values` is the knob's *edited* value -- what `set()` writes, what
+    `snapshot()`/`restore()` persist, one preallocated float64 array, one
+    slot per parameter, written by whichever thread holds the knob and read
+    by the audio thread.
 
     There is no lock. A float64 store is a single bytecode operation on a
     NumPy array and the reader is only ever one block behind, which for a
@@ -252,17 +272,86 @@ class ParamBlock:
     `dirty` is a monotonic counter, not a boolean, so a module can notice it
     missed changes across several blocks and still coalesce them into one
     recomputation -- which is what a filter that rebuilds coefficients wants.
+
+    ## The scalar-or-buffer extension (#208, decision 56 §5)
+
+    Everything below this point is what #208 adds, and it is additive on
+    purpose (contract rule 5): a module that only ever reads `values` (via
+    `get()`, off the audio thread) is unaffected, and a module that only
+    ever reads `ProcessContext.params` (the ordinary scalar path, unchanged
+    in shape) is unaffected too -- what changed under it is that the array
+    it is reading is `smoothed`, not `values`.
+
+    - `smoothed` is the audible value: `values` chased by a one-pole filter
+      (`advance()`), so a knob edit fades in over `DEFAULT_SMOOTH_SECONDS`
+      rather than stepping. This is bound to `ProcessContext.params`, so
+      every module gets the smoothing for free, including ones that have
+      never heard of #208.
+    - `buffers` is one row per parameter, preallocated at `max_block` in
+      `__init__` -- the "every per-parameter buffer is preallocated"
+      constraint decision 56 §5's settlement names -- and `mod_active`
+      marks which rows are live *this block*: either a modulation route is
+      landing on that parameter (`graph.py`'s router writes both), or the
+      parameter is still mid-fade from an edit (`advance()` writes both).
+      A module that wants per-sample precision checks `mod_active[i]`
+      before reading `buffers[i]`; nothing else in this file ever sets
+      `mod_active` back to `False` once a route exists, because which
+      parameters *can* be modulated is a structural, compile-time fact
+      (added back by the next `compile()` if a cable is removed) -- what
+      varies block to block is only whether a currently-live route or fade
+      is actually contributing, and the router recomputes that every time
+      it runs.
     """
 
-    __slots__ = ("specs", "_index", "values", "dirty")
+    __slots__ = ("specs", "_index", "values", "dirty", "max_block",
+                 "smoothed", "buffers", "mod_active",
+                 "_minima", "_maxima", "_settle_eps", "_coeffs", "_delta",
+                 "_prev", "_ramp", "_discrete", "_smooth_seconds", "_sample_rate",
+                 "_first_block")
 
-    def __init__(self, specs):
+    def __init__(self, specs, max_block=1, sample_rate=44100.0,
+                 smooth_seconds=DEFAULT_SMOOTH_SECONDS):
         self.specs = tuple(specs)
         self._index = {spec.param_id: i for i, spec in enumerate(self.specs)}
         if len(self._index) != len(self.specs):
             raise ContractError("duplicate parameter id")
+        n = len(self.specs)
         self.values = np.array([spec.default for spec in self.specs], dtype=np.float64)
         self.dirty = 0
+
+        self.max_block = max(1, int(max_block))
+        self.smoothed = np.array(self.values)
+        self.buffers = np.zeros((n, self.max_block), dtype=np.float64)
+        self.mod_active = np.zeros(n, dtype=bool)
+
+        self._minima = np.array([s.minimum for s in self.specs], dtype=np.float64)
+        self._maxima = np.array([s.maximum for s in self.specs], dtype=np.float64)
+        self._settle_eps = np.maximum(1e-9, _SETTLE_FRACTION * (self._maxima - self._minima))
+        # Discrete parameters (a waveform, a filter type) snap rather than
+        # fade: a filter type smoothed to 1.4 is a coefficient recompute for
+        # a position that does not exist. `_coeffs` is recomputed by
+        # `advance()` every block from `smooth_seconds` and `sample_rate`
+        # (which can change between blocks -- a block-size change is a
+        # deactivate/activate cycle, but the sample rate the module was
+        # activated with is fixed for its life); the discrete slots are
+        # pinned to 1.0 afterwards, in `advance()`, not here.
+        self._discrete = tuple(i for i, s in enumerate(self.specs) if s.steps)
+        self._smooth_seconds = smooth_seconds
+        self._sample_rate = sample_rate
+        self._coeffs = np.ones(n, dtype=np.float64)
+        self._delta = np.zeros(n, dtype=np.float64)
+        self._prev = np.zeros(n, dtype=np.float64)
+        # Shared 0..1 ramp template, built once: `advance()` scales it by
+        # each settling parameter's own delta rather than building an
+        # `arange` per parameter per block.
+        self._ramp = (np.arange(self.max_block, dtype=np.float64)
+                      / max(1, self.max_block - 1))
+        # Anything set before the stream's first block is a preset being
+        # loaded, not a knob being turned under a playing note -- there is
+        # nothing sounding yet to click, so it snaps rather than fades.
+        # `advance()` clears this after its first call, and every knob edit
+        # afterwards fades, which is the behaviour #224 actually asks for.
+        self._first_block = True
 
     def index(self, param_id):
         """The slot a parameter occupies. Resolved once, at activation --
@@ -285,6 +374,19 @@ class ParamBlock:
         self.values[i] = self.specs[i].denormalize(unit_value)
         self.dirty += 1
 
+    def set_immediate(self, param_id, value):
+        """Set by name and make it audible on the very next block, bypassing
+        the fade an ordinary `set()` gets from #208's smoothing. For a host
+        applying a whole patch at once, before anything is sounding for a
+        fade to protect -- `activate()`'s own first block already does this
+        for every parameter automatically; this is the same snap, offered
+        for a live edit that wants it deliberately (a preset load into an
+        already-running voice, say)."""
+        i = self.index(param_id)
+        self.values[i] = self.specs[i].clamp(value)
+        self.smoothed[i] = self.values[i]
+        self.dirty += 1
+
     def get(self, param_id):
         return float(self.values[self.index(param_id)])
 
@@ -297,6 +399,62 @@ class ParamBlock:
         for param_id, value in mapping.items():
             if param_id in self._index:
                 self.set(param_id, value)
+
+    # -- the audio thread (#208) ----------------------------------------
+
+    def advance(self, frames):
+        """Chase `values` with `smoothed` by one block, and mark which
+        parameters need a per-sample buffer this block because they are
+        still mid-fade.
+
+        Called by the host immediately before `process()` -- never inside
+        it, for the same reason `dirty` exists one level up: this is the
+        recomputation a block-at-a-time engine can afford once per block
+        and not once per sample.
+
+        A modulation route landing on a settled parameter still has to
+        turn `mod_active` on and seed `buffers` from `smoothed`; that half
+        is `graph.py`'s `CompiledGraph`, applied after this runs and before
+        the module's own `process()`.
+        """
+        if self._first_block:
+            # Nothing has ever sounded yet: apply whatever was set before
+            # this instant exactly, the way loading a preset should.
+            np.copyto(self.smoothed, self.values)
+            self.mod_active[:] = False
+            self._first_block = False
+            return
+
+        rate = self._sample_rate
+        seconds = self._smooth_seconds
+        coeff = (1.0 if seconds <= 0.0 or rate <= 0.0
+                 else 1.0 - math.exp(-frames / (seconds * rate)))
+        self._coeffs[:] = coeff
+        for i in self._discrete:
+            self._coeffs[i] = 1.0
+
+        np.copyto(self._prev, self.smoothed)
+        np.subtract(self.values, self.smoothed, out=self._delta)
+        np.multiply(self._delta, self._coeffs, out=self._delta)
+        np.add(self.smoothed, self._delta, out=self.smoothed)
+
+        # Still moving? -- the magnitude of *this block's* step, not the
+        # remaining distance: a parameter that just landed exactly on
+        # `values` this block still needs its buffer ramped through the
+        # step it just took.
+        np.subtract(self.smoothed, self._prev, out=self._delta)
+        np.abs(self._delta, out=self._delta)
+        np.greater(self._delta, self._settle_eps, out=self.mod_active)
+
+        n = min(frames, self.max_block)
+        ramp = self._ramp
+        for i in range(len(self.specs)):
+            if self.mod_active[i]:
+                start = float(self._prev[i])
+                step = float(self.smoothed[i] - start)
+                buf = self.buffers[i]
+                np.multiply(ramp[:n], step, out=buf[:n])
+                buf[:n] += start
 
 
 # -- identity ----------------------------------------------------------------
@@ -403,6 +561,16 @@ class ProcessContext:
     #: Block counter since the stream opened. Modules that need wall-clock
     #: time derive it from this rather than calling into the clock.
     block_index: int = 0
+    #: `ParamBlock.buffers`, bound at activation (#208): one row per
+    #: parameter, live only where `param_mod_active` says so this block.
+    #: A module that does not care never reads this field -- it is here
+    #: unconditionally so one that does never has to test for `None`.
+    param_buffers: np.ndarray | None = None
+    #: `ParamBlock.mod_active`, same binding. `True` at index i means
+    #: `param_buffers[i]` holds this block's real per-sample values --
+    #: either a modulation route or a knob edit still fading -- and `False`
+    #: means `params[i]` (the smoothed scalar) is the whole story.
+    param_mod_active: np.ndarray | None = None
 
 
 # -- the module itself -------------------------------------------------------
@@ -471,7 +639,8 @@ class Module(ABC):
         `ParamBlock` and port-index bookkeeping cannot be forgotten.
         """
         self.activation = activation
-        self.params = ParamBlock(self.parameters())
+        self.params = ParamBlock(self.parameters(), max_block=activation.max_block,
+                                  sample_rate=activation.sample_rate)
         self._allocate(activation)
         self.reset()
         return self

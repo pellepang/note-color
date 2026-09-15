@@ -70,3 +70,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [Feedback loops through an explicit delay, and who owns stability (ticket #206, plus the Delay half of #205, map #179)](decisions/63-feedback-loops-through-an-explicit-delay-and-who-owns-stability-issue-206.md)
 - [A master filter, and a short delay: the owner's two drawer calls (tickets #205, #206)](decisions/64-a-master-filter-and-a-short-delay-the-owner-s-two-drawer-calls.md)
 - [The first merge: the canvas's patch becomes the sound (ticket #207, map #179)](decisions/65-the-first-merge-the-canvas-s-patch-becomes-the-sound-issue-207.md)
+- [The modulation layer: LFO, scalar-or-buffer parameters, and the poly boundary (issue #208, stage 1 of 3)](decisions/66-the-modulation-layer-lfo-scalar-or-buffer-params-and-the-poly-boundary-issue-208.md)

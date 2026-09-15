@@ -96,6 +96,11 @@ REFUSE_POLY = "poly"
 REFUSE_CYCLE = "cycle"
 REFUSE_DUPLICATE = "duplicate"
 REFUSE_SELF = "self"
+#: A mod cable dropped on a knob `ParamSpec.modulatable=False` marks off
+#: limits (#208, decision 56 §5's settlement §1) -- a waveform choice, an
+#: octave, a filter type. Distinct from `REFUSE_NO_SUCH_PORT` because the
+#: knob exists; it simply does not take this kind of cable.
+REFUSE_NOT_MODULATABLE = "not_modulatable"
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,29 @@ class Connection:
     source_port: str
     dest: str
     dest_port: str
+
+
+@dataclass(frozen=True)
+class ModConnection:
+    """One modulation cable: the second routing table (#208, decision 56
+    §5's settlement §1), addressed `(source node, source port) -> (dest
+    node, param_id, depth)`. The destination is a *parameter id*, never a
+    port -- there is no hidden `mod_in` socket to hang this off, which is
+    the whole reason this is a separate table rather than an ordinary
+    `Connection`.
+
+    `depth_index` is a slot in the owning `ModuleGraph.mod_depths` array,
+    not the depth value itself, for the same reason `ParamBlock.values` is
+    an array rather than attributes: the ring UI (#210 §4) turns this
+    number in real time, and a single float64 store the audio thread reads
+    every block is what lets it do that without a recompile.
+    """
+
+    source: str
+    source_port: str
+    dest: str
+    param_id: str
+    depth_index: int
 
 
 class Node:
@@ -179,6 +207,15 @@ class ModuleGraph:
     def __init__(self):
         self._nodes: dict[str, Node] = {}
         self.connections: list[Connection] = []
+        #: The modulation routing table (#208). Parallel to `connections`
+        #: but a different shape, per decision 56 §5's settlement §1: a
+        #: mod cable's destination is a parameter id, not a port.
+        self.mod_connections: list[ModConnection] = []
+        #: One depth per entry ever added to `mod_connections`, indexed by
+        #: `ModConnection.depth_index`. Never shrunk on disconnect -- a
+        #: freed slot is simply never read again -- so an index handed to a
+        #: compiled graph stays valid for that graph's whole life.
+        self.mod_depths: np.ndarray = np.zeros(0, dtype=np.float64)
         self._activation: Activation | None = None
         #: `{node_id: name}` -- the host's name for a node, where it knows
         #: one the module cannot. See `add()` and `title()`.
@@ -234,6 +271,8 @@ class ModuleGraph:
             return False
         self.connections = [c for c in self.connections
                             if c.source != node_id and c.dest != node_id]
+        self.mod_connections = [c for c in self.mod_connections
+                                 if c.source != node_id and c.dest != node_id]
         self.titles.pop(node_id, None)
         if self._activation is not None:
             node.module.deactivate()
@@ -366,6 +405,122 @@ class ModuleGraph:
             return True
         return False
 
+    # -- modulation cables (#208) ---------------------------------------------
+
+    @staticmethod
+    def _clip_depth(value):
+        """Bipolar, -1..+1, as a fraction of the destination knob's own
+        range (decision 56 §5's settlement §4) -- clamped here so a
+        malformed UI drag cannot hand the audio thread a depth that blows
+        the clamp-after-sum step's assumptions."""
+        return min(max(float(value), -1.0), 1.0)
+
+    @staticmethod
+    def param_spec(node, param_id):
+        for spec in node.module.parameters():
+            if spec.param_id == param_id:
+                return spec
+        return None
+
+    def _existing_mod_connection(self, source, source_port, dest, param_id):
+        for c in self.mod_connections:
+            if (c.source, c.source_port, c.dest, c.param_id) == (
+                    source, source_port, dest, param_id):
+                return c
+        return None
+
+    def judge_modulation(self, source, source_port, dest, param_id) -> Verdict:
+        """Would a mod cable from `source_port` land on `dest`'s `param_id`
+        knob? The rules that do not need to know which side of Mix
+        anything is on -- `poly.PolyGraph.judge_modulation()` adds that
+        one, the same way it wraps `judge()` for audio cables.
+
+        Every refusal names what is wrong and what to do instead, per this
+        file's own rule for `judge()`.
+        """
+        src = self._nodes.get(source)
+        dst = self._nodes.get(dest)
+        if src is None or dst is None:
+            return Verdict(False, REFUSE_NO_SUCH_NODE,
+                           "That module is no longer on the canvas.")
+
+        out_port = src.port(source_port)
+        if out_port is None:
+            return Verdict(False, REFUSE_NO_SUCH_PORT,
+                           f"{self.title(source)} has no socket called {source_port!r}.")
+        if out_port.direction != contract.DIRECTION_OUT:
+            return Verdict(False, REFUSE_DIRECTION, (
+                f"{out_port.name} on {self.title(source)} is an input. A modulation "
+                f"cable runs out of a module and onto a knob."))
+        if out_port.kind != contract.PORT_MOD:
+            names = {contract.PORT_AUDIO: "sound", contract.PORT_EVENT: "notes"}
+            return Verdict(False, REFUSE_TYPE, (
+                f"{out_port.name} on {self.title(source)} sends "
+                f"{names.get(out_port.kind, out_port.kind)}, and a knob takes knob "
+                f"movement. Patch its Mod output instead."))
+
+        spec = self.param_spec(dst, param_id)
+        if spec is None:
+            return Verdict(False, REFUSE_NO_SUCH_PORT,
+                           f"{self.title(dest)} has no knob called {param_id!r}.")
+        if not spec.modulatable:
+            return Verdict(False, REFUSE_NOT_MODULATABLE, (
+                f"{spec.name} on {self.title(dest)} does not take modulation."))
+
+        if source == dest:
+            return Verdict(False, REFUSE_SELF,
+                           f"{self.title(source)} cannot modulate its own knob.")
+
+        if self._existing_mod_connection(source, source_port, dest, param_id) is not None:
+            return Verdict(False, REFUSE_DUPLICATE, (
+                f"{self.title(source)} is already modulating {spec.name} on "
+                f"{self.title(dest)}."))
+
+        return ACCEPT
+
+    def _add_mod_connection(self, source, source_port, dest, param_id, depth):
+        """Off the audio thread only -- grows `mod_depths`, which the
+        compiled graph then reads by index, never by name."""
+        index = self.mod_depths.shape[0]
+        self.mod_depths = np.append(self.mod_depths, self._clip_depth(depth))
+        self.mod_connections.append(
+            ModConnection(source, source_port, dest, param_id, index))
+        self.revision += 1
+        return index
+
+    def connect_modulation(self, source, source_port, dest, param_id, depth=1.0) -> Verdict:
+        """Judge, and patch the mod cable in if accepted -- `connect()`'s
+        counterpart for the routing table."""
+        verdict = self.judge_modulation(source, source_port, dest, param_id)
+        if verdict.ok:
+            self._add_mod_connection(source, source_port, dest, param_id, depth)
+        return verdict
+
+    def force_connect_modulation(self, source, source_port, dest, param_id, depth=1.0):
+        """Plug in without judging -- `force_connect()`'s counterpart, for
+        tests that need to build a routing the rules forbid."""
+        return self._add_mod_connection(source, source_port, dest, param_id, depth)
+
+    def disconnect_modulation(self, source, source_port, dest, param_id):
+        c = self._existing_mod_connection(source, source_port, dest, param_id)
+        if c is None:
+            return False
+        self.mod_connections.remove(c)
+        self.revision += 1
+        return True
+
+    def set_modulation_depth(self, source, source_port, dest, param_id, value):
+        """The ring's write path (decision 56 §5's settlement §4, and #210
+        §3's dashed ring): depth lives on the connection and is edited here
+        without touching graph structure, so turning it never triggers a
+        recompile -- the same reasoning `ParamBlock.set()` already gives a
+        knob edit."""
+        c = self._existing_mod_connection(source, source_port, dest, param_id)
+        if c is None:
+            return False
+        self.mod_depths[c.depth_index] = self._clip_depth(value)
+        return True
+
     # -- the rules ------------------------------------------------------------
 
     def _type_sentence(self, source, out_port, dest, in_port):
@@ -427,9 +582,26 @@ class ModuleGraph:
             f"later instead of instantly."))
 
     def _ordering_edges(self):
-        """The cables that constrain execution order: every one except those
-        leaving a module whose output is already a block old."""
-        return [c for c in self.connections if not self._nodes[c.source].is_delayed]
+        """The cables that constrain execution order: every audio/mod-port
+        cable except those leaving a module whose output is already a
+        block old, plus every modulation-routing-table entry -- a knob's
+        modulation has to be computed from a value the source already
+        produced this block, exactly like an audio cable, and reuses the
+        same ordering machinery rather than a second copy of it.
+
+        Known gap, left for #211's canvas work: a cycle built only from mod
+        edges (or a mix of mod and audio edges) is not yet given a graceful
+        `Verdict` refusal the way an audio-only cycle is by
+        `_cycle_verdict()` -- it surfaces as `compile()`'s `CycleError`
+        instead, which is safe (nothing runs on a graph that would not
+        terminate) but not yet a sentence aimed at the person holding the
+        cable.
+        """
+        edges = [c for c in self.connections if not self._nodes[c.source].is_delayed]
+        edges += [Connection(c.source, c.source_port, c.dest, "")
+                  for c in self.mod_connections
+                  if c.source in self._nodes and c.dest in self._nodes]
+        return edges
 
     def _ordering_path(self, start, goal):
         """Depth-first search for `goal` from `start` over ordering edges
@@ -527,12 +699,27 @@ class ModuleGraph:
         """
         if self._activation is None:
             raise contract.ContractError("compile() before activate()")
-        zeros = np.zeros(self._activation.max_block, dtype=np.float64)
+        max_block = self._activation.max_block
+        zeros = np.zeros(max_block, dtype=np.float64)
         out_buffers = {}
         for node in self._nodes.values():
             for port in node.outputs:
                 out_buffers[(node.node_id, port.port_id)] = np.zeros(
-                    self._activation.max_block, dtype=np.float64)
+                    max_block, dtype=np.float64)
+
+        # `(dest, param_id) -> [(source_buffer, depths_array, depth_index)]`
+        # -- every modulation route whose source has an output buffer in
+        # *this* graph. A cross-boundary route (a global source reaching a
+        # per-note destination) never has one here: `poly.PolyGraph`
+        # resolves those itself, one graph up, because the source and dest
+        # buffers this needs live in two different `CompiledGraph`s.
+        mod_targets: dict[tuple[str, str], list] = {}
+        for c in self.mod_connections:
+            source_buf = out_buffers.get((c.source, c.source_port))
+            if source_buf is None or c.dest not in self._nodes:
+                continue
+            mod_targets.setdefault((c.dest, c.param_id), []).append(
+                (source_buf, self.mod_depths, c.depth_index))
 
         steps = []
         for node_id in self.order():
@@ -552,31 +739,109 @@ class ModuleGraph:
                     # pure cost -- no module writes to its inputs.
                     inputs.append(sources[0])
                 else:
-                    target = np.zeros(self._activation.max_block, dtype=np.float64)
+                    target = np.zeros(max_block, dtype=np.float64)
                     sums.append((target, tuple(sources)))
                     inputs.append(target)
+
+            params = node.module.params
+            mods = []
+            if params is not None:
+                for spec in params.specs:
+                    sources = mod_targets.get((node_id, spec.param_id))
+                    if not sources:
+                        continue
+                    mods.append(ModRoute(
+                        param_index=params.index(spec.param_id),
+                        minimum=spec.minimum, maximum=spec.maximum,
+                        buffers=params.buffers, smoothed=params.smoothed,
+                        mod_active=params.mod_active,
+                        scratch=np.zeros(max_block, dtype=np.float64),
+                        sources=tuple(sources),
+                    ))
+
             ctx = ProcessContext(
                 frames=0, sample_rate=self._activation.sample_rate,
                 inputs=tuple(inputs),
                 outputs=tuple(out_buffers[(node_id, p.port_id)] for p in node.outputs),
-                params=node.module.params.values if node.module.params else None,
+                params=params.smoothed if params else None,
+                param_buffers=params.buffers if params else None,
+                param_mod_active=params.mod_active if params else None,
             )
-            steps.append(Step(node.module, ctx, tuple(sums)))
+            steps.append(Step(node.module, ctx, tuple(sums), tuple(mods), node_id))
 
         return CompiledGraph(tuple(steps), out_buffers, self.revision)
 
 
 @dataclass(frozen=True)
+class ModRoute:
+    """One destination knob's incoming modulation, prebound for the audio
+    thread (#208, decision 56 §5's settlement §2/§4).
+
+    `buffers`/`smoothed`/`mod_active` are the destination's own
+    `ParamBlock` arrays -- the same objects `ProcessContext` binds, so
+    writing here is exactly what the module reads. `sources` is
+    `(source_buffer, depths_array, depth_index)` per incoming cable:
+    `depths_array[depth_index]` is read fresh every block, never copied,
+    which is what lets the ring (#210 §4) change a depth without a
+    recompile.
+    """
+
+    param_index: int
+    minimum: float
+    maximum: float
+    buffers: np.ndarray
+    smoothed: np.ndarray
+    mod_active: np.ndarray
+    #: Reused across sources and blocks -- one route's sources are applied
+    #: serially, so one scratch array is enough.
+    scratch: np.ndarray
+    sources: tuple
+
+    def apply(self, frames):
+        """Sum every source into the destination's buffer, scaled by its
+        own depth as a fraction of the knob's range, then clamp once --
+        decision 56 §5's settlement §4: multiple sources sum, then clamp
+        at the destination, never per source.
+
+        Starts from `smoothed` rather than zero unless a knob edit is
+        already mid-fade and has seeded the buffer itself (`mod_active`
+        already true coming in) -- modulation adds *around* wherever the
+        knob currently sits, edited or not.
+        """
+        buf = self.buffers[self.param_index]
+        if not self.mod_active[self.param_index]:
+            buf[:frames] = self.smoothed[self.param_index]
+            self.mod_active[self.param_index] = True
+        span = self.maximum - self.minimum
+        scratch = self.scratch
+        for source_buf, depths, depth_index in self.sources:
+            depth = depths[depth_index]
+            np.multiply(source_buf[:frames], depth * span, out=scratch[:frames])
+            np.add(buf[:frames], scratch[:frames], out=buf[:frames])
+        np.clip(buf[:frames], self.minimum, self.maximum, out=buf[:frames])
+
+
+@dataclass(frozen=True)
 class Step:
-    """One module's turn: sum whatever lands on its shared inputs, then run
-    it. Frozen and prebound, because the audio thread must not discover
-    anything."""
+    """One module's turn: sum whatever lands on its shared inputs, apply
+    whatever modulation lands on its knobs, then run it. Frozen and
+    prebound, because the audio thread must not discover anything."""
 
     module: object
     ctx: ProcessContext
     #: `(target, sources)` for each input port carrying more than one cable.
     #: Empty for the overwhelming majority of nodes.
     sums: tuple
+    #: One `ModRoute` per modulated parameter. Empty for every module
+    #: nothing is patched into, which is most of them (#208's whole reason
+    #: for the scalar-or-buffer split).
+    mods: tuple = ()
+    #: This step's node id -- not needed to *run* the step, only to find it
+    #: again. `poly.PolyGraph.with_extra_mods()` is the one caller: a
+    #: global-source-to-per-note-destination route lives in a different
+    #: `CompiledGraph` than its destination, so it cannot be an ordinary
+    #: `mod_targets` entry inside this graph's own `compile()`.
+    node_id: str = ""
 
 
 class CompiledGraph:
@@ -601,6 +866,28 @@ class CompiledGraph:
         final signal, and how a test reads an intermediate one."""
         return self._buffers[(node_id, port_id)]
 
+    def with_extra_mods(self, node_id, extra_mods) -> "CompiledGraph":
+        """A new `CompiledGraph`, identical to this one except that
+        `node_id`'s step has `extra_mods` appended to its `ModRoute`s.
+
+        The one caller is `poly.PolyGraph.activate()`, for a modulation
+        cable that crosses the Mix boundary from a global source to a
+        per-note destination (decision 56 §5's settlement §3): the source
+        and destination compile into two different `CompiledGraph`s
+        (mono's and one per voice), so the route cannot be an ordinary
+        entry in either one's own `compile()`. Called once, off the audio
+        thread, before the graph ever runs -- it is a second assembly
+        pass, not a live edit, and `CompiledGraph`'s own immutability is
+        unaffected: this builds a new one rather than mutating `self`.
+        """
+        steps = tuple(
+            dataclasses.replace(step, mods=step.mods + tuple(extra_mods))
+            if step.node_id == node_id else step
+            for step in self.steps)
+        if all(step.node_id != node_id for step in self.steps):
+            raise contract.ContractError(f"no such node in this compiled graph: {node_id!r}")
+        return CompiledGraph(steps, self._buffers, self.revision)
+
     def process(self, frames, note=None):
         """Run every module once, in order. The audio thread's whole job.
 
@@ -609,6 +896,14 @@ class CompiledGraph:
         """
         self.block_index += 1
         for step in self.steps:
+            # Smoothing and modulation both land on the parameter path
+            # before the module ever runs (#208): a knob edit fades in
+            # (`advance()`), and anything patched onto it is added on top
+            # (`ModRoute.apply()`), so `process()` sees one already-settled
+            # array either way and never has to know which happened.
+            step.module.params.advance(frames)
+            for route in step.mods:
+                route.apply(frames)
             for target, sources in step.sums:
                 np.copyto(target[:frames], sources[0][:frames])
                 for extra in sources[1:]:

@@ -63,6 +63,8 @@ says which is which.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from notecolor.settings import config
@@ -71,7 +73,7 @@ from notecolor.audio.graph.contract import (
     Activation, Module, ModuleDescriptor, NoteContext, audio_in, audio_out,
 )
 from notecolor.audio.graph.graph import (
-    REFUSE_POLY, Connection, ModuleGraph, Verdict,
+    REFUSE_POLY, Connection, ModRoute, ModuleGraph, Verdict,
 )
 
 #: How the two sides are named everywhere below, and in `gui/patch_graph.py`.
@@ -323,6 +325,46 @@ class PolyGraph:
         seen.discard(start)
         return seen
 
+    def mod_crossings(self):
+        """Modulation cables reaching from the once-only side to the
+        per-note side -- decision 56 §5's settlement §3's *legal*
+        direction: "global source -> per-note knob: legal. One value,
+        broadcast to every voice."
+
+        The reverse (`crossings_modulation_illegal` in spirit, but that
+        direction never gets this far: `judge_modulation()` refuses it
+        before it is ever added to `graph.mod_connections`) is the
+        `REFUSE_POLY` case there is no Mix node in the modulation layer to
+        absorb, per the settlement's own wording -- sixteen voices each
+        proposing a value for one knob, with nothing to sum them.
+        """
+        sides = self.sides()
+        return [c for c in self.graph.mod_connections
+                if sides.get(c.source) == SIDE_MONO and sides.get(c.dest) == SIDE_POLY]
+
+    def judge_modulation(self, source, source_port, dest, param_id):
+        """`graph.judge_modulation()` plus the poly-boundary rule
+        (decision 56 §5's settlement §3): a per-note source may not reach
+        a once-only knob. The call the canvas should make for a mod
+        cable, the same way `judge()` is the call for an audio one."""
+        verdict = self.graph.judge_modulation(source, source_port, dest, param_id)
+        if not verdict.ok:
+            return verdict
+        sides = self.sides()
+        if sides.get(source) == SIDE_POLY and sides.get(dest) == SIDE_MONO:
+            return Verdict(False, REFUSE_POLY, (
+                f"{self.graph.title(source)} runs once per held note; "
+                f"{self.graph.title(dest)} runs once. A per-note source cannot reach "
+                f"a once-only knob -- there is no MIX node in the modulation layer to "
+                f"sum sixteen voices into one number."))
+        return verdict
+
+    def connect_modulation(self, source, source_port, dest, param_id, depth=1.0):
+        verdict = self.judge_modulation(source, source_port, dest, param_id)
+        if verdict.ok:
+            self.graph.connect_modulation(source, source_port, dest, param_id, depth)
+        return verdict
+
     def crossings(self):
         """Cables that leave the per-note side and land on the once-only
         side without passing through Mix.
@@ -389,6 +431,13 @@ class PolyGraph:
             raise contract.ContractError(
                 f"these cables cross the Mix boundary without going through Mix: {named}")
         sides = self.sides()
+        illegal_mod = [c for c in self.graph.mod_connections
+                       if sides.get(c.source) == SIDE_POLY and sides.get(c.dest) == SIDE_MONO]
+        if illegal_mod:
+            named = ", ".join(f"{c.source} → {c.dest}.{c.param_id}" for c in illegal_mod)
+            raise contract.ContractError(
+                f"these modulation cables reach a once-only knob from a per-note "
+                f"source, which `judge_modulation()` should have refused: {named}")
         poly_ids = [n for n, side in sides.items() if side == SIDE_POLY]
         mono_ids = [n for n, side in sides.items() if side == SIDE_MONO]
 
@@ -403,6 +452,44 @@ class PolyGraph:
             voice = Voice(index, sub)
             voice.compiled = sub.compile()
             self.voices.append(voice)
+
+        # The one modulation direction that crosses the Mix boundary
+        # (decision 56 §5's settlement §3): a global source reaching every
+        # voice's copy of a per-note knob. One `ModRoute` per voice, all
+        # reading the same once-only source buffer and the same shared
+        # depth, injected into that voice's own compiled graph via
+        # `with_extra_mods()` -- so it runs exactly where an ordinary
+        # in-subgraph route would, right after that step's `advance()` and
+        # before the module itself, and `process()` below needs no special
+        # case for it at all.
+        #
+        # `source_buffer` is `mono_compiled`'s own persistent output for
+        # that port -- the same array `self._mono_compiled.process()`
+        # overwrites once per `process()` call below, which happens
+        # *after* every voice runs that same call. So a voice always reads
+        # last block's global value here: one block (11.61ms at 512
+        # frames) stale. That lag is deliberate, not a shortcut -- fixing
+        # it would mean computing the once-only side before the per-note
+        # side, which is the sum the Mix node exists to perform, in the
+        # wrong order. A source slow enough to be called an LFO
+        # (musically under ~20Hz) does not notice one block; the same lag
+        # on *audio* would not be tolerated, which is exactly why decision
+        # 56 §4 needs an explicit Delay to legalise it there and this
+        # needs nothing.
+        for mc in self.mod_crossings():
+            spec = self.graph.param_spec(self.graph.node(mc.dest), mc.param_id)
+            source_buffer = mono_compiled.buffer(mc.source, mc.source_port)
+            for voice in self.voices:
+                dest_params = voice.graph.node(mc.dest).module.params
+                route = ModRoute(
+                    param_index=dest_params.index(mc.param_id),
+                    minimum=spec.minimum, maximum=spec.maximum,
+                    buffers=dest_params.buffers, smoothed=dest_params.smoothed,
+                    mod_active=dest_params.mod_active,
+                    scratch=np.zeros(activation.max_block, dtype=np.float64),
+                    sources=((source_buffer, self.graph.mod_depths, mc.depth_index),),
+                )
+                voice.compiled = voice.compiled.with_extra_mods(mc.dest, (route,))
 
         # Which per-note outputs the Mix node is fed by. Held as node/port
         # pairs rather than buffers, because every voice has its own buffer
@@ -431,6 +518,12 @@ class PolyGraph:
         """
         wanted = set(node_ids)
         sub = ModuleGraph()
+        # The depths array is shared, not copied: turning the ring on one
+        # source's depth (decision 56 §5's settlement §4) has to move
+        # every voice's copy of that source at once, and a single array
+        # every voice's `ModRoute` reads by the same index is what does
+        # that without the host fanning a write out over sixteen voices.
+        sub.mod_depths = self.graph.mod_depths
         for node_id in node_ids:
             module = self.graph.node(node_id).module
             sub.add(node_id, module.new_instance() if clone else module)
@@ -438,6 +531,9 @@ class PolyGraph:
             if cable.source in wanted and cable.dest in wanted:
                 sub.force_connect(cable.source, cable.source_port,
                                   cable.dest, cable.dest_port)
+        for mc in self.graph.mod_connections:
+            if mc.source in wanted and mc.dest in wanted:
+                sub.mod_connections.append(mc)
         return sub
 
     def module(self, node_id, voice=None):

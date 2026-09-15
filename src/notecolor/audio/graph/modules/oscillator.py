@@ -15,6 +15,15 @@ and it is the point: the contract's no-allocation rule is worth nothing if
 the first module written against it allocates six temporaries a block. A
 module that reads like this is also one an eventual C inner loop can replace
 line for line.
+
+`level` and `fine` are two of the destinations #208 (decision 56 §5's
+settlement §2) names directly as needing per-sample precision: `process()`
+reads `ctx.param_buffers` instead of the scalar `ctx.params` for either one
+while `ctx.param_mod_active` says it is live this block, and falls back to
+the ordinary scalar path otherwise -- the same branch shape `filter.py`
+uses for `cutoff`/`resonance`. `octave` and `semitones` cannot receive a
+mod cable at all (`modulatable=False`): a waveform pitched by whole
+semitones mid-sweep is a different instrument, not a bend.
 """
 
 from __future__ import annotations
@@ -92,6 +101,11 @@ class WavetableOscillator(Module):
         self._a = np.zeros(n, dtype=np.float64)
         self._b = np.zeros(n, dtype=np.float64)
         self._scratch = np.zeros(n, dtype=np.float64)
+        # Only touched when `fine` carries a live modulation buffer (#208):
+        # a per-sample frequency multiplier, so pitch modulation is a real
+        # sweep rather than one update a block.
+        self._dt = np.zeros(n, dtype=np.float64)
+        self._exponent = np.zeros(n, dtype=np.float64)
 
     def reset(self):
         self._phase = 0.0
@@ -104,26 +118,61 @@ class WavetableOscillator(Module):
         if n <= 0:
             return
         values = ctx.params
-        level = values[self._p["level"]]
-        if level <= 0.0:
-            out[:n] = 0.0
-            return
+        p = self._p
+        mod_active = ctx.param_mod_active
 
-        frequency = ctx.note.frequency if ctx.note is not None else 440.0
-        frequency *= 2.0 ** (
-            values[self._p["octave"]]
-            + values[self._p["semitones"]] / 12.0
-            + values[self._p["fine"]] / 1200.0
-        )
-        dt = frequency / ctx.sample_rate
+        level_live = mod_active is not None and mod_active[p["level"]]
+        level_buf = ctx.param_buffers[p["level"]] if level_live else None
+        if level_live:
+            # `np.max` rather than `level_buf[:n] > 0.0`: a comparison
+            # without `out=` allocates the boolean array it returns, and
+            # this is only checking for "silent the whole block".
+            if float(np.max(level_buf[:n])) <= 0.0:
+                out[:n] = 0.0
+                return
+        else:
+            level = values[p["level"]]
+            if level <= 0.0:
+                out[:n] = 0.0
+                return
 
-        # phases[i] = (phase + i*dt) mod 1, without building an arange:
-        # cumsum of a constant is an arange, and `out=` keeps it in the
-        # buffer allocated at activation.
-        self._phases[:n] = dt
-        np.cumsum(self._phases[:n], out=self._phases[:n])
-        self._phases[:n] += self._phase - dt
-        next_phase = (self._phase + dt * n) % 1.0
+        base_frequency = ctx.note.frequency if ctx.note is not None else 440.0
+        octave = values[p["octave"]]
+        semitones = values[p["semitones"]]
+        fine_live = mod_active is not None and mod_active[p["fine"]]
+
+        if not fine_live:
+            frequency = base_frequency * 2.0 ** (
+                octave + semitones / 12.0 + values[p["fine"]] / 1200.0)
+            dt = frequency / ctx.sample_rate
+            # phases[i] = (phase + i*dt) mod 1, without building an arange:
+            # cumsum of a constant is an arange, and `out=` keeps it in the
+            # buffer allocated at activation.
+            self._phases[:n] = dt
+            np.cumsum(self._phases[:n], out=self._phases[:n])
+            self._phases[:n] += self._phase - dt
+            next_phase = (self._phase + dt * n) % 1.0
+        else:
+            # A live pitch-modulation buffer on `fine` (#208, decision 56
+            # §5's settlement §2, named directly as one of the
+            # destinations this stage has to prove): a per-sample
+            # frequency, still without allocating -- `octave`/`semitones`
+            # cannot carry a mod cable at all (`modulatable=False`), so
+            # only `fine` needs to vary within the block.
+            fine_buf = ctx.param_buffers[p["fine"]]
+            exponent = self._exponent
+            np.multiply(fine_buf[:n], 1.0 / 1200.0, out=exponent[:n])
+            exponent[:n] += octave + semitones / 12.0
+            dt_arr = self._dt
+            np.power(2.0, exponent[:n], out=dt_arr[:n])
+            np.multiply(dt_arr[:n], base_frequency / ctx.sample_rate, out=dt_arr[:n])
+            frequency = base_frequency * 2.0 ** (
+                octave + semitones / 12.0 + float(fine_buf[n - 1]) / 1200.0)
+            np.cumsum(dt_arr[:n], out=self._phases[:n])
+            total = float(self._phases[n - 1])
+            self._phases[:n] += self._phase - float(dt_arr[0])
+            next_phase = (self._phase + total) % 1.0
+
         np.mod(self._phases[:n], 1.0, out=self._phases[:n])
         self._phase = next_phase
 
@@ -131,7 +180,7 @@ class WavetableOscillator(Module):
         if self._is_pulse:
             # pulse(p, d) = saw(p - d) - saw(p) + (2d - 1), read from the saw
             # table -- `synth_engine.pulse_from_saw()` in place.
-            width = values[self._p["pulse_width"]]
+            width = values[p["pulse_width"]]
             np.subtract(self._phases[:n], width, out=self._shifted[:n])
             np.mod(self._shifted[:n], 1.0, out=self._shifted[:n])
             self._read_into(table, self._shifted, out, n)
@@ -140,7 +189,11 @@ class WavetableOscillator(Module):
             out[:n] += 2.0 * width - 1.0
         else:
             self._read_into(table, self._phases, out, n)
-        np.multiply(out[:n], level, out=out[:n])
+
+        if level_live:
+            np.multiply(out[:n], level_buf[:n], out=out[:n])
+        else:
+            np.multiply(out[:n], level, out=out[:n])
 
     def _read_into(self, table, phases, dest, n):
         """Linear interpolation of one table band at `phases`, written into

@@ -31,6 +31,19 @@ a real, measured departure, it is bounded, it is scipy's and not ours, and
 the number is zero. Removing it means a C or Cython inner loop behind
 #145's seam, which is the same seam that would replace this whole module.
 
+**Modulated cutoff/resonance (#208).** The scalar fast path above -- one
+coefficient recompute a block -- updates at most 86 times a second (512
+frames / 44100 Hz), which #103's own research already measured and named:
+"a smooth filter sweep... versus an audibly stepped one". So when
+`cutoff` or `resonance` has a live modulation buffer this block
+(`ctx.param_mod_active`), `process()` instead recomputes coefficients
+every `config.SYNTH_CONTROL_SUB_BLOCK` (64) frames -- the same control
+rate `synth_engine`'s filter envelope and LFO already run at, for the
+same reason, chosen there as #103's measured price knee. That means
+several smaller `lfilter` calls instead of one -- still one allocation
+per call, still scipy's, and smaller per call than the unmodulated case,
+so the bound `test_synth_graph_voice.py` asserts does not move.
+
 **SciPy is an optional extra (#111).** Imported lazily through
 `synth_engine.signal_module()`, never at module scope, and required in
 `_allocate()` -- off the audio thread -- so a patch containing a filter
@@ -154,28 +167,60 @@ class StateVariableFilter(Module):
             return
         source = ctx.inputs[self._in_index]
         values = ctx.params
+        p = self._p
 
-        cutoff = values[self._p["cutoff"]]
-        resonance = values[self._p["resonance"]]
-        ftype = int(values[self._p["type"]])
-        tracking = values[self._p["key_tracking"]]
+        ftype = int(values[p["type"]])
+        tracking = values[p["key_tracking"]]
         pitch = ctx.note.pitch if ctx.note is not None else KEY_TRACKING_CENTRE
 
-        # Five float compares against knobs that are not moving, versus a
-        # `tan`, a divide and two tuple builds that are not needed: most
-        # blocks of most notes take the cheap branch. This is what
-        # `ParamBlock.dirty` is for in spirit; it is done by value because
-        # `ProcessContext` carries the values array, not the block.
-        if (cutoff != self._last_cutoff or resonance != self._last_resonance
-                or ftype != self._last_type or tracking != self._last_tracking
-                or pitch != self._last_pitch):
-            self._recompute(cutoff, resonance, ftype, tracking, pitch, ctx.sample_rate)
+        cutoff_live = ctx.param_mod_active is not None and ctx.param_mod_active[p["cutoff"]]
+        resonance_live = ctx.param_mod_active is not None and ctx.param_mod_active[p["resonance"]]
 
-        # The one allocation this module makes: `lfilter` has no `out=`.
-        # See the module docstring -- it is measured, not waved away.
-        filtered, zf = self._lfilter(self._b, self._a, source[:n], zi=self._zi)
-        np.copyto(out[:n], filtered)
-        np.copyto(self._zi, zf)
+        if not cutoff_live and not resonance_live:
+            cutoff = values[p["cutoff"]]
+            resonance = values[p["resonance"]]
+            # Five float compares against knobs that are not moving, versus
+            # a `tan`, a divide and two tuple builds that are not needed:
+            # most blocks of most notes take the cheap branch. This is what
+            # `ParamBlock.dirty` is for in spirit; it is done by value
+            # because `ProcessContext` carries the values array, not the
+            # block.
+            if (cutoff != self._last_cutoff or resonance != self._last_resonance
+                    or ftype != self._last_type or tracking != self._last_tracking
+                    or pitch != self._last_pitch):
+                self._recompute(cutoff, resonance, ftype, tracking, pitch, ctx.sample_rate)
+            # The one allocation this module makes: `lfilter` has no
+            # `out=`. See the module docstring -- it is measured, not
+            # waved away.
+            filtered, zf = self._lfilter(self._b, self._a, source[:n], zi=self._zi)
+            np.copyto(out[:n], filtered)
+            np.copyto(self._zi, zf)
+            return
+
+        # Live modulation on cutoff and/or resonance (#208): recompute at
+        # control rate rather than once a block -- see the module
+        # docstring's "Modulated cutoff/resonance" section.
+        cutoff_buf = ctx.param_buffers[p["cutoff"]] if cutoff_live else None
+        resonance_buf = ctx.param_buffers[p["resonance"]] if resonance_live else None
+        base_cutoff = values[p["cutoff"]]
+        base_resonance = values[p["resonance"]]
+        sub = config.SYNTH_CONTROL_SUB_BLOCK
+        start = 0
+        while start < n:
+            end = min(start + sub, n)
+            cutoff = float(cutoff_buf[start]) if cutoff_buf is not None else base_cutoff
+            resonance = (float(resonance_buf[start]) if resonance_buf is not None
+                         else base_resonance)
+            self._recompute(cutoff, resonance, ftype, tracking, pitch, ctx.sample_rate)
+            filtered, zf = self._lfilter(self._b, self._a, source[start:end], zi=self._zi)
+            np.copyto(out[start:end], filtered)
+            np.copyto(self._zi, zf)
+            start = end
+        # The scalar cache no longer describes what just ran; a later
+        # block that returns to the unmodulated path must recompute rather
+        # than compare against a value that was never really current.
+        self._last_cutoff = float("nan")
+        self._last_resonance = float("nan")
 
     def _recompute(self, cutoff, resonance, ftype, tracking, pitch, sample_rate):
         """New coefficients into the arrays `lfilter` already reads.
