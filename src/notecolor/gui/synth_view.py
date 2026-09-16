@@ -48,6 +48,7 @@ from notecolor.settings import config, patch_format
 from notecolor.tui import synth_params
 from notecolor.tui.synth_layout import slugify, NOTE_CHANNEL, PAD_CHANNEL
 from notecolor.audio import effects as effects_audio
+from notecolor.audio.graph.modules import short_delay
 from notecolor.audio.sound_engine import NoteOn
 from notecolor.audio.sampler import SamplerEngine
 from notecolor.audio.midi_input import MidiDispatcher, MidiInput
@@ -171,7 +172,7 @@ UTILITY_TYPES = frozenset({"level"})
 #: gone outright: it used to be a fixed choice because the fixed engine
 #: had nowhere else to say it; on this canvas the destination is whichever
 #: knob the Mod cable is dropped on.
-GRAPH_ONLY_TYPES = UTILITY_TYPES | {"lfo", "mod_env", "midi_cc"}
+GRAPH_ONLY_TYPES = UTILITY_TYPES | {"lfo", "mod_env", "midi_cc", "short_delay"}
 
 #: Knob specs for `UTILITY_TYPES` and the LFO, in the same shape
 #: `EFFECT_PARAM_SPECS` uses -- `spec.section` is unused (there is no
@@ -221,6 +222,38 @@ UTILITY_PARAM_SPECS = {
         synth_params.ParamSpec("params", "velocity", "Vel", synth_params.KIND_FLOAT,
                                 0.0, 1.0, 0.05),
     ),
+    # Issue #236, decision 64: `graph/modules/short_delay.ShortDelay`. It
+    # takes this path rather than `_build_effect_module()`'s for the reason
+    # `UTILITY_TYPES`' docstring gives -- there is no `audio/effects.py`
+    # entry named `short_delay`, and inventing one would put a
+    # Synth-View-only module on the score editor's fixed effects bus.
+    #
+    # Three knobs, matching `ShortDelay.parameters()` one for one, and each
+    # of the three ways it deliberately differs from Delay is visible here:
+    # `time`'s range is the sub-block one (`MIN_SHORT_SECONDS` to
+    # `MAX_SHORT_SECONDS`, tenths of a millisecond to 50ms, where Delay
+    # starts at 1ms and runs to two seconds); `feedback` is bipolar, since
+    # a negative comb cancels the fundamental instead of reinforcing it
+    # (half of what a flanger sounds like); `mix` defaults to half, because
+    # at these lengths the interference between wet and dry *is* the
+    # effect. There is no Damp knob, because the module has no damping --
+    # see its docstring. `digits=4` rather than Delay's 3 so the readout
+    # keeps a decimal once `format_value()` switches to milliseconds
+    # ("0.1ms", not "0ms").
+    #
+    # A knob for `time` even though `ParamSpec(modulatable=False)`
+    # (decision 67): the restriction is on *modulation* cables, not on the
+    # user turning it. `patch_graph` refuses a Mod cable dropped here with
+    # its own not-modulatable sentence; #228 is what would lift that.
+    "short_delay": (
+        synth_params.ParamSpec("params", "time", "Time", synth_params.KIND_FLOAT,
+                                short_delay.MIN_SHORT_SECONDS, short_delay.MAX_SHORT_SECONDS,
+                                1.3, synth_params.SCALE_LOG, unit="s", digits=4),
+        synth_params.ParamSpec("params", "feedback", "Fdbk", synth_params.KIND_FLOAT,
+                                -0.95, 0.95, 0.05),
+        synth_params.ParamSpec("params", "mix", "Mix", synth_params.KIND_FLOAT,
+                                0.0, 1.0, 0.05),
+    ),
 }
 
 #: Mirrors `graph/modules/level.Level.parameters()`'s own default (unity
@@ -232,6 +265,10 @@ UTILITY_DEFAULTS = {
     "lfo": {"rate": 2.0, "shape": "sine", "phase": 0.0, "retrigger": "on"},
     "mod_env": {"delay": 0.0, "attack": 0.005, "hold": 0.0, "decay": 0.1,
                 "sustain": 0.8, "release": 0.2, "velocity": 0.0},
+    # `graph/modules/short_delay.ShortDelay.parameters()`'s own defaults,
+    # mix included: half, not dry, because a Short Delay at 0% wet is
+    # inaudible and would read as a module that does nothing (#236).
+    "short_delay": {"time": 0.012, "feedback": 0.0, "mix": 0.5},
 }
 
 #: Short descriptive tag shown small/dim next to a module window's title,
@@ -253,6 +290,13 @@ TAG_FOR_TYPE = {
     "midi_cc": "CC1→mod",
     "voice": "poly 16",
     "delay": "1/8 dot",
+    # The one word that tells the two delays apart at a glance (#236): this
+    # is the one whose times are too short to hear as repeats.
+    # One word, not two: "Short Delay" is already a long title and the tag
+    # beside it elides at about six characters ("comb/flange" showed as
+    # "comb/f…"). This is the word that says why the times are too short to
+    # hear as repeats.
+    "short_delay": "flange",
     "chorus": "detune",
     "level": "unity",
 }
@@ -279,6 +323,11 @@ DOT_COLOR_FOR_TYPE = {
     "midi_cc": theme.TEAL,
     "voice": theme.LINEN_DIM,
     "delay": theme.AMBER,
+    # Kin to Delay's amber but not the same swatch (#236): the two are the
+    # same family of module and the canvas should say so, while still
+    # letting a glance tell which one is on screen -- the naming mitigation
+    # decision 64 chose, carried into colour.
+    "short_delay": theme.COPPER_LIGHT,
     "chorus": theme.TEAL_PALE,
     # Deliberately neither an effect colour nor a synth-core one: Level is
     # a utility, and this is the codebase's "faintest legible tone".
@@ -305,7 +354,14 @@ DOT_COLOR_FOR_TYPE = {
 #: moment a drawer entry for it exists (`gui/patch_graph.py`, not touched
 #: by this ticket -- see `modules/midi_cc.py`'s own docstring); harmless
 #: today since no `NodeSpec` ever carries this `node_id` yet.
-MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES) | UTILITY_TYPES | {"midi_cc"}
+#: Issue #236: `short_delay` joins them, on the same side as the Delay it
+#: is the short half of -- an effect that colours the mix, and a `POLY_
+#: EITHER` module the canvas has to pin somewhere. Sixteen per-note copies
+#: would be affordable (282kB, `ShortDelay.__init__`'s own arithmetic), so
+#: this is a choice about what the module is *for* rather than about cost;
+#: per-note is what a Mod cable onto its knobs would want, and the day the
+#: canvas offers a side switch is the day that becomes a real choice.
+MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES) | UTILITY_TYPES | {"midi_cc", "short_delay"}
 
 #: Modules that send knob movement rather than sound (#208's port type).
 #: Sound goes into a socket; only these can grab a knob -- plus

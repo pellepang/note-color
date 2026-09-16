@@ -86,6 +86,21 @@ SYNTH_CORE_MODULES = [
     # the unimplemented one even though it is a utility rather than a
     # synth-engine stage; there is no third drawer group for "utility".
     ("level", "Level"),
+    # Issue #236, decision 64: `graph/modules/short_delay.ShortDelay`. It
+    # is an effect and would rather have sat with Delay and Chorus, but
+    # that drawer group is derived from `audio/effects.py`'s registry (the
+    # fixed engine's effects bus, shared with the score editor) and this
+    # module has no entry there and must not get one -- so it lands here
+    # for the same "there is no third drawer group" reason Level did.
+    #
+    # "Short Delay" is the module's own name and the whole mitigation
+    # decision 64 chose for carrying two delays that look alike: Delay
+    # repeats, Short Delay colours. The other half of that mitigation is
+    # the refusal sentence a feedback cable through this one earns
+    # (`block_delay = 0`, so it is deliberately *not* `synth_view.
+    # DELAY_TYPE` and cannot close a loop) -- which is the moment the
+    # difference actually matters.
+    ("short_delay", "Short Delay"),
 ]
 
 #: Always present, never enabled -- the map's "kept in mind, not built"

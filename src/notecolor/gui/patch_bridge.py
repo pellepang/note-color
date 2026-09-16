@@ -77,6 +77,7 @@ from notecolor.audio.graph.modules.noise import COLOURS as NOISE_COLOURS, Noise
 from notecolor.audio.graph.modules.oscillator import WavetableOscillator
 from notecolor.audio.graph.modules.midi_cc import ExternalCc
 from notecolor.audio.graph.modules.passthrough import Passthrough
+from notecolor.audio.graph.modules.short_delay import ShortDelay
 from notecolor.audio.graph.poly import MixModule, PolyGraph
 from notecolor.gui import patch_graph as pg
 
@@ -92,6 +93,14 @@ MODULE_FACTORIES = {
     "filter": lambda cfg: StateVariableFilter(),
     "amp_env": lambda cfg: AmpEnvelope(),
     "delay": lambda cfg: Delay(),
+    # Issue #236, decision 64: the *other* delay -- sub-block times, so a
+    # chorus/flanger/comb rather than an echo. A separate type key rather
+    # than a mode of "delay", because the difference is not a knob: it
+    # reports `block_delay = 0` and therefore cannot close a feedback loop
+    # (`synth_view.DELAY_TYPE` stays the one type key that can). No
+    # construction settings -- `max_seconds` is a `ShortDelay.__init__`
+    # choice, and the canvas never offers anything but the 50ms default.
+    "short_delay": lambda cfg: ShortDelay(),
     "level": lambda cfg: Level(),
     # `mode` is always "per_note" here: the canvas offers one "lfo" type
     # key, never dropped on the once-only side (it is not in `MONO_TYPES`),
@@ -284,6 +293,10 @@ LABEL_ALIASES = {
     ("filter", "KeyTrk"): "key_tracking",
     ("delay", "Fdbk"): "feedback",
     ("delay", "Damp"): "damping",
+    # `short_delay.py`'s `feedback` is "Feedback" there too (#236); the
+    # canvas abbreviates it the same way it abbreviates Delay's, so that
+    # the two delays' knob rows read alike, which costs this one line.
+    ("short_delay", "Fdbk"): "feedback",
 }
 
 

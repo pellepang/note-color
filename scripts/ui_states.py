@@ -293,6 +293,58 @@ def _mod_wheel_canvas():
     return build
 
 
+def _short_delay_canvas(refuse=False):
+    """Issue #236: the Short Delay's new drawer entry, node type and knob
+    panel, patched on the once-only side (MIX into it) beside the ordinary
+    Delay -- the pair decision 64 chose to carry, so a shot can be judged
+    on whether the two are actually tellable apart (title, tag, dot).
+
+    With `refuse`, a feedback cable is dropped through the Short Delay and
+    left refused on screen: `block_delay = 0`, so the graph names the
+    Delay it wants instead, which is the other half of that mitigation and
+    the moment the difference matters. Same "no drag gesture ran" caveat
+    `_modulation_canvas()` notes for `_rebuild_graph()`.
+    """
+    def build():
+        from PySide6 import QtCore, QtWidgets
+        from notecolor.gui import patch_graph
+
+        view = _synth_view()
+        view.resize(1280, 800)
+        view.show()
+        QtWidgets.QApplication.processEvents()
+        splitter = view.splitter
+        splitter.setSizes([sum(splitter.sizes()) - splitter.floor, splitter.floor])
+        QtWidgets.QApplication.processEvents()
+
+        for type_key in ("short_delay", "delay", "level"):
+            view.canvas.spawn_module(type_key, QtCore.QPoint(0, 0))
+        view.canvas.tidy()
+
+        layer = view.patch_layer
+        graph = layer.graph
+        for source, dest in (("mix", "short_delay"), ("short_delay", "level"),
+                             ("mix", "delay")):
+            target = patch_graph.Target("socket", dest)
+            if graph.judge(source, target).ok:
+                graph.connect(source, target)
+        layer.relayout()
+        view._rebuild_graph()
+
+        for _ in range(150):
+            layer._tick()
+        if refuse:
+            # Level back into the Short Delay: a loop whose only delaying
+            # module makes no one-block promise, so the graph names the
+            # Delay sitting right beside it instead.
+            target = patch_graph.Target("socket", "short_delay")
+            layer.refuse(target, graph.judge("level", target).reason)
+        QtWidgets.QApplication.processEvents()
+        return view
+
+    return build
+
+
 def _module_notices_canvas(hover=None):
     """A Chorus (built as a `Passthrough` wire) and a `filter_env` (not in
     the engine graph at all) on the canvas, for #227: each should carry
@@ -341,6 +393,8 @@ STATES = {
     "modulation-refusal-not-modulatable": _modulation_canvas(refuse="not_modulatable"),
     "modulation-refusal-poly-boundary": _modulation_canvas(refuse="poly_boundary"),
     "mod-wheel-canvas": _mod_wheel_canvas(),
+    "short-delay-canvas": _short_delay_canvas(),
+    "short-delay-loop-refusal": _short_delay_canvas(refuse=True),
     "amp-env-velocity": _amp_env_velocity(),
     "module-notices": _module_notices_canvas(),
     "module-notice-hover-chorus": _module_notices_canvas(hover="chorus"),

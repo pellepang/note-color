@@ -290,7 +290,14 @@ def format_value(spec, value):
     if spec.unit == "Hz" and value >= 1000:
         return f"{value / 1000:.2f}kHz"
     if spec.unit == "s" and value < 1.0:
-        return f"{value * 1000:.0f}ms"
+        # `digits` is how much precision the quantity needs, so switching
+        # units keeps it rather than throwing it away: three of them in
+        # seconds is whole milliseconds, which is what every envelope
+        # stage and the Delay have always shown. A spec that asks for more
+        # gets the extra places here too -- the Short Delay's Time (#236)
+        # runs from a tenth of a millisecond, where "0ms" would be a lie
+        # about most of its range.
+        return f"{value * 1000:.{max(spec.digits - 3, 0)}f}ms"
     text = f"{value:.{spec.digits}f}"
     if spec.low < 0 and value > 0:
         text = "+" + text

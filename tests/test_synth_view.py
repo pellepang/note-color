@@ -1219,3 +1219,142 @@ def test_mod_wheel_cabled_to_a_per_note_knob_modulates_the_engine_end_to_end(app
     # dispatcher writes.
     view._midi_dispatcher.handle_message([0xB0, 1, 127])
     assert external_cc_module._value == pytest.approx(1.0)
+
+
+# --- #236: a drawer entry, a node type and a panel for the Short Delay -----
+
+
+def test_short_delay_is_a_drawer_row_named_for_the_half_it_is(app):
+    """Decision 64 carries two delays that look alike and chose naming as
+    the mitigation: "Delay" repeats, "Short Delay" colours. The row sits in
+    `SYNTH_CORE_MODULES` rather than with Delay and Chorus because that
+    group is derived from `audio/effects.py`'s registry -- the fixed
+    engine's effects bus, which this Synth-View-only module must not join
+    (decision 56 §7)."""
+    from notecolor.audio import effects as effects_audio
+    from notecolor.gui import synth_workspace
+
+    assert ("short_delay", "Short Delay") in synth_workspace.SYNTH_CORE_MODULES
+    assert "short_delay" not in effects_audio.EFFECT_TYPES
+
+
+def test_short_delay_panel_carries_every_knob_the_module_declares(app):
+    """The sweep #234 ran, for the module it could not fix: each of
+    `ShortDelay.parameters()` has a knob, and each knob's label resolves
+    back to a real engine parameter (`param_id_for_label()`, the same
+    lookup a modulation cable's destination goes through)."""
+    from notecolor.audio.graph.modules.short_delay import ShortDelay
+    from notecolor.gui import patch_bridge as pb
+
+    view, _controller, _patch = _make_view()
+    window = view._module_factory("short_delay", QtCore.QPoint(0, 0))
+    assert window is not None
+    labels = [knob.label() for knob in window.knobs()]
+    assert [pb.param_id_for_label("short_delay", label) for label in labels] == \
+        [spec.param_id for spec in ShortDelay().parameters()]
+
+
+def test_short_delay_knobs_respect_the_ranges_that_make_it_the_short_one(app):
+    """The three `ParamSpec` differences from the ordinary Delay that #236
+    asked the panel to honour: a sub-block `time` range, a *bipolar*
+    `feedback` (it can invert), and a `mix` defaulting to half. Plus the
+    one Delay knob it must not grow: there is no damping in the module."""
+    from notecolor.audio.graph.modules import short_delay as sd
+    from notecolor.gui import synth_view
+
+    specs = {spec.attr: spec for spec in synth_view.UTILITY_PARAM_SPECS["short_delay"]}
+    assert "damping" not in specs
+    assert (specs["time"].low, specs["time"].high) == (sd.MIN_SHORT_SECONDS, sd.MAX_SHORT_SECONDS)
+    assert specs["feedback"].low < 0.0 < specs["feedback"].high
+    assert synth_view.UTILITY_DEFAULTS["short_delay"]["mix"] == pytest.approx(0.5)
+    # Sub-millisecond times are most of this module's range, so the readout
+    # has to keep a decimal where every other seconds-valued knob rounds to
+    # whole milliseconds.
+    assert synth_params.format_value(specs["time"], sd.MIN_SHORT_SECONDS) == "0.1ms"
+
+
+def test_short_delay_is_an_effect_on_the_mono_side_that_cannot_close_a_loop(app):
+    """Everything the refusal rules consult, from the type key: it takes
+    sound in and sends sound out (unlike a modulation source), it lands on
+    the once-only side like the Delay it is the short half of, and
+    `is_delay` is False -- `block_delay = 0`, so the graph must not let a
+    feedback loop be ordered around it (decision 56 §4)."""
+    view, _controller, _patch = _make_view()
+    window = view._module_factory("short_delay", QtCore.QPoint(0, 0))
+    view.canvas.add_window(window)
+    view._on_window_added(window)
+
+    spec = view.patch_layer.graph.node("short_delay")
+    assert spec.side == patch_graph.SIDE_MONO
+    assert spec.out_kind == patch_graph.KIND_AUDIO
+    assert (spec.can_in, spec.can_out) == (True, True)
+    assert spec.is_delay is False
+
+
+def test_a_feedback_loop_through_the_short_delay_is_refused_and_names_the_delay(app):
+    """#236 asked for this to be verified rather than asserted from the
+    module's docstring -- and the answer is the opposite of the one the
+    issue expected (see the commit message): `ShortDelay` is the module
+    that *cannot* close a loop. The refusal is the ordinary cycle one, and
+    it names the Delay the user wants instead, which is the other half of
+    decision 64's mitigation for carrying two delays that look alike."""
+    view, _controller, _patch = _make_view()
+    for type_key in ("short_delay", "level"):
+        window = view._module_factory(type_key, QtCore.QPoint(0, 0))
+        view.canvas.add_window(window)
+        view._on_window_added(window)
+    graph = view.patch_layer.graph
+
+    assert graph.connect("short_delay", patch_graph.Target("socket", "level")) is not None
+    # The engine is asked first (`_engine_verdict()`), and it only knows
+    # about cables that have been built into it -- the same rebuild the
+    # canvas does after every structural edit.
+    view._rebuild_graph()
+    verdict = graph.judge("level", patch_graph.Target("socket", "short_delay"))
+    assert verdict.ok is False
+    assert "needs a Delay" in verdict.reason
+
+    # The contrast, on the same canvas: swap in the module that does make
+    # the one-block promise and the identical loop is legal.
+    window = view._module_factory("delay", QtCore.QPoint(0, 0))
+    view.canvas.add_window(window)
+    view._on_window_added(window)
+    assert graph.connect("delay", patch_graph.Target("socket", "level")) is not None
+    view._rebuild_graph()
+    assert graph.judge("level", patch_graph.Target("socket", "delay")).ok is True
+
+
+def test_short_delay_reaches_the_engine_and_its_feedback_knob_can_invert(app):
+    """End to end, the way #235's own node-type ticket verified itself:
+    place it from the drawer, cable it, rebuild, and read the real engine
+    module back out -- then turn the Feedback knob *down* and confirm a
+    negative value lands on it. Inversion itself is proven at the engine
+    layer (`tests/test_synth_short_delay.py`'s
+    `test_negative_feedback_inverts_every_other_repeat`); what this adds is
+    that the canvas can actually ask for it, which is the whole of #236."""
+    from notecolor.audio.graph.modules.short_delay import ShortDelay
+
+    sound_engine = _GraphCapableStubEngine()
+    view, _controller, _patch = _make_view(sound_engine=sound_engine)
+    view.bridge.sound_engine_provider = view.controller.sound_engine_provider
+    assert view.bridge.active
+
+    view.canvas.spawn_module("short_delay", QtCore.QPoint(20, 20))
+    QtWidgets.QApplication.processEvents()
+    assert "short_delay" in {w.type_key for w in view.canvas.windows()}
+
+    graph = view.patch_layer.graph
+    assert graph.connect("mix", patch_graph.Target("socket", "short_delay")) is not None
+    view._rebuild_graph()
+
+    module = view.bridge.playing.graph.node("short_delay").module
+    assert isinstance(module, ShortDelay)
+    assert module.params.get("mix") == pytest.approx(0.5)
+
+    window = next(w for w in view.canvas.windows() if w.type_key == "short_delay")
+    knob = next(k for k in window.knobs() if k.label() == "Fdbk")
+    knob.last_shift = True
+    knob.wheelStepped.emit(-1)
+    value = view._utility_params["short_delay"]["feedback"]
+    assert value < 0.0
+    assert module.params.get("feedback") == pytest.approx(value)
