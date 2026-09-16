@@ -46,10 +46,12 @@ from notecolor.gui.patch_bridge import PatchBridge
 from notecolor.gui.synth_keyboard import SynthKeyboardBand, LAYOUT_ORDER, LAYOUT_DUAL
 from notecolor.settings import config, patch_format
 from notecolor.tui import synth_params
-from notecolor.tui.synth_layout import slugify, PAD_CHANNEL
+from notecolor.tui.synth_layout import slugify, NOTE_CHANNEL, PAD_CHANNEL
 from notecolor.audio import effects as effects_audio
 from notecolor.audio.sound_engine import NoteOn
 from notecolor.audio.sampler import SamplerEngine
+from notecolor.audio.midi_input import MidiDispatcher, MidiInput
+from notecolor.audio.note_hold import NoteHoldGate
 
 #: Always-open on first show of a never-before-seen patch, per the accepted
 #: prototype (`makeWindow('osc1'|'filter'|'ampenv', ...)`).
@@ -279,7 +281,14 @@ DOT_COLOR_FOR_TYPE = {
 #: leave the choice to the patch, but the canvas pins every type key to one
 #: side): its reason to exist is turning down a once-only feedback loop
 #: (decision 65 §8), so that is the side a freshly dropped one lands on.
-MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES) | UTILITY_TYPES
+#: Issue #173/decision 72: `midi_cc` (`ExternalCc`, one live MIDI CC as a
+#: modulation source) is `POLY_ONCE` like Level, for the identical reason
+#: -- one physical mod wheel, not one per held note. Named here so the
+#: canvas and the engine would already agree on its default side the
+#: moment a drawer entry for it exists (`gui/patch_graph.py`, not touched
+#: by this ticket -- see `modules/midi_cc.py`'s own docstring); harmless
+#: today since no `NodeSpec` ever carries this `node_id` yet.
+MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES) | UTILITY_TYPES | {"midi_cc"}
 
 #: Modules that send knob movement rather than sound (#208's port type).
 #: Sound goes into a socket; only these can grab a knob -- plus
@@ -315,6 +324,41 @@ DELAY_TYPE = "delay"
 #: device, nothing is sounding" and the release path has to tell the two
 #: apart.
 GRAPH_VOICE = object()
+
+
+class _MidiSink:
+    """Adapts `SynthView` to `audio.midi_input.MidiDispatcher`'s `sink`
+    protocol (issue #173, decision 72).
+
+    The engine-routing choice -- play through `bridge` (the patch graph)
+    when a patch is playing, else fall back to the legacy `SoundEngine`
+    path -- already exists on the view for the computer keyboard
+    (`_on_note_preview`/`_on_note_released`); this gives MIDI its own
+    entry points into the same choice (`_on_midi_note_on`/
+    `_on_midi_note_off`), keyed by pitch rather than by a keyboard-band
+    key letter, because that is what a MIDI note-off carries and a
+    keyboard-band `noteReleased` does not.
+
+    `pitch_bend`/`mod_wheel` go straight to the bridge, which is where the
+    modulation-layer/oscillator-`fine` destinations research settled on
+    actually live (`patch_bridge.PatchBridge.apply_pitch_bend()`/
+    `set_external_cc()`)."""
+
+    def __init__(self, view):
+        self._view = view
+
+    def note_on(self, pitch, velocity):
+        self._view._on_midi_note_on(pitch, velocity)
+
+    def note_off(self, pitch):
+        self._view._on_midi_note_off(pitch)
+
+    def pitch_bend(self, bend):
+        self._view.bridge.apply_pitch_bend(bend)
+
+    def mod_wheel(self, value):
+        self._view.bridge.set_external_cc(value)
+
 
 ENGINE_PILLS = ("synth", "sampler", "sf2")
 
@@ -545,6 +589,17 @@ class SynthView(QtWidgets.QMainWindow):
     `controller` is the small surface `studio.StudioWindow` implements --
     see the module docstring."""
 
+    #: Emitted from `MidiInput`'s own RtMidi reader thread (issue #173,
+    #: decision 72) with the raw MIDI byte list. A `QObject.emit()` called
+    #: from a thread other than the one a signal's receiver lives on is
+    #: automatically delivered through a queued connection -- Qt's own
+    #: cross-thread mechanism -- so this is the one and only place a raw
+    #: MIDI message crosses from RtMidi's own thread onto the Qt UI
+    #: thread; `audio/midi_input.py`'s "off the UI thread, onto it"
+    #: section is what this exists to satisfy. Nothing downstream of
+    #: `_on_midi_message()` ever runs on any thread but this window's own.
+    midiMessageReceived = QtCore.Signal(object)
+
     def __init__(self, controller, parent=None):
         super().__init__(parent)
         self.controller = controller
@@ -560,6 +615,21 @@ class SynthView(QtWidgets.QMainWindow):
         #: (which only carries the letter) can release the right voice and
         #: report the right pitch to `controller.record_note_off()`.
         self._voice_by_key = {}
+        #: MIDI's own equivalent of `_voice_by_key`, keyed by pitch rather
+        #: than by a keyboard-band letter (issue #173, decision 72): pitch
+        #: -> a stack of voice ids (or `GRAPH_VOICE`), one entry per
+        #: physical press still outstanding on that pitch -- a stack
+        #: rather than one slot because two overlapping presses of the
+        #: same pitch (unusual, but a keyboard can send it) each need
+        #: their own release to pop cleanly, last pressed released first.
+        self._midi_voices = {}
+        #: Shared between the computer keyboard's own graph-path dispatch
+        #: (below) and MIDI's, so releasing one input source's hold on a
+        #: pitch never silences the other's -- see `audio.note_hold`'s
+        #: own docstring for why this exists and why it does not extend
+        #: to the legacy (non-graph) engine path, whose per-voice-id
+        #: release already has no such collision to protect against.
+        self._note_gate = NoteHoldGate()
         #: Built lazily: bare sample name -> the kit `Patch` that maps it,
         #: scanned once from every kit on disk. Refreshed on next Load in
         #: case a patch was saved meanwhile.
@@ -578,6 +648,21 @@ class SynthView(QtWidgets.QMainWindow):
         self.bridge = PatchBridge(
             sound_engine_provider=self._sound_engine,
             voices=config.POLYPHONY_SYNTH_VIEW)
+        #: MIDI hardware input (issue #173, decision 72). One `MidiInput`
+        #: per window, opened lazily on first `showEvent()` -- see
+        #: `audio/midi_input.py`'s module docstring for why this window
+        #: owns one outright rather than reaching for
+        #: `SessionState.ensure_midi_input()`: this window's own host
+        #: (`gui/app.py`'s `visualnote studio`) never constructs a
+        #: `SessionState` at all, the same standalone shape it already
+        #: uses for its `SoundEngine`. `midiMessageReceived` is how a raw
+        #: message crosses from RtMidi's own reader thread onto this
+        #: window's Qt thread before `_midi_dispatcher` (plain Python,
+        #: no Qt) ever sees it.
+        self.midiMessageReceived.connect(self._on_midi_message)
+        self._midi_input = MidiInput(on_message=self.midiMessageReceived.emit)
+        self._midi_dispatcher = MidiDispatcher(
+            sink=_MidiSink(self), gate=self._note_gate, source_label="midi")
 
         self._build()
 
@@ -827,8 +912,13 @@ class SynthView(QtWidgets.QMainWindow):
         #: when `CableAppearance.explain` is set to the status bar rather
         #: than to a callout by the jack (decision 57 §5).
         self._status_patch = QtWidgets.QLabel("", bar)
+        #: Issue #173: one-line, honest MIDI status -- "not installed",
+        #: "none" (no device found), or the port name once one is open.
+        #: Never a warning; a user with no MIDI hardware sees this say
+        #: "none" and nothing else about their session changes.
+        self._status_midi = QtWidgets.QLabel("", bar)
         for label in (self._status_oct, self._status_rec, self._status_windows,
-                      self._status_patch):
+                      self._status_patch, self._status_midi):
             label.setFont(theme.font(7))
             label.setStyleSheet("background: transparent;")
             layout.addWidget(label)
@@ -848,6 +938,13 @@ class SynthView(QtWidgets.QMainWindow):
             self._shown_once = True
             self._claim_voice_budget(config.POLYPHONY_SYNTH_VIEW)
             self._apply_patch(self._initial_patch)
+            # Issue #173: lazy, idempotent, on first show -- the same
+            # "a tool that only plays never opens the mic" convention
+            # CLAUDE.md documents for `ensure_sound_engine()`, applied to
+            # a third device. No MIDI hardware, or `python-rtmidi` not
+            # installed, degrades to a one-line status (see
+            # `MidiInput.ensure_started()`) and nothing else changes.
+            self._midi_input.ensure_started()
         # Nothing else in this window competes for keyboard focus (module
         # windows/knobs/drawer rows are all NoFocus), but nothing hands the
         # keyboard band focus either -- without this, every key press this
@@ -859,9 +956,84 @@ class SynthView(QtWidgets.QMainWindow):
         """Hands the voice budget back. The `SoundEngine` outlives this
         window (one per process, `SessionState.ensure_sound_engine()`), so
         a cap claimed on show and never released would quietly shrink
-        every other tool in the session to 16 voices."""
+        every other tool in the session to 16 voices.
+
+        MIDI input, unlike the sound engine, does *not* outlive this
+        window (issue #173, decision 72): `MidiInput` is this window's
+        own, one per `SynthView` instance, closed here rather than kept
+        for the process's life -- the window is destroyed on close
+        (`WA_DeleteOnClose`) and rebuilt from scratch on next open, so
+        there is no persistent owner for a port to survive in between.
+        `_midi_dispatcher.reset()` first, so any note MIDI is still
+        physically or pedal-holding is released through the normal path
+        (and the shared `_note_gate` is left consistent for whatever
+        happens next) before the port itself closes -- the same
+        "device unplugged mid-play must not leave a stuck note" rule
+        this ticket's degradation contract applies everywhere else."""
+        self._midi_dispatcher.reset()
+        self._midi_input.stop()
         self._claim_voice_budget(None)
         super().closeEvent(event)
+
+    # -- MIDI hardware input (issue #173, decision 72) -----------------------
+
+    def _on_midi_message(self, message):
+        """Runs on this window's own Qt thread -- see
+        `midiMessageReceived`'s own docstring for why that is guaranteed
+        even though the message originated on RtMidi's reader thread.
+        `MidiDispatcher.handle_message()` never raises (see
+        `audio/midi_input.py`), so nothing here needs a try/except of its
+        own."""
+        self._midi_dispatcher.handle_message(message)
+
+    def _on_midi_note_on(self, pitch, velocity):
+        """MIDI's own note-on entry point, reached through `_MidiSink` ->
+        `_midi_dispatcher` -> `_on_midi_message()`. Mirrors
+        `_on_note_preview()`'s engine-routing choice (the graph when a
+        patch is playing, else the legacy engine) but keys its own
+        bookkeeping (`_midi_voices`) by pitch rather than by a keyboard-
+        band letter, since that is what a MIDI note-off carries.
+
+        Real velocity, not `DEFAULT_VELOCITY` -- the whole reason this
+        ticket exists alongside the polyphony half. Recorded through
+        `controller.record_note_on()` exactly like a computer-keyboard
+        note, so MIDI-played notes are as recordable/loggable as any
+        other input source."""
+        self.controller.record_note_on(pitch, velocity)
+        if self.bridge.active:
+            self._note_gate.press(pitch, "midi")
+            self.bridge.note_on(pitch, velocity)
+            self._midi_voices.setdefault(pitch, []).append(GRAPH_VOICE)
+            return
+        provider = getattr(self.controller, "sound_engine_provider", None)
+        sound_engine = provider() if provider is not None else None
+        if sound_engine is None:
+            return
+        voice_id = sound_engine.note_on(NoteOn(pitch, velocity, NOTE_CHANNEL, None))
+        self._midi_voices.setdefault(pitch, []).append(voice_id)
+
+    def _on_midi_note_off(self, pitch):
+        """The graph path consults `_note_gate` before actually releasing
+        -- a computer-keyboard hold on the same pitch must keep sounding
+        (see `audio.note_hold.NoteHoldGate`). The legacy path releases by
+        voice id, which already has no such collision to protect against
+        (`VoiceManager.release_voice()` frees exactly the voice it was
+        given, never "every voice at this pitch")."""
+        entries = self._midi_voices.get(pitch)
+        if not entries:
+            return
+        voice_id = entries.pop()
+        if not entries:
+            del self._midi_voices[pitch]
+        if voice_id is GRAPH_VOICE:
+            if self._note_gate.release(pitch, "midi"):
+                self.bridge.note_off(pitch)
+        elif voice_id is not None:
+            provider = getattr(self.controller, "sound_engine_provider", None)
+            sound_engine = provider() if provider is not None else None
+            if sound_engine is not None:
+                sound_engine.release_voice(voice_id)
+        self.controller.record_note_off(pitch)
 
     def _claim_voice_budget(self, value):
         """Points the shared engine's voice cap at `value` for as long as
@@ -1062,6 +1234,14 @@ class SynthView(QtWidgets.QMainWindow):
         if self.bridge.active:
             for voice_id, pitch in list(self._voice_by_key.values()):
                 if voice_id is GRAPH_VOICE and pitch is not None:
+                    self.bridge.note_on(pitch)
+            # Issue #173: a MIDI-held chord gets the same "held notes
+            # survive a cable edit" treatment the computer keyboard's own
+            # held notes just got above -- otherwise a rebuild while a
+            # MIDI chord is held would silently drop only the MIDI half
+            # of what is sounding.
+            for pitch, entries in self._midi_voices.items():
+                if any(voice_id is GRAPH_VOICE for voice_id in entries):
                     self.bridge.note_on(pitch)
 
     def _on_patch_status(self, text, is_refusal):
@@ -1465,6 +1645,12 @@ class SynthView(QtWidgets.QMainWindow):
             # slot of the polyphony budget the pads share (#207). One or
             # the other, never both: two engines on one key is a chorus
             # nobody asked for.
+            #
+            # Issue #173: `_note_gate.press()` records the computer
+            # keyboard's own hold on this pitch, shared with MIDI's -- so
+            # if a MIDI note on the same pitch is released while this key
+            # is still down, only MIDI's copy is silenced.
+            self._note_gate.press(pitch, "keys")
             self.bridge.note_on(pitch, preview.velocity)
             voice_id = GRAPH_VOICE
         else:
@@ -1496,8 +1682,10 @@ class SynthView(QtWidgets.QMainWindow):
         if voice_id is GRAPH_VOICE:
             # Released by pitch: the graph has no voice ids to hand out,
             # and a pitch is enough because it releases every voice
-            # sounding that note, which is what letting go of a key means.
-            if pitch is not None:
+            # sounding that note, which is what letting go of a key means
+            # -- unless MIDI is still holding the same pitch (issue #173),
+            # which `_note_gate.release()` is what checks.
+            if pitch is not None and self._note_gate.release(pitch, "keys"):
                 self.bridge.note_off(pitch)
         elif voice_id is not None:
             provider = getattr(self.controller, "sound_engine_provider", None)
@@ -1521,6 +1709,13 @@ class SynthView(QtWidgets.QMainWindow):
         # panicRequested signal here too -- so releasing every held key
         # before silencing audio covers both without duplicating the fix.
         self.keyboard_band._release_all_held()
+        # Issue #173: MIDI's own held notes (including anything only
+        # ringing because the sustain pedal is down) go through the
+        # normal release path first, so `_midi_voices`/`_note_gate` stay
+        # consistent with reality -- then `bridge.all_notes_off()` below
+        # guarantees silence regardless, the same belt-and-braces order
+        # `closeEvent()` uses.
+        self._midi_dispatcher.reset()
         # The graph's voices are not the sound engine's, so the controller's
         # panic cannot reach them (#207). Silenced here, before the
         # controller's, so Panic means silence everywhere or nowhere.
@@ -1535,12 +1730,28 @@ class SynthView(QtWidgets.QMainWindow):
         self._status_rec.setText(f"rec={'on' if recording else 'off'}")
         self._status_oct.setText(f"oct={self.keyboard_band.base_octave}")
         self._status_windows.setText(f"windows={self.canvas.window_count()}")
+        self._status_midi.setText(f"midi={self._midi_status_text()}")
         # The cable summary is polled rather than pushed: cables change
         # from several places (a patch restored, a module closed taking its
         # cables with it), and only the transient "patched · …" messages
         # are worth a signal of their own.
         if not self.patch_layer.message_pending():
             self._on_patch_status(self._patch_summary(), False)
+
+    def _midi_status_text(self):
+        """One word or a port name -- issue #173's honesty requirement
+        (`docs/research/midi-hardware-input.md` §5's "don't imply a
+        capability the current active input can't deliver"), applied to
+        MIDI itself rather than to velocity-sensitivity: `available` is
+        `None` before the first `showEvent()` has run `ensure_started()`,
+        `False` for every degradation path (`python-rtmidi` missing, no
+        device found, permission denied, ...), `True` once a port is
+        open."""
+        if self._midi_input.available:
+            return self._midi_input.port_name or "on"
+        if self._midi_input.available is False:
+            return "none"
+        return "…"
 
     def _patch_summary(self):
         """The cable summary, plus whatever the engine wants the user to

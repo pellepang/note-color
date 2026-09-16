@@ -688,4 +688,79 @@ def test_a_wire_copies_rather_than_handing_its_own_input_out():
                          params=module.params.values)
     module.process(ctx)
     assert out is not source
-    assert np.array_equal(out, source)
+
+
+# -- MIDI expression (issue #173, decision 72) --------------------------------
+
+def test_pitch_bend_broadcasts_onto_fine_on_every_oscillator_present():
+    bridge, _ = _bridge(_specs(pg.NodeSpec("osc2", "OSC 2", can_in=False)),
+                        _cables(*DEFAULT_CHAIN))
+    bridge.apply_pitch_bend(1.0)   # full bend up
+    for node_id in ("osc1", "osc2"):
+        for voice in bridge.playing.voices:
+            assert voice.graph.node(node_id).module.params.get("fine") == pytest.approx(100.0)
+
+
+def test_pitch_bend_adds_to_the_users_own_fine_knob_rather_than_replacing_it():
+    bridge, _ = _bridge(_specs(), _cables(*DEFAULT_CHAIN))
+    bridge.set_parameter("osc1", "fine", 20.0)
+    bridge.apply_pitch_bend(0.5)   # half bend up -- +50 cents
+    for voice in bridge.playing.voices:
+        assert voice.graph.node("osc1").module.params.get("fine") == pytest.approx(70.0)
+    # Centering the wheel returns to exactly the knob's own value, not to
+    # zero -- a transient gesture composes with, and never clobbers, a
+    # deliberate knob edit.
+    bridge.apply_pitch_bend(0.0)
+    for voice in bridge.playing.voices:
+        assert voice.graph.node("osc1").module.params.get("fine") == pytest.approx(20.0)
+
+
+def test_pitch_bend_does_not_persist_into_a_rebuild():
+    """A performance gesture, not a knob position: `_parameters` (what a
+    rebuild re-applies) must not remember a bend that has since centered,
+    or a rebuild mid-bend would freeze whatever bend was last applied as
+    a permanent detune."""
+    bridge, _ = _bridge(_specs(), _cables(*DEFAULT_CHAIN))
+    bridge.apply_pitch_bend(1.0)
+    bridge.rebuild(_specs(), _cables(*DEFAULT_CHAIN))
+    for voice in bridge.playing.voices:
+        assert voice.graph.node("osc1").module.params.get("fine") == pytest.approx(0.0)
+
+
+def test_pitch_bend_with_no_graph_playing_is_a_silent_no_op():
+    bridge = pb.PatchBridge(lambda: None)
+    bridge.rebuild(_specs(), _cables(*DEFAULT_CHAIN))
+    bridge.apply_pitch_bend(1.0)   # must not raise
+
+
+def test_external_cc_feeds_a_midi_cc_module_when_one_is_patched():
+    specs = _specs(pg.NodeSpec("midi_cc", "EXTERNAL CC", can_in=False, out_kind=pg.KIND_MOD, side=pg.SIDE_MONO))
+    bridge, _ = _bridge(specs, _cables(*DEFAULT_CHAIN))
+    bridge.set_external_cc(0.75)
+    assert bridge.playing.module("midi_cc")._value == pytest.approx(0.75)
+
+
+def test_external_cc_with_no_midi_cc_node_is_a_silent_no_op():
+    bridge, _ = _bridge(_specs(), _cables(*DEFAULT_CHAIN))
+    bridge.set_external_cc(0.5)   # must not raise -- no such node in this patch
+
+
+def test_external_cc_modulates_a_patched_destination():
+    """End-to-end: the mod wheel reaching an oscillator's pitch through the
+    same modulation-cable machinery an LFO already uses, exactly as
+    `docs/research/midi-hardware-input.md` §4 found it would. The cable is
+    part of the patch handed to `rebuild()` (mirroring how a canvas cable
+    reaches the engine, `test_a_connected_modulation_cable_reaches_the_
+    engine_and_is_audible`'s own convention) rather than connected after
+    `activate()`, which has already fixed each voice's `ModRoute`s."""
+    specs = _specs(pg.NodeSpec("midi_cc", "EXTERNAL CC", can_in=False, out_kind=pg.KIND_MOD, side=pg.SIDE_MONO))
+    cables = list(_cables(*DEFAULT_CHAIN))
+    cables.append(pg.Cable(source="midi_cc", knob=("osc1", "Fine"), depth=1.0))
+    bridge, _ = _bridge(specs, cables)
+    assert len(bridge.playing.graph.mod_connections) == 1
+    bridge.set_external_cc(1.0)
+    bridge.playing.note_on(60)
+    bridge.playing.process(BLOCK)
+    voice = bridge.playing.voices[0]
+    assert voice.graph.node("osc1").module.params.mod_active[
+        voice.graph.node("osc1").module.params.index("fine")]

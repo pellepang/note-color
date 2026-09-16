@@ -315,6 +315,13 @@ class _GraphCapableStubEngine:
     def set_graph(self, graph, activate=True):
         self.graph = graph
 
+    def all_notes_off(self):
+        """`_on_panic_clicked()` calls `controller.panic()`, which (in
+        `StubController` below) reaches for the sound engine's own
+        `all_notes_off()` too -- present here only so issue #173's panic
+        tests can use this engine without tripping over an unrelated
+        missing stub method."""
+
 
 def test_a_real_drag_wires_a_drawer_added_module_into_the_engine(app):
     """Reproduces neither hypothesis #223 raised, on purpose: this drives
@@ -966,3 +973,128 @@ def test_saving_a_sampler_patch_keeps_the_old_fixed_format(app, tmp_path):
     assert "version" not in text.split("\n")[0]
     reloaded = patch_format.load_patch(str(path))
     assert reloaded.zones[0].sample == "kick.wav"
+
+
+# --- MIDI hardware input (issue #173, decision 72) --------------------------
+
+
+def test_midi_note_on_off_plays_through_the_graph_with_real_velocity(app):
+    """`_on_midi_note_on`/`_on_midi_note_off` are what `_MidiSink` reaches
+    (via `MidiDispatcher`, via the queued `midiMessageReceived` signal) --
+    exercised directly here, the same way the QWERTY tests above drive
+    `keyPressEvent` rather than a raw Qt key event through the OS."""
+    view, controller, _patch = _make_view(sound_engine=_GraphCapableStubEngine())
+    view.bridge.sound_engine_provider = view.controller.sound_engine_provider
+    assert view.bridge.active
+
+    view._on_midi_note_on(60, 0.42)
+    voice = next(v for v in view.bridge.playing.voices if v.active and v.note.pitch == 60)
+    assert voice.note.velocity == pytest.approx(0.42)
+    assert controller.recorded_on == [(60, 0.42)]
+
+    view._on_midi_note_off(60)
+    assert not voice.note.gate
+    assert controller.recorded_off == [60]
+
+
+def test_a_keyboard_hold_survives_a_midi_release_of_the_same_pitch(app):
+    """The scenario issue #173 names explicitly: both input sources play
+    the same pitch through the graph; releasing MIDI's copy must not cut
+    off the computer keyboard's still-held one."""
+    sound_engine = _GraphCapableStubEngine()
+    view, controller, patch = _make_view(sound_engine=sound_engine)
+    view.keyboard_band.assignments = sk.RowAssignments([patch.name], [])
+    view.keyboard_band._refresh_boxes()
+    assert view.bridge.active
+
+    letter = PIANO_LOWER_ROW[0]
+    pitch = midi_pitch(*pitch_for_key(letter, view.keyboard_band.base_octave))
+    view.keyboard_band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key(ord(letter.upper()))))
+
+    view._on_midi_note_on(pitch, 0.8)
+    view._on_midi_note_off(pitch)
+
+    held = [v for v in view.bridge.playing.voices if v.active and v.note.pitch == pitch]
+    assert held and all(v.note.gate for v in held)   # still sounding -- the key is still down
+
+    view.keyboard_band.keyReleaseEvent(_FakeKeyEvent(QtCore.Qt.Key(ord(letter.upper()))))
+    assert not any(v.note.gate for v in view.bridge.playing.voices if v.active and v.note.pitch == pitch)
+
+
+def test_a_midi_hold_survives_release_of_the_keyboards_copy(app):
+    """The mirror image of the test above -- order of release reversed."""
+    sound_engine = _GraphCapableStubEngine()
+    view, controller, patch = _make_view(sound_engine=sound_engine)
+    view.keyboard_band.assignments = sk.RowAssignments([patch.name], [])
+    view.keyboard_band._refresh_boxes()
+
+    letter = PIANO_LOWER_ROW[0]
+    pitch = midi_pitch(*pitch_for_key(letter, view.keyboard_band.base_octave))
+    view.keyboard_band.keyPressEvent(_FakeKeyEvent(QtCore.Qt.Key(ord(letter.upper()))))
+    view._on_midi_note_on(pitch, 0.8)
+
+    view.keyboard_band.keyReleaseEvent(_FakeKeyEvent(QtCore.Qt.Key(ord(letter.upper()))))
+    held = [v for v in view.bridge.playing.voices if v.active and v.note.pitch == pitch]
+    assert held and all(v.note.gate for v in held)   # MIDI's copy is still down
+
+    view._on_midi_note_off(pitch)
+    assert not any(v.note.gate for v in view.bridge.playing.voices if v.active and v.note.pitch == pitch)
+
+
+def test_panic_releases_midi_held_notes_too(app):
+    sound_engine = _GraphCapableStubEngine()
+    view, controller, _patch = _make_view(sound_engine=sound_engine)
+    view._midi_dispatcher.handle_message([0x90, 60, 115])   # real note-on, through the dispatcher
+    assert view._midi_voices  # bookkeeping present before panic
+
+    view._on_panic_clicked()
+
+    assert view._midi_voices == {}
+    assert not any(v.active and v.note.gate for v in view.bridge.playing.voices)
+
+
+def test_closing_the_window_releases_midi_held_notes(app):
+    sound_engine = _GraphCapableStubEngine()
+    view, controller, _patch = _make_view(sound_engine=sound_engine)
+    view._midi_dispatcher.handle_message([0x90, 60, 115])   # real note-on, through the dispatcher
+    view.close()
+    assert view._midi_voices == {}
+
+
+def test_midi_falls_back_to_the_legacy_engine_when_no_graph_is_playing(app):
+    """`bridge.active` is False whenever `StubSoundEngine` (no `set_graph`/
+    `block_size`) is the provider -- MIDI must take the same legacy-engine
+    fallback the computer keyboard already does."""
+    sound_engine = StubSoundEngine()
+    view, controller, _patch = _make_view(sound_engine=sound_engine)
+    assert not view.bridge.active
+
+    view._on_midi_note_on(60, 0.5)
+    assert len(sound_engine.note_on_calls) == 1
+    event = sound_engine.note_on_calls[0]
+    assert event.pitch == 60
+    assert event.velocity == pytest.approx(0.5)
+    assert event.channel == NOTE_CHANNEL
+
+    view._on_midi_note_off(60)
+    assert sound_engine.released == ["synth-voice-1"]
+
+
+def test_midi_pitch_bend_reaches_the_bridge(app):
+    sound_engine = _GraphCapableStubEngine()
+    view, controller, _patch = _make_view(sound_engine=sound_engine)
+    view.bridge.apply_pitch_bend(1.0)
+    for voice in view.bridge.playing.voices:
+        assert voice.graph.node("osc1").module.params.get("fine") == pytest.approx(100.0)
+
+
+def test_midi_input_status_reports_unavailable_with_no_hardware(app, monkeypatch):
+    """No `python-rtmidi` installed on this machine (checked, not
+    assumed) -- the one thing the issue requires above all else: a user
+    with no MIDI hardware sees an honest status and nothing else changes."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "rtmidi", None)
+    view, _controller, _patch = _make_view()
+    assert view._midi_input.available is False
+    assert view._midi_status_text() == "none"

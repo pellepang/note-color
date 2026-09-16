@@ -75,6 +75,7 @@ from notecolor.audio.graph.modules.level import Level
 from notecolor.audio.graph.modules.lfo import SHAPES as LFO_SHAPES, Lfo
 from notecolor.audio.graph.modules.noise import COLOURS as NOISE_COLOURS, Noise
 from notecolor.audio.graph.modules.oscillator import WavetableOscillator
+from notecolor.audio.graph.modules.midi_cc import ExternalCc
 from notecolor.audio.graph.modules.passthrough import Passthrough
 from notecolor.audio.graph.poly import MixModule, PolyGraph
 from notecolor.gui import patch_graph as pg
@@ -100,6 +101,14 @@ MODULE_FACTORIES = {
     # Per-note only, no mode switch -- decision 67: "a DAHDSR without a
     # note's gate to key off has no cycle to run."
     "mod_env": lambda cfg: ModEnvelope(),
+    # Issue #173/decision 72: the live MIDI mod wheel (or any other CC
+    # `gui/patch_bridge.PatchBridge.set_external_cc()` is fed), as a
+    # modulation source. Named here (and in MOD_SOURCE_PORTS below) so a
+    # patch built directly against the engine can use it; no canvas
+    # drawer entry exists yet for it to be dragged out by a person -- see
+    # `modules/midi_cc.py`'s own docstring for why that is a deliberate,
+    # named gap rather than a missed one.
+    "midi_cc": lambda cfg: ExternalCc(),
 }
 
 #: Canvas nodes that are deliberately absent from the engine graph: they
@@ -115,7 +124,7 @@ NOT_IN_ENGINE = frozenset({"filter_env", "voice"})
 #: `build_graph()` names as the `source_port` half of `ModConnection`.
 #: `filter_env` has no entry -- it has no engine module yet (stage 2, #208
 #: §"what is left open"), so no source port to name.
-MOD_SOURCE_PORTS = {"lfo": "mod", "mod_env": "mod"}
+MOD_SOURCE_PORTS = {"lfo": "mod", "mod_env": "mod", "midi_cc": "mod"}
 
 #: Construction settings a factory reads, per type key. Anything not listed
 #: reaches the module as a parameter instead.
@@ -626,6 +635,58 @@ class PatchBridge:
     def all_notes_off(self):
         if self.playing is not None:
             self.playing.all_notes_off()
+
+    # -- MIDI expression (issue #173, decision 72) --------------------------
+
+    def apply_pitch_bend(self, bend):
+        """`bend` is -1..1 (`audio.midi_input.MidiEvent.bend`'s own
+        normalized range, 0 = center). Broadcasts onto `fine` (cents) for
+        every oscillator node the current patch actually has --
+        `("osc1", "osc2")`, the two canvas type keys `MODULE_FACTORIES`
+        builds as `WavetableOscillator` -- added to whatever the user's own
+        Fine knob is set to, not replacing it, so turning the knob and
+        bending the wheel compose rather than one clobbering the other.
+
+        Deliberately calls `poly.set_parameter()` directly rather than
+        going through `self.set_parameter()`: the ordinary knob path writes
+        into `self._parameters`, which `rebuild()` re-applies on every
+        graph rebuild -- exactly right for a knob position, exactly wrong
+        for a transient performance gesture that must not survive a cable
+        edit as a permanent detune. Silently does nothing when there is no
+        graph playing or neither oscillator is patched -- the same "a
+        knob that waits is better than one that raises" convention
+        `set_parameter()` already follows.
+
+        `PITCH_BEND_RANGE_CENTS` (`audio/midi_input.py`) is 100, not MIDI's
+        own typical +/-200-cent default -- see that constant's docstring
+        for why v1 scales down rather than widening `fine`'s declared
+        range.
+        """
+        from notecolor.audio.midi_input import PITCH_BEND_RANGE_CENTS
+
+        if self.playing is None:
+            return
+        cents = max(-1.0, min(1.0, float(bend))) * PITCH_BEND_RANGE_CENTS
+        for node_id in ("osc1", "osc2"):
+            if self.playing.graph.node(node_id) is None:
+                continue
+            base = self._parameters.get(node_id, {}).get("fine", 0.0)
+            try:
+                self.playing.set_parameter(node_id, "fine", float(base) + cents)
+            except contract.ContractError:
+                pass
+
+    def set_external_cc(self, value):
+        """Feeds the live `midi_cc.ExternalCc` module (mod wheel and
+        friends -- see that module's docstring), if the current patch has
+        one. `value` is 0..1. A no-op when there is no graph playing or no
+        `"midi_cc"` node in it -- true of every patch today, since the
+        canvas has no drawer entry to add one yet."""
+        if self.playing is None:
+            return
+        if self.playing.graph.node("midi_cc") is None:
+            return
+        self.playing.module("midi_cc").set_value(value)
 
     # -- the rules -----------------------------------------------------------
 

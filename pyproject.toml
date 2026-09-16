@@ -111,12 +111,28 @@ gui = [
     "PySide6-Essentials>=6.6",
 ]
 
+# MIDI hardware input for the Synth View (issue #173, decision 72,
+# research in docs/research/midi-hardware-input.md). A Cython wrapper
+# around RtMidi (both MIT -- checked at the source, not from memory, per
+# decision 47's rule; see the decision doc), imported lazily and only from
+# audio/midi_input.py -- everything else in this project runs unchanged
+# with this extra absent, exactly like [sf2]/[synth]'s own degrade story.
+# Prebuilt wheels cover the whole Pi-to-desktop range: manylinux
+# x86_64/aarch64 from PyPI, plus piwheels armv6l/armv7l for Raspberry Pi
+# OS's own pip -- a wheel install almost everywhere, not a per-platform
+# compile (a source build, where no wheel matches, needs a C++ toolchain
+# and libasound2-dev, same shape as pyfluidsynth's own libfluidsynth
+# system-library need above).
+midi = [
+    "python-rtmidi>=1.5.8",
+]
+
 # Everything. Note this now pulls the converter stack, which is ~1.1 GB
 # of CPU torch (#126, measured) -- much larger than the rest of this
 # project combined. `[batch,synth,sf2]` remains the light "all the
 # tools, none of the neural weights" combination.
 all = [
-    "note-color[batch,synth,sf2,convert,gui]",
+    "note-color[batch,synth,sf2,convert,gui,midi]",
 ]
 
 [tool.setuptools.package-data]

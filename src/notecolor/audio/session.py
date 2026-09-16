@@ -372,6 +372,36 @@ class SessionState:
         # live view never drops or reopens the audio *output* device, the
         # same way `|` never reopens the mic.
         self.sound_engine = None
+        # Issue #173, decision 72: a third independently-lazy device,
+        # mirroring ensure_sound_engine() exactly -- created and opened
+        # only by whatever session-based tool asks for live MIDI, so a
+        # session that never touches MIDI never opens a port. No terminal
+        # tool asks for it yet (MIDI hardware input plays the GUI Synth
+        # View, which -- see audio/midi_input.py's module docstring --
+        # is hosted by `visualnote studio`, a standalone entry point with
+        # no SessionState of its own, and so owns its own MidiInput
+        # instance directly rather than through this one); this exists so
+        # the lifecycle this project has already committed to in CLAUDE.md
+        # ("a tool that only plays never opens the mic, nor vice versa")
+        # has the matching third accessor ready the day a SessionState-
+        # hosted tool wants live MIDI too, rather than that tool inventing
+        # its own ad hoc lazy-open convention when it arrives.
+        self.midi_input = None
+
+    def ensure_midi_input(self):
+        """Idempotent: returns this process's one `midi_input.MidiInput`,
+        creating and opening it on first use. See `sound_engine` above and
+        `audio/midi_input.py`'s module docstring for the lifecycle
+        reasoning; degrades exactly as `MidiInput.ensure_started()`
+        documents (no `python-rtmidi`, no device, permission denied) --
+        never raises, and calling this on a machine with no MIDI hardware
+        changes nothing about how the rest of the session behaves."""
+        if self.midi_input is None:
+            from notecolor.audio import midi_input
+
+            self.midi_input = midi_input.MidiInput()
+        self.midi_input.ensure_started()
+        return self.midi_input
 
     def ensure_sound_engine(self):
         """Idempotent: returns this process's one `sound_engine.SoundEngine`,
@@ -442,6 +472,11 @@ class SessionState:
         # having opened input.
         if self.sound_engine is not None:
             self.sound_engine.stop()
+        # Same idempotent-and-safe-either-way convention as sound_engine
+        # above -- a session can have opened MIDI input without ever
+        # having opened output or the mic.
+        if self.midi_input is not None:
+            self.midi_input.stop()
         if self.capture is None:
             return
         self.stop_event.set()
