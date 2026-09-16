@@ -1054,6 +1054,11 @@ class SynthView(QtWidgets.QMainWindow):
         self.bridge.set_parameters(self._graph_parameters())
         self.bridge.rebuild(self.patch_layer.graph.nodes(),
                             self.patch_layer.graph.cables)
+        # #227: the bridge already worked out which nodes are a wire or
+        # not in the engine at all (`build_graph()`'s `node_notices`); hand
+        # it to the canvas so the module itself carries the notice, not
+        # only the status bar.
+        self.patch_layer.set_node_notices(self.bridge.node_notices)
         if self.bridge.active:
             for voice_id, pitch in list(self._voice_by_key.values()):
                 if voice_id is GRAPH_VOICE and pitch is not None:

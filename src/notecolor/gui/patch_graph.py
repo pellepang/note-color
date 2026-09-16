@@ -159,6 +159,13 @@ class CableAppearance:
     #: Where a refusal explains itself: "inline" (a callout by the jack),
     #: "status" (the status bar), or "both".
     explain: str = "inline"
+    #: Whether a module the engine cannot fully play yet (#227) marks
+    #: itself: "badge" (a small dim corner tag, brightening to its full
+    #: sentence on hover -- the same rest/attention rule §3 gives cables),
+    #: or "off" (say it in the status bar only, as before). Reuses
+    #: `resting_brightness` for the tag's rest opacity rather than naming a
+    #: second number for the same idea.
+    notice_marking: str = "badge"
 
     def replace(self, **changes):
         return replace(self, **changes)

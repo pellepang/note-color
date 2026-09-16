@@ -111,6 +111,21 @@ DEPTH_ARC_MAX_DEGREES = 180.0
 STRIPE_WIDTH = 150
 STRIPE_POSITION = 0.56
 
+#: A node notice's corner tag, by `PatchBridge.node_notices` kind (#227).
+#: Two different statements, so two different words: a `Passthrough` node
+#: is a wire in the signal path ("this module is a wire"); a `no_module`
+#: node carries no cables at all ("this window's knobs do not reach the
+#: engine"). Neither reads as an error -- see `NOTICE_COLOUR` below.
+NOTICE_TAG = {"passthrough": "WIRE", "no_module": "NO ENGINE"}
+
+#: The colour every node notice paints in, tag and full sentence alike.
+#: Deliberately not `COPPER` (the loop marking's "look at this topology")
+#: or `CLAY_RED` (a refusal's "this failed") -- `LINEN_FAINT` is already
+#: the theme's "the faintest legible tone", the one used for comments, so
+#: reusing it here says the same thing about a module: not broken, just
+#: not built yet.
+NOTICE_COLOUR = theme.LINEN_FAINT
+
 
 def _qcolour(hex_colour, alpha=255):
     colour = QtGui.QColor(hex_colour)
@@ -352,6 +367,13 @@ class PatchLayer(QtCore.QObject):
         self._drag = None
         self._depth_drag = None   # a ring is being dragged (decision 66 §4)
         self._refusal = None      # {"text", "point"}
+        #: node_id -> (kind, text), from `PatchBridge.node_notices` (#227):
+        #: which modules the engine cannot fully play yet, and why. Kept
+        #: as data on the layer, not asked of the bridge at paint time, so
+        #: a headless canvas with no bridge attached (every test in this
+        #: file) still paints correctly with none set.
+        self._node_notices = {}
+        self._hover_node = None   # node_id under the cursor with a notice
         #: `depth_changed(source_id, dest_id, label, value)`, set by
         #: `synth_view` to `PatchBridge.set_modulation_depth` -- the ring's
         #: write path is live and needs no rebuild (`ModuleGraph.
@@ -431,6 +453,9 @@ class PatchLayer(QtCore.QObject):
             self._knobs.pop(key)
         if self._focused_node == node_id:
             self._focused_node = None
+        self._node_notices.pop(node_id, None)
+        if self._hover_node == node_id:
+            self._hover_node = None
         self.relayout()
         self.cablesChanged.emit()
 
@@ -438,6 +463,18 @@ class PatchLayer(QtCore.QObject):
         """A module's cables light up while it is the focused window
         (decision 57 §3)."""
         self._focused_node = node_id
+        self.wake()
+
+    def set_node_notices(self, node_notices):
+        """`{node_id: (kind, text)}` -- which modules the engine cannot
+        fully play yet, and why (#227). The host (`synth_view`) calls this
+        after every `PatchBridge.rebuild()`, handing down exactly
+        `PatchBridge.node_notices`; the layer just remembers and paints it,
+        the same division `engine_judge` already draws between the bridge
+        knowing the engine and the layer knowing the canvas."""
+        self._node_notices = dict(node_notices or {})
+        if self._hover_node not in self._node_notices:
+            self._hover_node = None
         self.wake()
 
     # -- layout --------------------------------------------------------
@@ -833,12 +870,59 @@ class PatchLayer(QtCore.QObject):
         p.drawPath(path)
 
     def paint_annotations(self, p):
+        if self.appearance.notice_marking != "off":
+            self._paint_node_notices(p)
         if self.appearance.loop_marking != "off":
             self._paint_loop_badge(p)
         if self._hover_cable is not None and self._drag is None:
             self._paint_hover_label(p)
         if self._refusal is not None and self.appearance.explain in ("inline", "both"):
             self._paint_callout(p)
+
+    def _paint_node_notices(self, p):
+        """One dim corner tag per node the engine cannot fully play yet
+        (#227), naming which of the two things is true of it. Dim at rest
+        for the same reason a cable is (decision 57 §3): a user turning
+        that module's own knob is looking straight at it, so the tag does
+        not need to shout to be seen -- it only needs to brighten when
+        looked at, which is what hovering the module does."""
+        for node_id, (kind, text) in self._node_notices.items():
+            rect = self._host_rect(node_id)
+            if rect is None:
+                continue
+            self._paint_notice_tag(p, rect, kind, text, node_id == self._hover_node)
+
+    def _paint_notice_tag(self, p, rect, kind, text, lit):
+        label = NOTICE_TAG.get(kind, "NOT BUILT")
+        p.setFont(theme.font(6, bold=True))
+        metrics = QtGui.QFontMetrics(p.font())
+        width = metrics.horizontalAdvance(label) + 10
+        box = QtCore.QRectF(rect.right() - width - 4, rect.top() + 4, width, 12)
+        alpha = 255 if lit else max(40, int(255 * self.appearance.resting_brightness))
+        colour = _qcolour(NOTICE_COLOUR, alpha)
+        p.setPen(QtGui.QPen(colour, 1))
+        p.setBrush(_qcolour(NOTICE_COLOUR, int(alpha * 0.22)))
+        p.drawRoundedRect(box, 3, 3)
+        p.setPen(colour)
+        p.drawText(box, QtCore.Qt.AlignCenter, label)
+        if lit:
+            self._paint_notice_sentence(p, rect, text)
+
+    def _paint_notice_sentence(self, p, rect, text):
+        """The tag's full sentence, revealed on hover -- same small-callout
+        shape `_paint_hover_label` already draws for a cable, so the two
+        read as one vocabulary rather than two."""
+        p.setFont(theme.font(7))
+        metrics = QtGui.QFontMetrics(p.font())
+        width = metrics.horizontalAdvance(text) + 12
+        x = max(4, min(self.canvas.width() - width - 4, rect.left()))
+        y = max(2, rect.top() - 20)
+        box = QtCore.QRectF(x, y, width, 16)
+        p.setPen(QtGui.QPen(theme.ink(NOTICE_COLOUR), 1))
+        p.setBrush(theme.ink(theme.INK_0, alpha=theme.CHROME_ALPHA))
+        p.drawRect(box)
+        p.setPen(theme.ink(theme.LINEN_DIM))
+        p.drawText(box, QtCore.Qt.AlignCenter, text)
 
     def _paint_loop_badge(self, p):
         members = [n for n in self.graph.loop_members() if n != MixStripe.NODE_ID]
@@ -1034,6 +1118,21 @@ class PatchLayer(QtCore.QObject):
         if found is not self._hover_cable:
             self._hover_cable = found
             self.wake()
+        node = None if point is None else self._notice_node_at(point)
+        if node != self._hover_node:
+            self._hover_node = node
+            self.wake()
+
+    def _notice_node_at(self, point):
+        """Which node with a notice (#227) the cursor is over, if any --
+        so its dim corner tag can brighten into its full sentence the same
+        way a cable brightens on hover (decision 57 §3)."""
+        cursor = QtCore.QPoint(int(point[0]), int(point[1]))
+        for node_id in self._node_notices:
+            rect = self._host_rect(node_id)
+            if rect is not None and rect.contains(cursor):
+                return node_id
+        return None
 
     #: Widget class names a cable click must never steal from. Cables are
     #: drawn over the modules, so a cable crosses a title bar or a knob

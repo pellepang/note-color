@@ -490,6 +490,65 @@ def test_a_looping_cable_is_marked_and_the_setting_can_turn_it_off(fixture):
     assert fixture.layer._cable_colour(forward, 0) == pg.ROLE_COLOURS[pg.SIDE_MONO]
 
 
+# -- a module the engine cannot fully play yet (#227) --------------------
+
+def test_a_node_notice_is_remembered_by_kind_and_can_be_cleared(fixture):
+    fixture.open(_mono("chorus", "CHORUS"))
+    fixture.layer.set_node_notices(
+        {"chorus": ("passthrough", "Chorus passes sound through unchanged")})
+    assert fixture.layer._node_notices["chorus"][0] == "passthrough"
+
+    fixture.layer.set_node_notices({})
+    assert fixture.layer._node_notices == {}
+
+
+def test_a_closed_modules_notice_does_not_outlive_it(fixture):
+    window = fixture.open(_mono("chorus", "CHORUS"))
+    fixture.layer.set_node_notices(
+        {"chorus": ("passthrough", "Chorus passes sound through unchanged")})
+
+    window.request_close()
+    assert "chorus" not in fixture.layer._node_notices
+
+
+def test_hovering_a_noticed_module_lights_its_tag(fixture):
+    fixture.open(_mono("chorus", "CHORUS"))
+    fixture.layer.set_node_notices(
+        {"chorus": ("passthrough", "Chorus passes sound through unchanged")})
+    fixture.layer.relayout()
+
+    rect = fixture.layer._host_rect("chorus")
+    fixture.layer._update_hover((rect.center().x(), rect.center().y()))
+    assert fixture.layer._hover_node == "chorus"
+
+    fixture.layer._update_hover((rect.right() + 200, rect.bottom() + 200))
+    assert fixture.layer._hover_node is None
+
+
+def test_the_two_notice_kinds_get_different_words(fixture):
+    """Decision 57 §5's own tag vocabulary, plus the sentence each kind
+    shows on hover: a wire that stays in the signal path reads differently
+    from a module whose knobs never reached the engine at all."""
+    assert pc.NOTICE_TAG["passthrough"] != pc.NOTICE_TAG["no_module"]
+
+
+def test_the_notice_marking_setting_can_turn_the_tag_off(fixture):
+    fixture.open(_mono("chorus", "CHORUS"))
+    fixture.layer.set_node_notices(
+        {"chorus": ("passthrough", "Chorus passes sound through unchanged")})
+    fixture.layer.relayout()
+    calls = []
+    fixture.layer._paint_node_notices = lambda p: calls.append(1)
+
+    fixture.layer.appearance = fixture.layer.appearance.replace(notice_marking="off")
+    fixture.layer.paint_annotations(None)
+    assert calls == []
+
+    fixture.layer.appearance = fixture.layer.appearance.replace(notice_marking="badge")
+    fixture.layer.paint_annotations(None)
+    assert calls == [1]
+
+
 # -- the frame loop -----------------------------------------------------
 
 def test_the_animation_parks_itself_once_the_cables_have_settled(fixture):

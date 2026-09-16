@@ -67,7 +67,7 @@ def _nontrivial_graph():
 
 
 def _render(graph, settings, parameters, frames=BLOCK * 4):
-    engine_graph, notices = pb.build_graph(graph.nodes(), graph.cables, settings)
+    engine_graph, notices, _ = pb.build_graph(graph.nodes(), graph.cables, settings)
     poly = PolyGraph(engine_graph, voices=4)
     poly.activate(Activation(SAMPLE_RATE, BLOCK))
     for node_id, values in parameters.items():
@@ -164,7 +164,7 @@ def test_a_node_naming_an_unknown_module_gets_a_nameable_notice_not_a_crash():
     assert result.graph.node("reverb1") is not None
     assert any("clap:com.example.reverb" in n and "reverb1" in n for n in result.notices)
     # The rest of the patch is still usable -- one bad node did not sink the file.
-    graph, notices = pb.build_graph(result.graph.nodes(), result.graph.cables, result.settings)
+    graph, notices, _ = pb.build_graph(result.graph.nodes(), result.graph.cables, result.settings)
     assert "reverb1" in " ".join(notices) or True  # passthrough notice, not a crash
 
 
@@ -211,7 +211,7 @@ def test_a_real_old_format_patch_file_still_loads_and_plays(tmp_path):
     node_ids = {n.node_id for n in result.graph.nodes()}
     assert {"osc1", "filter", "amp_env", "osc2", "noise", "lfo", "delay", "mix"} <= node_ids
 
-    engine_graph, build_notices = pb.build_graph(
+    engine_graph, build_notices, _ = pb.build_graph(
         result.graph.nodes(), result.graph.cables, result.settings)
     poly = PolyGraph(engine_graph, voices=2)
     poly.activate(Activation(SAMPLE_RATE, BLOCK))

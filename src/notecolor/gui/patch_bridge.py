@@ -325,23 +325,34 @@ def build_graph(specs, cables, settings=None):
     #208) -- and `settings` is `{type_key: {name: value}}` for the
     construction choices in `CONSTRUCTION_KEYS`.
 
-    Returns `(graph, notices)`. `notices` is a list of plain sentences, in
-    the order the nodes appear, each naming a node whose behaviour on the
-    canvas and in the engine are not yet the same thing.
+    Returns `(graph, notices, node_notices)`. `notices` is a list of plain
+    sentences, in the order the nodes appear, each naming a node whose
+    behaviour on the canvas and in the engine are not yet the same thing --
+    unchanged, for the status bar. `node_notices` is the same information
+    keyed by `node_id`, as `(kind, text)`, `kind` being `"no_module"` (not
+    in the engine graph at all -- `filter_env`, `voice`) or `"passthrough"`
+    (built as a wire -- Chorus today). #227: the canvas marks the node
+    itself with this, because a status-bar sentence is easy to miss with
+    your eyes on the knob.
     """
     settings = settings or {}
     graph = ModuleGraph()
     notices = []
+    node_notices = {}
     built = set()
     for spec in specs:
         module = module_for(spec, settings.get(spec.node_id))
         if module is None:
-            notices.append(f"{spec.title} turns nothing yet")
+            text = f"{spec.title} turns nothing yet"
+            notices.append(text)
+            node_notices[spec.node_id] = ("no_module", text)
             continue
         graph.add(spec.node_id, module, poly=poly_for(spec), title=spec.title)
         built.add(spec.node_id)
         if not spec.is_mix and spec.node_id not in MODULE_FACTORIES:
-            notices.append(f"{spec.title} passes sound through unchanged")
+            text = f"{spec.title} passes sound through unchanged"
+            notices.append(text)
+            node_notices[spec.node_id] = ("passthrough", text)
     for cable in cables:
         if cable.dest is not None:
             if cable.source in built and cable.dest in built:
@@ -375,7 +386,7 @@ def build_graph(specs, cables, settings=None):
         # and report, not this function's.
         graph.force_connect_modulation(cable.source, source_port, dest_id, param_id,
                                         depth=cable.depth)
-    return graph, notices
+    return graph, notices, node_notices
 
 
 class PatchBridge:
@@ -408,6 +419,10 @@ class PatchBridge:
         self.playing = None
         #: Sentences for the status bar, from the last `rebuild()`.
         self.notices = []
+        #: The same notices, keyed by `node_id` as `(kind, text)` -- #227,
+        #: so the canvas can mark the node itself rather than only the
+        #: status bar. See `build_graph()`.
+        self.node_notices = {}
         #: What stopped the last rebuild from playing, or "".
         self.error = ""
         self._settings = {}
@@ -445,7 +460,7 @@ class PatchBridge:
         """
         self.error = ""
         specs = list(specs)
-        graph, self.notices = build_graph(specs, cables, self._settings)
+        graph, self.notices, self.node_notices = build_graph(specs, cables, self._settings)
         try:
             poly = PolyGraph(graph, voices=self.voices)
         except contract.ContractError as exc:

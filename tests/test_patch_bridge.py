@@ -101,9 +101,10 @@ def test_each_canvas_module_becomes_the_engine_module_it_looks_like():
 def test_a_module_the_engine_cannot_play_becomes_a_wire_and_says_so():
     """Chorus has no graph module yet. Leaving it out would make the cable
     into it go nowhere, so it is built as a passthrough -- and named."""
-    graph, notices = pb.build_graph(_specs(_chorus()), [])
+    graph, notices, node_notices = pb.build_graph(_specs(_chorus()), [])
     assert isinstance(graph.node("chorus").module, Passthrough)
     assert notices == ["Chorus passes sound through unchanged"]
+    assert node_notices == {"chorus": ("passthrough", "Chorus passes sound through unchanged")}
 
 
 def test_a_modulation_source_with_no_engine_module_is_not_in_the_graph_at_all():
@@ -113,9 +114,10 @@ def test_a_modulation_source_with_no_engine_module_is_not_in_the_graph_at_all():
     removes nothing from the signal path. It is still named, because its
     knobs do nothing yet."""
     specs = _specs(pg.NodeSpec("filter_env", "FILTER ENV", can_in=False, out_kind=pg.KIND_MOD))
-    graph, notices = pb.build_graph(specs, [])
+    graph, notices, node_notices = pb.build_graph(specs, [])
     assert graph.node("filter_env") is None
     assert "FILTER ENV turns nothing yet" in notices
+    assert node_notices["filter_env"] == ("no_module", "FILTER ENV turns nothing yet")
 
 
 def test_the_lfo_is_a_real_engine_module_with_both_jacks():
@@ -123,7 +125,7 @@ def test_the_lfo_is_a_real_engine_module_with_both_jacks():
     (`KIND_BOTH`) and a modulation one, so it must be a real engine module
     rather than the "mod source has no module" case above."""
     specs = _specs(pg.NodeSpec("lfo", "LFO", can_in=False, out_kind=pg.KIND_BOTH))
-    graph, notices = pb.build_graph(specs, [])
+    graph, notices, _ = pb.build_graph(specs, [])
     assert graph.node("lfo") is not None
     assert notices == []
 
@@ -134,7 +136,7 @@ def test_a_mod_only_source_with_a_real_module_still_gets_built():
     is built like any other node with a factory rather than treated as
     absent the way `filter_env` still is."""
     specs = _specs(pg.NodeSpec("mod_env", "MOD ENV", can_in=False, out_kind=pg.KIND_MOD))
-    graph, notices = pb.build_graph(specs, [])
+    graph, notices, _ = pb.build_graph(specs, [])
     assert graph.node("mod_env") is not None
     assert notices == []
 
@@ -144,7 +146,7 @@ def test_the_canvas_decides_which_side_of_mix_a_module_is_on():
     the per-note side. Without that handed down, an unpatched Filter would
     fall back to once-only and the very first default cable -- Osc into
     Filter -- would be refused."""
-    graph, _ = pb.build_graph(_specs(_delay()), [])
+    graph, _, _ = pb.build_graph(_specs(_delay()), [])
     assert graph.node("filter").descriptor.poly == "per_note"
     assert graph.node("delay").descriptor.poly == "once"
 
