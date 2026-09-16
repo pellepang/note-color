@@ -104,10 +104,9 @@ MODULE_FACTORIES = {
     # Issue #173/decision 72: the live MIDI mod wheel (or any other CC
     # `gui/patch_bridge.PatchBridge.set_external_cc()` is fed), as a
     # modulation source. Named here (and in MOD_SOURCE_PORTS below) so a
-    # patch built directly against the engine can use it; no canvas
-    # drawer entry exists yet for it to be dragged out by a person -- see
-    # `modules/midi_cc.py`'s own docstring for why that is a deliberate,
-    # named gap rather than a missed one.
+    # patch built directly against the engine can use it; also has a
+    # canvas drawer entry ("Mod Wheel", `synth_workspace.SYNTH_CORE_
+    # MODULES`) since issue #235.
     "midi_cc": lambda cfg: ExternalCc(),
 }
 

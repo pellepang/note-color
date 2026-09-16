@@ -14,15 +14,13 @@ is meant to be called by whatever owns the live MIDI CC value
 inaudibly stale by at most one block" reasoning `ParamBlock.values` already
 relies on for a knob edit.
 
-**Registered but not yet reachable from the canvas.** `gui/patch_bridge.
+**Reachable from the canvas since issue #235.** `gui/patch_bridge.
 MODULE_FACTORIES`/`MOD_SOURCE_PORTS` name this module (`"midi_cc"`) so a
 patch built directly against the engine (this module's own tests, and any
-future caller) can use it exactly like `lfo`/`mod_env`. Giving the canvas a
-drawer entry to drag one out needs a `gui/patch_graph.py` `NodeSpec` -- a
-file this ticket does not touch (owned elsewhere for the duration of this
-work) -- so v1 ships the module working end-to-end at the engine layer,
-with the last inch of UI wiring named as the one deliberately deferred
-piece, not silently dropped.
+future caller) can use it exactly like `lfo`/`mod_env`; the drawer entry
+that drags one out ("Mod Wheel", `gui/synth_workspace.SYNTH_CORE_MODULES`)
+followed once `gui/patch_graph.py` was free of the concurrent #227 work
+this ticket's v1 had deliberately left it to.
 """
 
 from __future__ import annotations
