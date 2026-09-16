@@ -236,6 +236,26 @@ def _modulation_canvas(refuse=None):
     return build
 
 
+def _amp_env_velocity():
+    """Issue #234: the Amp Env panel's new seventh knob. Moves the AMP ENV
+    window to the top of the canvas so its full knob grid (including the
+    new Velocity row) is on screen rather than scrolled under the
+    footer -- the default layout stacks it below FILTER."""
+    def build():
+        from PySide6 import QtWidgets
+
+        view = _synth_view()
+        view.resize(900, 900)
+        view.show()
+        QtWidgets.QApplication.processEvents()
+        window = next(w for w in view.canvas.windows() if w.type_key == "amp_env")
+        window.move(460, 20)
+        QtWidgets.QApplication.processEvents()
+        return view
+
+    return build
+
+
 def _mod_wheel_canvas():
     """Issue #235: the mod wheel's new drawer entry and node type
     (`ExternalCc`, "Mod Wheel" on the canvas), cabled onto a per-note
@@ -321,6 +341,7 @@ STATES = {
     "modulation-refusal-not-modulatable": _modulation_canvas(refuse="not_modulatable"),
     "modulation-refusal-poly-boundary": _modulation_canvas(refuse="poly_boundary"),
     "mod-wheel-canvas": _mod_wheel_canvas(),
+    "amp-env-velocity": _amp_env_velocity(),
     "module-notices": _module_notices_canvas(),
     "module-notice-hover-chorus": _module_notices_canvas(hover="chorus"),
     "module-notice-hover-filter-env": _module_notices_canvas(hover="filter_env"),
