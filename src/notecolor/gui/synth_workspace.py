@@ -68,6 +68,18 @@ SYNTH_CORE_MODULES = [
     # none (`patch_bridge.NOT_IN_ENGINE`), and giving it one later should
     # not silently reclassify every patch that already dropped one.
     ("mod_env", "Mod Env"),
+    # Issue #173/#235, decision 72: `graph/modules/midi_cc.ExternalCc`, a
+    # third modulation source alongside LFO and Mod Env -- one live MIDI CC
+    # value, not a waveform or an envelope. "Mod Wheel" rather than the
+    # engine's own "External CC": the module *can* carry any CC, but
+    # `audio/midi_input.MidiDispatcher._control_change()` only ever forwards
+    # CC1 to it today (no CC-picker UI exists yet, decision 72 §6), so the
+    # drawer's name should say what the row actually does, not what the
+    # module could theoretically be extended to do. Revisit the label if a
+    # CC picker ever ships. See `synth_view.py`'s `MONO_TYPES`/
+    # `MOD_SOURCE_TYPES`/`NO_AUDIO_IN_TYPES`/`GRAPH_ONLY_TYPES` entries for
+    # this same type key.
+    ("midi_cc", "Mod Wheel"),
     ("voice", "Voice"),
     # A plain gain stage (#218) -- the engine has it (`graph/modules/
     # level.py`), unlike `filter_env`, so it belongs here rather than with

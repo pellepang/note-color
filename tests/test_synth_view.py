@@ -1098,3 +1098,89 @@ def test_midi_input_status_reports_unavailable_with_no_hardware(app, monkeypatch
     view, _controller, _patch = _make_view()
     assert view._midi_input.available is False
     assert view._midi_status_text() == "none"
+
+
+# --- #235: a drawer entry and node type for the mod wheel (ExternalCc) ------
+
+
+def test_mod_wheel_is_a_drawer_row_named_for_what_it_actually_does(app):
+    """`ExternalCc` is the engine's name; the drawer's is a user-facing
+    choice (issue #235). Only CC1 is ever forwarded to it today
+    (`audio/midi_input.py`'s `_control_change()`, no CC-picker UI exists
+    yet), so "Mod Wheel" -- not the more general "External CC" -- is what
+    the row is named."""
+    from notecolor.gui import synth_workspace
+
+    assert ("midi_cc", "Mod Wheel") in synth_workspace.SYNTH_CORE_MODULES
+
+
+def test_mod_wheel_node_is_a_once_only_mod_source_with_no_sound_jacks(app):
+    """Decision 68's `KIND_BOTH` softening is the LFO's own special case
+    (it also carries sound); `ExternalCc` is the simpler single-kind
+    source and must not inherit it. Decision 72: `POLY_ONCE`, so it lands
+    on the mono side of Mix, matching the engine's own fixed
+    `descriptor().poly`."""
+    view, _controller, _patch = _make_view()
+    window = view._module_factory("midi_cc", QtCore.QPoint(0, 0))
+    assert window is not None
+    assert window.type_key == "midi_cc"
+    assert len(window.knobs()) == 0   # nothing on the module itself to dial in
+
+    view.canvas.add_window(window)
+    view._on_window_added(window)
+
+    spec = view.patch_layer.graph.node("midi_cc")
+    assert spec.side == patch_graph.SIDE_MONO
+    assert spec.out_kind == patch_graph.KIND_MOD
+    assert spec.can_in is False
+    assert spec.can_out is True
+
+
+def test_mod_wheel_cabled_to_a_per_note_knob_modulates_the_engine_end_to_end(app):
+    """The whole path #235 asked to be verified, since `ExternalCc` was
+    proven only at the engine layer (`tests/test_patch_bridge.py`'s
+    `test_external_cc_modulates_a_patched_destination`): place the node
+    from the drawer, cable it to a knob, set a depth, feed a live CC1
+    value through the real dispatcher (`tests/test_midi_input.py`'s own
+    fake-source convention -- raw bytes, no hardware), and read back a
+    changed sound. Also exercises decision 66 §3's crossing rule for real:
+    a global (`POLY_ONCE`) source reaching a per-note (`osc1`) knob."""
+    sound_engine = _GraphCapableStubEngine()
+    view, controller, _patch = _make_view(sound_engine=sound_engine)
+    view.bridge.sound_engine_provider = view.controller.sound_engine_provider
+    assert view.bridge.active
+
+    view.canvas.spawn_module("midi_cc", QtCore.QPoint(20, 20))
+    QtWidgets.QApplication.processEvents()
+    assert "midi_cc" in {w.type_key for w in view.canvas.windows()}
+
+    cable = view.patch_layer.graph.connect(
+        "midi_cc", patch_graph.Target("knob", "osc1", "Fine"))
+    assert cable is not None
+    view.patch_layer.graph.set_depth(cable, 1.0)
+    view._rebuild_graph()
+    mod_connections = view.bridge.playing.graph.mod_connections
+    assert len(mod_connections) == 1
+    assert (mod_connections[0].source, mod_connections[0].dest, mod_connections[0].param_id) == (
+        "midi_cc", "osc1", "fine")
+
+    # No CC has arrived yet -- the honest "nothing plugged in" default is
+    # a flat 0.0 (`ExternalCc.__init__`), the same "silent until a device
+    # says otherwise" default proven at the engine layer
+    # (`test_patch_bridge.test_external_cc_feeds_a_midi_cc_module_when_one_
+    # is_patched`).
+    external_cc_module = view.bridge.playing.graph.node("midi_cc").module
+    assert external_cc_module._value == pytest.approx(0.0)
+    view.bridge.note_on(60)
+    view.bridge.playing.process(512)
+    voice = view.bridge.playing.voices[0]
+    fine_index = voice.graph.node("osc1").module.params.index("fine")
+    assert voice.graph.node("osc1").module.params.mod_active[fine_index]
+
+    # A real CC1 (mod wheel) message, through the same dispatcher a
+    # physical controller's callback thread would call into -- this is the
+    # one inch #235 had to prove that #173 could not: the GUI's drawer,
+    # its cable, and its depth all really reach the live value the
+    # dispatcher writes.
+    view._midi_dispatcher.handle_message([0xB0, 1, 127])
+    assert external_cc_module._value == pytest.approx(1.0)

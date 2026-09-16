@@ -171,7 +171,7 @@ UTILITY_TYPES = frozenset({"level"})
 #: gone outright: it used to be a fixed choice because the fixed engine
 #: had nowhere else to say it; on this canvas the destination is whichever
 #: knob the Mod cable is dropped on.
-GRAPH_ONLY_TYPES = UTILITY_TYPES | {"lfo", "mod_env"}
+GRAPH_ONLY_TYPES = UTILITY_TYPES | {"lfo", "mod_env", "midi_cc"}
 
 #: Knob specs for `UTILITY_TYPES` and the LFO, in the same shape
 #: `EFFECT_PARAM_SPECS` uses -- `spec.section` is unused (there is no
@@ -180,6 +180,13 @@ GRAPH_ONLY_TYPES = UTILITY_TYPES | {"lfo", "mod_env"}
 #: `spec.attr`/`spec.kind`/etc. Every `attr` here is the engine module's own
 #: `ParamSpec.param_id` (`patch_bridge.param_id_for_label()` matches by
 #: *label*, not attr, but keeping them equal is what makes the match land).
+#:
+#: `midi_cc` has no entry, deliberately: `ExternalCc.parameters()`
+#: (`graph/modules/midi_cc.py`) returns `()` -- there is nothing on the
+#: module itself to dial in, only the live external value arriving through
+#: `PatchBridge.set_external_cc()`. A depth is still available, on the
+#: destination knob's own modulation ring (decision 68 §4), the same as
+#: every other modulation source.
 UTILITY_PARAM_SPECS = {
     "level": (
         synth_params.ParamSpec("params", "level", "Level", synth_params.KIND_FLOAT,
@@ -239,6 +246,11 @@ TAG_FOR_TYPE = {
     "filter_env": "ADSR",
     "lfo": "sine→pitch",
     "mod_env": "DAHDSR→mod",
+    # Names the one controller actually wired today (`audio/midi_input.py`'s
+    # `_control_change()`), not the module's general "any CC" capability --
+    # same reasoning as the drawer label, see `synth_workspace.
+    # SYNTH_CORE_MODULES`.
+    "midi_cc": "CC1→mod",
     "voice": "poly 16",
     "delay": "1/8 dot",
     "chorus": "detune",
@@ -260,6 +272,11 @@ DOT_COLOR_FOR_TYPE = {
     "filter_env": theme.CLAY_RED,
     "lfo": theme.AMBER,
     "mod_env": theme.CLAY_RED,
+    # A third modulation-source colour, distinct from the LFO's amber and
+    # Mod Env's clay red: unlike those two, this one's signal originates
+    # outside the patch entirely (a hardware controller), so it gets a
+    # colour neither of them uses rather than sharing one.
+    "midi_cc": theme.TEAL,
     "voice": theme.LINEN_DIM,
     "delay": theme.AMBER,
     "chorus": theme.TEAL_PALE,
@@ -294,8 +311,12 @@ MONO_TYPES = frozenset(effects_audio.EFFECT_TYPES) | UTILITY_TYPES | {"midi_cc"}
 #: Sound goes into a socket; only these can grab a knob -- plus
 #: `DUAL_OUTPUT_TYPES` below, which can do either. `filter_env` has no
 #: engine module yet (`patch_bridge.NOT_IN_ENGINE`); `mod_env` (#208 stage
-#: 2, decision 67) does.
-MOD_SOURCE_TYPES = frozenset({"lfo", "filter_env", "mod_env"})
+#: 2, decision 67) does. `midi_cc` (#235, decision 72) is the third real
+#: source -- a single `PORT_MOD` output like `mod_env`, no audio path at
+#: all, so it is *not* added to `DUAL_OUTPUT_TYPES` below (that set is the
+#: LFO's own deliberate softening, decision 68, not a default every
+#: modulation source inherits).
+MOD_SOURCE_TYPES = frozenset({"lfo", "filter_env", "mod_env", "midi_cc"})
 
 #: The one module with *both* an audio jack and a Mod jack (#208's
 #: deliberate softening of decision 56 §5, `modules/lfo.py`'s own
@@ -306,7 +327,7 @@ DUAL_OUTPUT_TYPES = frozenset({"lfo"})
 
 #: Modules with nothing to take sound *in*: the generators, and the
 #: modulation sources.
-NO_AUDIO_IN_TYPES = frozenset({"noise", "lfo", "filter_env", "mod_env", "voice"})
+NO_AUDIO_IN_TYPES = frozenset({"noise", "lfo", "filter_env", "mod_env", "midi_cc", "voice"})
 
 #: `voice` is the patch's polyphony/glide settings rather than a stage
 #: sound passes through, so it carries no jacks at all. It is on the

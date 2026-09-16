@@ -236,6 +236,43 @@ def _modulation_canvas(refuse=None):
     return build
 
 
+def _mod_wheel_canvas():
+    """Issue #235: the mod wheel's new drawer entry and node type
+    (`ExternalCc`, "Mod Wheel" on the canvas), cabled onto a per-note
+    knob -- the drop from the drawer plus the same "no drag gesture ran"
+    caveat `_modulation_canvas()` above notes for `_rebuild_graph()`."""
+    def build():
+        from PySide6 import QtCore, QtWidgets
+        from notecolor.gui import patch_graph
+
+        view = _synth_view()
+        view.resize(1280, 800)
+        view.show()
+        QtWidgets.QApplication.processEvents()
+        splitter = view.splitter
+        splitter.setSizes([sum(splitter.sizes()) - splitter.floor, splitter.floor])
+        QtWidgets.QApplication.processEvents()
+
+        view.canvas.spawn_module("midi_cc", QtCore.QPoint(0, 0))
+        view.canvas.tidy()
+
+        layer = view.patch_layer
+        graph = layer.graph
+        target = patch_graph.Target("knob", "osc1", "Fine")
+        if graph.judge("midi_cc", target).ok:
+            cable = graph.connect("midi_cc", target)
+            graph.set_depth(cable, 0.5)
+        layer.relayout()
+        view._rebuild_graph()
+
+        for _ in range(150):
+            layer._tick()
+        QtWidgets.QApplication.processEvents()
+        return view
+
+    return build
+
+
 def _module_notices_canvas(hover=None):
     """A Chorus (built as a `Passthrough` wire) and a `filter_env` (not in
     the engine graph at all) on the canvas, for #227: each should carry
@@ -283,6 +320,7 @@ STATES = {
     "modulation-canvas": _modulation_canvas(),
     "modulation-refusal-not-modulatable": _modulation_canvas(refuse="not_modulatable"),
     "modulation-refusal-poly-boundary": _modulation_canvas(refuse="poly_boundary"),
+    "mod-wheel-canvas": _mod_wheel_canvas(),
     "module-notices": _module_notices_canvas(),
     "module-notice-hover-chorus": _module_notices_canvas(hover="chorus"),
     "module-notice-hover-filter-env": _module_notices_canvas(hover="filter_env"),
