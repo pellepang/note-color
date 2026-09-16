@@ -108,7 +108,7 @@ CURRENT_VERSION = 2
 #: `MODULE_FACTORIES`/`NOT_IN_ENGINE`); if a module type's side ever became
 #: a real per-instance choice instead of a fact about its type key, both
 #: copies would need to learn that the same day.
-_MONO_TYPE_KEYS = frozenset(effects_audio.EFFECT_TYPES) | frozenset({"level", "short_delay"})
+_MONO_TYPE_KEYS = frozenset(effects_audio.EFFECT_TYPES) | frozenset({"level", "short_delay", "midi_cc"})
 
 #: The dual-output softening (decision 66 §5): today only the LFO carries
 #: both a sound and a modulation jack.

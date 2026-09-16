@@ -168,6 +168,41 @@ def test_a_node_naming_an_unknown_module_gets_a_nameable_notice_not_a_crash():
     assert "reverb1" in " ".join(notices) or True  # passthrough notice, not a crash
 
 
+@pytest.mark.parametrize("side_fields", [{}, {"side": "invalid"}, {"side": None}])
+@pytest.mark.parametrize("module_id, expected_side", [
+    ("midi_cc", pg.SIDE_MONO),
+    ("level", pg.SIDE_MONO),
+    ("short_delay", pg.SIDE_MONO),
+    ("delay", pg.SIDE_MONO),
+    ("osc1", pg.SIDE_POLY),
+    ("lfo", pg.SIDE_POLY),
+])
+def test_missing_or_invalid_side_uses_the_module_default(
+        module_id, expected_side, side_fields):
+    result = gf.graph_patch_from_data({
+        "version": 2,
+        "node": [{"id": module_id, "module": module_id, **side_fields}],
+    })
+
+    assert result.notices == []
+    node = result.graph.node(module_id)
+    assert node is not None
+    assert node.side == expected_side
+
+
+@pytest.mark.parametrize("side", [pg.SIDE_MONO, pg.SIDE_POLY])
+def test_explicit_mod_wheel_side_is_preserved(side):
+    result = gf.graph_patch_from_data({
+        "version": 2,
+        "node": [{"id": "midi_cc", "module": "midi_cc", "side": side}],
+    })
+
+    assert result.notices == []
+    node = result.graph.node("midi_cc")
+    assert node is not None
+    assert node.side == side
+
+
 def test_loading_malformed_toml_never_raises(tmp_path):
     path = tmp_path / "broken.toml"
     path.write_text("version = 2\nname = \"Oops\"\n[[node]\nid = \"osc1\"\n")
