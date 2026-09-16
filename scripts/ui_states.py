@@ -236,6 +236,45 @@ def _modulation_canvas(refuse=None):
     return build
 
 
+def _module_notices_canvas(hover=None):
+    """A Chorus (built as a `Passthrough` wire) and a `filter_env` (not in
+    the engine graph at all) on the canvas, for #227: each should carry
+    its own notice on the module, not only the status bar. `hover` names
+    a node to show mid-hover, its tag brightened into its full sentence.
+
+    Calls `view._rebuild_graph()` directly, same reason
+    `_modulation_canvas()` above does: the nodes are dropped without going
+    through a drag gesture, so nothing else tells the bridge to build
+    `node_notices` for them.
+    """
+    def build():
+        from PySide6 import QtCore, QtWidgets
+
+        view = _synth_view()
+        view.resize(1280, 800)
+        view.show()
+        QtWidgets.QApplication.processEvents()
+        splitter = view.splitter
+        splitter.setSizes([sum(splitter.sizes()) - splitter.floor, splitter.floor])
+        QtWidgets.QApplication.processEvents()
+
+        for type_key in ("filter_env", "chorus"):
+            view.canvas.spawn_module(type_key, QtCore.QPoint(0, 0))
+        view.canvas.tidy()
+        view._rebuild_graph()
+
+        layer = view.patch_layer
+        for _ in range(120):
+            layer._tick()
+        if hover is not None:
+            rect = layer._host_rect(hover)
+            layer._update_hover((rect.center().x(), rect.center().y()))
+        QtWidgets.QApplication.processEvents()
+        return view
+
+    return build
+
+
 #: name -> zero-argument builder returning the top-level widget to shoot.
 STATES = {
     "synth-view": _synth_view,
@@ -244,6 +283,9 @@ STATES = {
     "modulation-canvas": _modulation_canvas(),
     "modulation-refusal-not-modulatable": _modulation_canvas(refuse="not_modulatable"),
     "modulation-refusal-poly-boundary": _modulation_canvas(refuse="poly_boundary"),
+    "module-notices": _module_notices_canvas(),
+    "module-notice-hover-chorus": _module_notices_canvas(hover="chorus"),
+    "module-notice-hover-filter-env": _module_notices_canvas(hover="filter_env"),
     "drawer-expanded": _synth_view_drawer_expanded,
     "drawer-collapsed": _synth_view_drawer_collapsed,
     "footer-floor": _footer_at(0.0),

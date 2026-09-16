@@ -893,11 +893,18 @@ class PatchLayer(QtCore.QObject):
             self._paint_notice_tag(p, rect, kind, text, node_id == self._hover_node)
 
     def _paint_notice_tag(self, p, rect, kind, text, lit):
+        """Hangs just above the module's top-right corner, outside its
+        rect entirely -- the two screenshots #227 was judged against
+        showed every inside corner already spoken for: the title bar's
+        close button owns the top, and the last knob row's own value
+        text runs right up against the bottom on a module with no jacks
+        to leave slack there. Floating above costs the same bit of
+        otherwise-idle canvas the loop badge already floats in."""
         label = NOTICE_TAG.get(kind, "NOT BUILT")
         p.setFont(theme.font(6, bold=True))
         metrics = QtGui.QFontMetrics(p.font())
         width = metrics.horizontalAdvance(label) + 10
-        box = QtCore.QRectF(rect.right() - width - 4, rect.top() + 4, width, 12)
+        box = QtCore.QRectF(rect.right() - width, rect.top() - 15, width, 12)
         alpha = 255 if lit else max(40, int(255 * self.appearance.resting_brightness))
         colour = _qcolour(NOTICE_COLOUR, alpha)
         p.setPen(QtGui.QPen(colour, 1))
@@ -915,8 +922,8 @@ class PatchLayer(QtCore.QObject):
         p.setFont(theme.font(7))
         metrics = QtGui.QFontMetrics(p.font())
         width = metrics.horizontalAdvance(text) + 12
-        x = max(4, min(self.canvas.width() - width - 4, rect.left()))
-        y = max(2, rect.top() - 20)
+        x = max(4, min(self.canvas.width() - width - 4, rect.right() - width))
+        y = max(2, rect.top() - 33)
         box = QtCore.QRectF(x, y, width, 16)
         p.setPen(QtGui.QPen(theme.ink(NOTICE_COLOUR), 1))
         p.setBrush(theme.ink(theme.INK_0, alpha=theme.CHROME_ALPHA))
