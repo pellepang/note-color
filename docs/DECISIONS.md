@@ -76,3 +76,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [Patch persistence for an arbitrary graph, and migrating old patches (issue #209)](decisions/69-patch-persistence-for-an-arbitrary-graph-and-migrating-old-patches-issue-209.md)
 - [Realtime scheduling for the audio callback thread, a read-only CPU governor check, and what re-measuring on this machine could and could not show (issue #232)](decisions/70-realtime-scheduling-for-the-audio-callback-thread-issue-232.md)
 - [Wiring Synth View's Save/Load to `graph_format` (issue #230)](decisions/71-wiring-synth-view-save-load-to-graph-format-issue-230.md)
+- [MIDI hardware input: note-on/off, velocity, sustain, mod wheel, pitch bend (issue #173)](decisions/72-midi-hardware-input-issue-173.md)

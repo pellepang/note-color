@@ -1337,3 +1337,32 @@ One-liners; full detail in `docs/DECISIONS.md`.
   loop around the Delay has gain ≥ 1 once its Fdbk knob is above zero**, because a
   mix-controlled delay is unity-gain and the canvas has no attenuator on the
   once-only side. A simple Level module is the owner's call.
+
+## MIDI hardware input (decision 72, issue #173)
+
+- **`python-rtmidi` directly, its own `[midi]` extra, imported lazily** — the app
+  runs unchanged with it absent, same convention as `[sf2]`/`[synth]`.
+- **Two lifecycle owners, not one**: `SessionState.ensure_midi_input()` for the
+  session-based terminal world, mirroring `ensure_sound_engine()`; `SynthView`'s
+  own `MidiInput` for the real path, since `visualnote studio` never constructs a
+  `SessionState` at all (it builds its own `SoundEngine` directly, like
+  `virtualnote replay --play`) — opened on first `showEvent()`, closed with the
+  window, not the process.
+- **RtMidi's reader thread reuses decision 70's realtime-scheduling call
+  outright**, not a re-derived copy — verified against `RtMidi.cpp` that it starts
+  at the same `SCHED_OTHER` priority decision 70 found for the audio callback.
+  Raw bytes are marshalled onto the Qt UI thread (a queued signal) before
+  anything touches the graph, so MIDI never becomes a third uncoordinated thread
+  racing `PolyGraph`'s unlocked voice list.
+- **`NoteHoldGate`** (`audio/note_hold.py`) reference-counts which source(s) hold
+  each pitch, so releasing one input's copy of a note never cuts the other's —
+  fixed at the dispatch layer because `PolyGraph.note_off()`'s "release every
+  voice at this pitch" contract is shared by every other call site.
+- **Pitch bend scales down to `fine`'s existing ±100-cent range** rather than
+  widening it to MIDI's own typical ±200-cent default, and is additive to the
+  user's own Fine knob, applied outside the persisted-parameters path so it
+  cannot survive a rebuild as a permanent detune.
+- **Mod wheel got a real `ExternalCc` `POLY_ONCE` module**, proven working
+  end-to-end at the engine layer — but no canvas drawer entry yet, since that
+  needs `gui/patch_graph.py`, out of this ticket's file boundary. Named as the
+  one deliberately incomplete piece, not a gap papered over.
