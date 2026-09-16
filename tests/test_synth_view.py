@@ -910,6 +910,41 @@ def test_loading_a_real_old_format_patch_file_migrates_it_onto_the_canvas(app, t
     assert path.read_text() == text_before
 
 
+# --- #234: `amp_env.velocity` survives a migration and a save -------------
+
+
+def test_migrated_amp_env_velocity_gets_a_knob_and_survives_a_save(app, tmp_path):
+    """The exact loss #234 reports: an old-format patch's
+    `voice.velocity_to_amp` folds into the graph's `amp_env.velocity`
+    (`graph_format.migrate_fixed_patch()`) on load, but the AMP ENV panel
+    used to have no knob for it -- so the value had nowhere to live and
+    the next Save silently dropped it. Proven the same way the LFO's own
+    save/reload test above is: load, read the knob, save, reload, and
+    check the number is still there."""
+    path = _old_format_synth_patch(tmp_path, name="Velocity Loss")
+    old_patch = patch_format.load_patch(str(path))
+    old_patch.voice.velocity_to_amp = 0.35
+    patch_format.save_patch(old_patch, str(path))
+
+    view, _controller, _patch = _make_view()
+    view._load_patch_file(str(path))
+    assert view.current_patch.amp_env.velocity == pytest.approx(0.35)
+
+    window = next(w for w in view.canvas.windows() if w.type_key == "amp_env")
+    specs = view._specs_for_type("amp_env")
+    vel_spec = next(s for s in specs if s.attr == "velocity")
+    vel_knob = window.knobs()[specs.index(vel_spec)]
+    assert vel_spec.label == "Vel"
+    assert synth_params.read(view.current_patch, vel_spec) == pytest.approx(0.35)
+
+    save_path = tmp_path / "resaved.toml"
+    view._save_patch_file(str(save_path), "Velocity Kept")
+
+    other, _controller2, _patch2 = _make_view()
+    other._load_patch_file(str(save_path))
+    assert other.current_patch.amp_env.velocity == pytest.approx(0.35)
+
+
 def test_loading_a_non_synth_old_patch_falls_back_to_the_old_apply_and_notices(app, tmp_path):
     """The graph format is synth-only (decision 69 §2): a sampler/SF2
     patch has nothing for `migrate_fixed_patch()` to build, so Load must

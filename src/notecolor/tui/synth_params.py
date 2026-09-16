@@ -73,15 +73,29 @@ class ParamSpec:
         return f"{self.section}.{self.attr}"
 
 
-def _env_specs(section, title):
-    return (title, (
+def _env_specs(section, title, velocity=False):
+    """`velocity=True` (issue #234) adds a seventh knob mirroring
+    `graph/modules/envelope.AmpEnvelope.parameters()`'s own `velocity`
+    `ParamSpec` -- 0 ignores velocity entirely (an organ), 1.0 makes
+    velocity 0 silence, the same curve `synth_engine.SynthVoice` applies to
+    `patch.voice.velocity_to_amp` (a *different* field: that one is the old
+    fixed engine's own knob, in the VOICE panel; this is the graph engine's,
+    on the envelope module itself, and `graph_format.migrate_fixed_patch()`
+    is what carries an old patch's `velocity_to_amp` across onto this one).
+    Only `amp_env` passes it: `filter_env` has no engine module at all yet
+    (`patch_bridge.NOT_IN_ENGINE`), so it would be a knob controlling
+    nothing, the one thing this file's other panels never do on purpose."""
+    specs = [
         ParamSpec(section, "delay", "Delay", KIND_FLOAT, 0.0, 30.0, 1.3, SCALE_LOG, unit="s", digits=3),
         ParamSpec(section, "hold", "Hold", KIND_FLOAT, 0.0, 30.0, 1.3, SCALE_LOG, unit="s", digits=3),
         ParamSpec(section, "attack", "Attack", KIND_FLOAT, 0.0, 30.0, 1.3, SCALE_LOG, unit="s", digits=3),
         ParamSpec(section, "decay", "Decay", KIND_FLOAT, 0.0, 30.0, 1.3, SCALE_LOG, unit="s", digits=3),
         ParamSpec(section, "sustain", "Sustain", KIND_FLOAT, 0.0, 1.0, 0.05),
         ParamSpec(section, "release", "Release", KIND_FLOAT, 0.0, 30.0, 1.3, SCALE_LOG, unit="s", digits=3),
-    ))
+    ]
+    if velocity:
+        specs.append(ParamSpec(section, "velocity", "Vel", KIND_FLOAT, 0.0, 1.0, 0.05))
+    return (title, tuple(specs))
 
 
 def _osc_specs(section, title):
@@ -113,7 +127,7 @@ SYNTH_SECTIONS = (
         ParamSpec("filter", "env_amount", "EnvAmt", KIND_FLOAT, -1.0, 1.0, 0.05),
         ParamSpec("filter", "key_tracking", "KeyTrk", KIND_FLOAT, 0.0, 1.0, 0.05),
     )),
-    _env_specs("amp_env", "AMP ENV"),
+    _env_specs("amp_env", "AMP ENV", velocity=True),
     _env_specs("filter_env", "FILTER ENV"),
     ("LFO", (
         ParamSpec("lfo", "rate", "Rate", KIND_FLOAT, 0.0, 100.0, 1.2, SCALE_LOG, unit="Hz", digits=2),

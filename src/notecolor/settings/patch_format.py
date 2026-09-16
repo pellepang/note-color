@@ -231,7 +231,17 @@ class Filter:
 class Envelope:
     """DAHDSR -- SF2's delay/hold ahead of a conventional ADSR (cheap, and
     worth having since #103 found the SF2 generator list is a complete
-    voice model capable of hosting all three engines)."""
+    voice model capable of hosting all three engines).
+
+    `velocity` (issue #234) is the graph engine's `AmpEnvelope.velocity`
+    `ParamSpec` given a home on the fixed `Patch` object, which is what
+    every knob -- graph-backed or not -- reads and writes through
+    (`gui/synth_view.py`'s `_build_synth_module()`/`_apply_graph_result()`).
+    Shared with `filter_env` because both instances are the same class, but
+    only `amp_env`'s copy has a panel knob or an engine parameter behind
+    it (`tui/synth_params._env_specs()`'s own `velocity=` flag); a loaded
+    `filter_env.velocity` sits unused, same as `filter.env_amount` already
+    does for the same reason (no engine module yet)."""
 
     delay: float = 0.0
     hold: float = 0.0
@@ -239,6 +249,7 @@ class Envelope:
     decay: float = 0.1
     sustain: float = 0.8
     release: float = 0.2
+    velocity: float = 1.0
 
     @classmethod
     def from_toml(cls, data):
@@ -250,6 +261,7 @@ class Envelope:
             decay=_number(data.get("decay"), blank.decay, 0.0, 30.0),
             sustain=_number(data.get("sustain"), blank.sustain, 0.0, 1.0),
             release=_number(data.get("release"), blank.release, 0.0, 30.0),
+            velocity=_number(data.get("velocity"), blank.velocity, 0.0, 1.0),
         )
 
 
