@@ -44,18 +44,37 @@ rings on identically; at 5 ms the tail is gone before dulling could be
 heard, and a one-zero average at that length is a comb filter on top of a
 comb filter -- a tone change nobody asked the knob for.
 
-**Modulated feedback/mix, and `time` left out (#208 stage 2, decision
-67).** `feedback` and `mix` enter this module's arithmetic the same way
-they enter `delay.py`'s -- a plain per-sample scale inside `_chunk()` --
-so they get the identical buffer substitution. `time` does not, for the
-same reason `delay.py`'s does not: this module already reads the ring at
-a fixed offset per chunk (recomputed once a block, not once a sample), and
-the very thing this module is best positioned to become -- a proper
-audio-rate-modulated chorus/flanger -- needs a per-sample interpolated
-read this module does not yet have. See `delay.py`'s docstring for the
-full reasoning; it applies here without change, and `modulatable=False`
-on `time` is the honest reflection of that rather than a cable that
-connects and silently does nothing.
+## Modulated `time`: this is the module a chorus is built on (#228)
+
+`feedback` and `mix` entered this module's arithmetic as a plain
+per-sample scale inside `_chunk()`, so #208 stage 2 gave them the same
+buffer substitution `delay.py` got. `time` did not, and was left
+`modulatable=False` with a sentence -- decision 67 -- because a moving read
+offset needs a per-sample *interpolated* read, not a knob substitution.
+
+#228 built that read (`fractional_read.FractionalReader`, shared with
+`delay.py`), and `time` is now genuinely modulatable here. **This module
+is the one that matters for it**: a chorus is a 15-30 ms delay whose time
+an LFO sweeps, a flanger the same at 1-10 ms with feedback, a vibrato the
+same at 100% wet -- all of them under the one-block floor `delay.py` is
+built on and therefore only reachable here.
+
+Two things the chunk loop had to learn:
+
+- **The chunk length now comes from the smallest delay in the block**, not
+  from the block's single delay, because the delay is a different number
+  on every sample. `effects.py`'s invariant (a chunk no longer than the
+  delay, so a chunk's reads can only touch samples an earlier chunk wrote)
+  still holds, and holds for the *whole* chunk, when the chunk is cut to
+  the block's minimum.
+- **One frame shorter than that**, because linear interpolation reads the
+  sample above the floored position as well, so it is `position + 1` that
+  must stay behind the write head.
+
+The chunk loop therefore runs more often when an LFO dips the time low --
+but no more often than the *unmodulated* module already does when the time
+knob itself is turned that low, which is the cost this module has always
+had at short settings.
 """
 
 from __future__ import annotations
@@ -66,6 +85,7 @@ from notecolor.audio.graph import contract
 from notecolor.audio.graph.contract import (
     Module, ModuleDescriptor, ParamSpec, audio_in, audio_out,
 )
+from notecolor.audio.graph.modules.fractional_read import FractionalReader
 
 #: Default longest delay, and therefore the ring size. 50ms covers chorus,
 #: flanger and comb with room above; anything longer is `delay.py`'s job and
@@ -94,6 +114,9 @@ class ShortDelay(Module):
         #: is why this one needs no warning where `Delay`'s 11MB did.
         self.max_seconds = min(max(float(max_seconds), MIN_SHORT_SECONDS * 2), 1.0)
         self._write = 0
+        #: The per-sample interpolated read (#228), used only on blocks
+        #: where a live buffer is landing on `time`.
+        self._reader = FractionalReader()
 
     # -- scan ---------------------------------------------------------------
 
@@ -114,11 +137,12 @@ class ShortDelay(Module):
 
     def parameters(self):
         return (
-            # `modulatable=False`: see the module docstring's "Modulated
-            # feedback/mix, and `time` left out" section.
+            # Modulatable since #228, and really read: a live buffer puts
+            # this module on its per-sample interpolated read path, which
+            # is how a chorus/flanger/vibrato is built. See the module
+            # docstring's "Modulated `time`" section.
             ParamSpec("time", "Time", MIN_SHORT_SECONDS, self.max_seconds,
-                      min(0.012, self.max_seconds), unit="s", log=True,
-                      modulatable=False),
+                      min(0.012, self.max_seconds), unit="s", log=True),
             # Bipolar, unlike `Delay`'s. A negative feedback comb cancels
             # the fundamental instead of reinforcing it, which is half of
             # what a flanger sounds like and is free to offer here.
@@ -153,6 +177,10 @@ class ShortDelay(Module):
         # Only touched when `mix` carries a live modulation buffer (#208
         # stage 2) -- `delay.py`'s `_mix_inv` counterpart.
         self._mix_inv = np.zeros(activation.max_block, dtype=np.float64)
+        # The interpolated read's scratch (#228), allocated whether or not
+        # a cable ever lands on `time`: `activate()` is the only place this
+        # module may allocate (contract rule 2).
+        self._reader.allocate(activation.max_block)
 
     def reset(self):
         self._write = 0
@@ -171,8 +199,22 @@ class ShortDelay(Module):
         p = self._p
         mod_active = ctx.param_mod_active
 
-        delay = int(values[p["time"]] * ctx.sample_rate)
-        delay = min(max(delay, 1), self._max_frames)
+        time_live = mod_active is not None and mod_active[p["time"]]
+        time_buf = ctx.param_buffers[p["time"]] if time_live else None
+
+        if time_buf is None:
+            delay = int(values[p["time"]] * ctx.sample_rate)
+            delay = min(max(delay, 1), self._max_frames)
+            # A chunk no longer than the delay: `effects.py`'s invariant 3,
+            # and the only reason a delay shorter than a block can be
+            # correct at all.
+            chunk = min(delay, n)
+        else:
+            # `delay=None` is how `_chunk()` is told to take the
+            # interpolated path -- one branch per chunk rather than a
+            # second copy of the loop.
+            delay = None
+            chunk = self._prepare_modulated(time_buf, n, ctx.sample_rate)
 
         feedback_live = mod_active is not None and mod_active[p["feedback"]]
         mix_live = mod_active is not None and mod_active[p["mix"]]
@@ -181,10 +223,6 @@ class ShortDelay(Module):
         feedback = values[p["feedback"]]
         mix = values[p["mix"]]
 
-        # A chunk no longer than the delay: `effects.py`'s invariant 3, and
-        # the only reason a delay shorter than a block can be correct at
-        # all.
-        chunk = min(delay, n)
         start = 0
         while start < n:
             stop = min(start + chunk, n)
@@ -192,11 +230,40 @@ class ShortDelay(Module):
                         feedback, feedback_buf, mix, mix_buf)
             start = stop
 
+    def _prepare_modulated(self, time_buf, n, sample_rate):
+        """Fill the reader's per-sample frame counts from a live `time`
+        buffer and return the chunk length the block must now use (#228).
+
+        Two floors, and both are invariants rather than taste:
+
+        - The frame count is clamped to at least 2, so the chunk below can
+          always be at least one sample and the loop terminates.
+        - The chunk is the block's *smallest* delay minus one. Minus the
+          delay because `effects.py`'s invariant 3 says a chunk's reads may
+          only touch samples an earlier chunk wrote; the smallest because
+          the delay is a different number on every sample now and the
+          invariant has to hold for all of them; minus one more because
+          linear interpolation also reads the sample *above* the floored
+          position, so it is `position + 1` that must stay behind the write
+          head.
+        """
+        frames = self._reader.frames
+        np.multiply(time_buf[:n], sample_rate, out=frames[:n])
+        np.clip(frames[:n], 2.0, float(self._max_frames), out=frames[:n])
+        return max(1, min(int(frames[:n].min()) - 1, n))
+
     def _chunk(self, source, out, start, stop, delay,
                feedback, feedback_buf, mix, mix_buf):
         count = stop - start
-        read = (self._write - delay) % self._size
-        self._copy_out(read, count)
+        if delay is None:
+            # `start` is the offset into the reader's per-sample frame
+            # counts, so a chunked walk indexes the block's modulation
+            # correctly without copying a slice of it.
+            self._reader.read_into(self._buffer, self._size, self._write,
+                                   start, count, self._wet)
+        else:
+            read = (self._write - delay) % self._size
+            self._copy_out(read, count)
 
         # Ring first, output second: the write needs the dry signal and the
         # wet one, and the output step is about to reuse `_dry`.

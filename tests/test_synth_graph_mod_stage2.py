@@ -12,8 +12,10 @@ every claim about arrays rather than eyeballed:
   modulation buffer rather than accepting a cable that silently does
   nothing -- the gap this stage found and closed for `key_tracking`, which
   was already `modulatable=True` in stage 1 but never read.
-- `time` on both delay modules refuses a mod cable with a sentence
-  (`REFUSE_NOT_MODULATABLE`), rather than accepting one that does nothing.
+- `time` on both delay modules *accepts* a mod cable, as of #228/decision
+  73 -- this file asserted the deliberate stage-2 refusal until the
+  interpolated read behind it existed; see
+  `tests/test_synth_graph_delay_time_mod.py` for the proof it is honest.
 - A modulation-only cycle refuses with a `Verdict` and a sentence
   (#225), instead of reaching `compile()` as a bare `CycleError`.
 - The no-allocation proof (contract rule 2) extended to a patch carrying
@@ -29,7 +31,7 @@ import pytest
 from notecolor.audio.graph import contract
 from notecolor.audio.graph.contract import Activation, ContractError, NoteContext, ProcessContext
 from notecolor.audio.graph.graph import (
-    REFUSE_CYCLE, REFUSE_NOT_MODULATABLE, ModuleGraph,
+    REFUSE_CYCLE, ModuleGraph,
 )
 from notecolor.audio.graph.poly import MixModule, PolyGraph
 from notecolor.audio.graph.modules.delay import Delay
@@ -134,26 +136,25 @@ def test_new_instance_is_a_fresh_mod_envelope():
     assert clone is not original
 
 
-# -- delay `time` refuses modulation; feedback/damping/mix accept it -----
+# -- delay `time`, feedback/damping/mix all accept modulation ------------
+
+# Until #228 (decision 73) the first two of these asserted the *refusal*
+# stage 2 deliberately shipped on `time`: a mod cable there was turned
+# away with `REFUSE_NOT_MODULATABLE` rather than accepted into a read path
+# that could not honour it. #228 built that read path (a per-sample
+# interpolated ring read), so the refusal is gone and the assertion is
+# inverted here rather than deleted -- the cable being *accepted* is now
+# the thing a regression would break. What makes the acceptance honest
+# (the interpolation, the block-delay guarantee under modulation, no
+# per-block allocation) lives in `tests/test_synth_graph_delay_time_mod.py`.
 
 
-def test_delay_time_refuses_a_mod_cable():
+@pytest.mark.parametrize("module_factory", [Delay, ShortDelay])
+def test_delay_time_now_accepts_a_mod_cable(module_factory):
     g = ModuleGraph()
     g.add("lfo", Lfo())
-    g.add("delay", Delay())
-    verdict = g.judge_modulation("lfo", "mod", "delay", "time")
-    assert not verdict.ok
-    assert verdict.code == REFUSE_NOT_MODULATABLE
-    assert verdict.reason
-
-
-def test_short_delay_time_refuses_a_mod_cable():
-    g = ModuleGraph()
-    g.add("lfo", Lfo())
-    g.add("delay", ShortDelay())
-    verdict = g.judge_modulation("lfo", "mod", "delay", "time")
-    assert not verdict.ok
-    assert verdict.code == REFUSE_NOT_MODULATABLE
+    g.add("delay", module_factory())
+    assert g.judge_modulation("lfo", "mod", "delay", "time").ok
 
 
 @pytest.mark.parametrize("param_id", ["feedback", "damping", "mix"])

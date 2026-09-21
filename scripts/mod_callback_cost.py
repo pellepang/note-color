@@ -128,10 +128,46 @@ def build_worst(voices):
     return graph, ()
 
 
+#: Depth for the `chorus` patch's `time` cable, as a fraction of the knob's
+#: range (`ModRoute.apply()` scales linearly by the range, not
+#: logarithmically). `ShortDelay`'s range is 0.1ms..50ms, so 0.1 is a
+#: +/-5ms sweep -- a chorus's actual depth. Raise it on the command line
+#: (`--chorus-depth 0.4`) to reach the stress case described below.
+CHORUS_DEPTH = 0.1
+
+
+def build_chorus(voices, depth=CHORUS_DEPTH):
+    """`worst`, plus the destination #228 added: an LFO on the short
+    delay's `time`.
+
+    Deliberately `worst` + one cable rather than a patch of its own, so the
+    difference between the two rows is the interpolated read and nothing
+    else. Note what that read replaces rather than adds to: on such a block
+    the module takes its per-sample gather *instead of* the two slice
+    copies `_copy_out()` would have made, so the honest number is the
+    delta, not the row.
+
+    **The chunk count is the variable that matters, not the cable.**
+    `ShortDelay` cuts its block into chunks no longer than its own delay
+    (`effects.py`'s invariant 3), so its cost is dominated by *how short
+    the delay is*, modulated or not: at the 12ms default one chunk covers
+    a 512-frame block, and at the knob's 0.1ms floor it takes ~170. A
+    `time` cable deep enough to sweep into that floor therefore buys the
+    floor's chunk count, which is why `--chorus-depth` is exposed --
+    `--set delay:time=0.0005` measures the same cliff with no modulation
+    at all, and the two together separate "what #228 added" from "what
+    `ShortDelay` has always cost at short settings".
+    """
+    graph, long_release = build_worst(voices)
+    assert graph.connect_modulation("lfo", "mod", "delay", "time", depth=depth).ok
+    return graph, long_release
+
+
 PATCHES = {
     "baseline": build_baseline,
     "realistic": build_realistic,
     "worst": build_worst,
+    "chorus": build_chorus,
 }
 
 
@@ -141,10 +177,18 @@ def main():
     parser.add_argument("--voices", type=int, default=config.POLYPHONY_SYNTH_VIEW,
                         help="notes to hold (default: the Synth View's cap)")
     parser.add_argument("--seconds", type=float, default=5.0)
+    parser.add_argument("--chorus-depth", type=float, default=CHORUS_DEPTH,
+                        help="`chorus` only: depth of the `time` cable")
+    parser.add_argument("--set", action="append", default=[], metavar="NODE:PARAM=VALUE",
+                        help="knob value applied to every voice before the run, "
+                             "e.g. --set delay:time=0.0005 (repeatable)")
     args = parser.parse_args()
 
     engine = sound_engine.SoundEngine(detection_active=False)
-    graph, long_release_nodes = PATCHES[args.patch](args.voices)
+    if args.patch == "chorus":
+        graph, long_release_nodes = build_chorus(args.voices, depth=args.chorus_depth)
+    else:
+        graph, long_release_nodes = PATCHES[args.patch](args.voices)
     poly = PolyGraph(graph, voices=args.voices)
     poly.activate(Activation(engine.sample_rate, engine.block_size))
     # Same trick `graph_callback_cost.py` uses: a long release so every
@@ -156,6 +200,14 @@ def main():
             voice.graph.node(node_id).module.params.set("release", 30.0)
             voice.graph.node(node_id).module.params.set("decay", 30.0)
             voice.graph.node(node_id).module.params.set("sustain", 0.8)
+    # `--set` is applied after activation and to every voice, because a
+    # `PolyGraph` clones its modules per voice -- setting the canvas
+    # module's knob would reach none of them.
+    for spec in args.set:
+        target, _, value = spec.partition("=")
+        node_id, _, param_id = target.partition(":")
+        for voice in poly.voices:
+            voice.graph.node(node_id).module.params.set_immediate(param_id, float(value))
     engine.set_graph(poly, activate=False)
 
     durations = []
@@ -190,14 +242,16 @@ def main():
     arr_ms = np.asarray(warm) * 1000
     mean_ms = float(np.mean(arr_ms))
     p50_ms = percentile(warm, 50) * 1000
+    p95_ms = percentile(warm, 95) * 1000
     p99_ms = percentile(warm, 99) * 1000
     max_ms = float(np.max(arr_ms))
     over_budget = int(np.sum(arr_ms > deadline_ms))
     print(f"blocks rendered      : {len(durations)}  (first 10 dropped as warm-up)")
-    print(f"callback ms mean/p50/p99/max : "
-          f"{mean_ms:.3f} / {p50_ms:.3f} / {p99_ms:.3f} / {max_ms:.3f}")
+    print(f"callback ms mean/p50/p95/p99/max : "
+          f"{mean_ms:.3f} / {p50_ms:.3f} / {p95_ms:.3f} / {p99_ms:.3f} / {max_ms:.3f}")
     print(f"% of block budget    : {mean_ms / deadline_ms * 100:.1f}% mean / "
           f"{p50_ms / deadline_ms * 100:.1f}% p50 / "
+          f"{p95_ms / deadline_ms * 100:.1f}% p95 / "
           f"{p99_ms / deadline_ms * 100:.1f}% p99 / "
           f"{max_ms / deadline_ms * 100:.1f}% max"
           f"   <- decision 55 revisits above ~70% sustained")

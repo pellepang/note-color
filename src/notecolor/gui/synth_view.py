@@ -241,10 +241,12 @@ UTILITY_PARAM_SPECS = {
     # keeps a decimal once `format_value()` switches to milliseconds
     # ("0.1ms", not "0ms").
     #
-    # A knob for `time` even though `ParamSpec(modulatable=False)`
-    # (decision 67): the restriction is on *modulation* cables, not on the
-    # user turning it. `patch_graph` refuses a Mod cable dropped here with
-    # its own not-modulatable sentence; #228 is what would lift that.
+    # `time` takes a Mod cable as of #228 (decision 73): the module grew a
+    # per-sample interpolated ring read, so an LFO swept onto this knob is
+    # a real chorus/flanger/vibrato rather than the refusal decision 67
+    # left here. Nothing in this table changes for that -- the knob was
+    # always turnable; what lifted is `patch_graph`'s not-modulatable
+    # refusal, which now comes from `ShortDelay.parameters()` saying yes.
     "short_delay": (
         synth_params.ParamSpec("params", "time", "Time", synth_params.KIND_FLOAT,
                                 short_delay.MIN_SHORT_SECONDS, short_delay.MAX_SHORT_SECONDS,

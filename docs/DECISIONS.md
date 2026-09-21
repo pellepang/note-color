@@ -77,3 +77,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [Realtime scheduling for the audio callback thread, a read-only CPU governor check, and what re-measuring on this machine could and could not show (issue #232)](decisions/70-realtime-scheduling-for-the-audio-callback-thread-issue-232.md)
 - [Wiring Synth View's Save/Load to `graph_format` (issue #230)](decisions/71-wiring-synth-view-save-load-to-graph-format-issue-230.md)
 - [MIDI hardware input: note-on/off, velocity, sustain, mod wheel, pitch bend (issue #173)](decisions/72-midi-hardware-input-issue-173.md)
+- [Modulated delay time, and the per-sample interpolated read behind it (issue #228)](decisions/73-modulated-delay-time-and-the-per-sample-interpolated-read-issue-228.md)

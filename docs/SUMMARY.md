@@ -1366,3 +1366,51 @@ One-liners; full detail in `docs/DECISIONS.md`.
   end-to-end at the engine layer — but no canvas drawer entry yet, since that
   needs `gui/patch_graph.py`, out of this ticket's file boundary. Named as the
   one deliberately incomplete piece, not a gap papered over.
+
+## Modulated delay time: the engine side of a chorus (decision 73, issue #228)
+
+- **Decision 67's refusal on delay `time` is lifted, because the fact under it
+  changed** — both delay modules grew a second read path, so a mod cable no
+  longer reaches a read that would round a moving offset to whole frames and
+  step (crackle) on every jump. `modulatable=True` that reads nothing is the
+  failure this stream already had once (`key_tracking`), so the acceptance is
+  proved in `tests/test_synth_graph_delay_time_mod.py` and stage 2's
+  refusal test was *inverted* rather than deleted.
+- **Two paths, chosen per block — decision 66's scalar-or-buffer bargain applied
+  to a whole read.** No cable on `time` keeps the original integer slice copies,
+  byte-identical; a live buffer switches to a per-sample interpolated gather. A
+  patch without the cable pays nothing, which is why this could land in the two
+  modules already on the callback path rather than a third one.
+- **One shared `FractionalReader` (`graph/modules/fractional_read.py`), not a
+  copy per module** — the two would drift in exactly the places that matter
+  (wrap, index dtype, which tap gets the modulo), and the interpolation kernel is
+  the part most likely to be upgraded later, so it should be local to one file.
+  What is *not* shared: the seconds→frames conversion and the clamp, which are
+  each module's own invariants and genuinely differ.
+- **Linear interpolation, with the loss stated rather than waved at**: a two-tap
+  FIR, flat at `frac = 0`, about −3.9 dB at Nyquist and under −0.1 dB below ~6 kHz
+  at `frac = 0.5`. It lands on the wet path only, against a dry path that lost
+  nothing. **Where it would matter is a long feedback chain**, since it compounds
+  per repeat — the case to listen to first if all-pass/cubic is ever wanted.
+- **The reader owns its seven pre-allocated scratch arrays** (contract rule 2):
+  one attribute per module instead of seven, one place for "did this allocate per
+  block" to be wrong instead of two. 28 kB an instance against the 706 kB ring a
+  two-second `Delay` already carries.
+- **The block-delay guarantee survives the move.** `Delay`'s clamp moved onto the
+  per-sample modulated frame count and its floor went up by one frame, because
+  linear interpolation also reads the sample *above* the floored position.
+  `ShortDelay` keeps `effects.py`'s invariant 3 by cutting its chunk to the
+  block's **minimum** delay (minus that same frame) — the delay is a different
+  number on every sample now, so the invariant has to hold for the smallest one.
+- **Cost: the chunk count is the variable, not the cable.** `ShortDelay` runs its
+  chunk loop more often when an LFO dips the time low, but no more often than the
+  *unmodulated* module already does at that knob setting. `mod_callback_cost.py`
+  gained a `chorus` patch (`worst` + one cable, so the delta is the read and
+  nothing else), `--chorus-depth`, `--set node:param=value` and a p95 column —
+  **but no new figures were taken**; decisions 67/70's "no measured headroom for
+  #228" reading stands unsuperseded, and running the harness is the next step.
+- **Two things left open and named**: a knob edit's own fade briefly takes the
+  fractional path (a sub-sample step no bigger than the integer ones a `time`
+  drag already made), and the canvas's `chorus` node is still a `Passthrough` —
+  this ticket makes a *patched* chorus real (LFO → Short Delay `time`), not that
+  node. Nothing was verified by ear; the machine is muted.

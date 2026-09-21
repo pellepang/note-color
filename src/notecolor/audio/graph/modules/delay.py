@@ -55,27 +55,47 @@ giving them a live modulation buffer is the same `out=` array substitution
 `noise.py`'s `level` gets, applied inside `_damp()` and `_copy_in()`. A
 slow LFO breathing the feedback or the wet mix is an ordinary, safe patch.
 
-`time` is different in kind and stays `modulatable=False`. This module
-computes its read offset **once a block** (`delay = int(values[...] *
-sample_rate)`, floored to whole frames) and reads one contiguous window at
-that fixed offset; a live modulation buffer would ask it to read a
-*different* offset every sample within the block, which this module's
-single contiguous `_copy_out()` cannot do without turning into a per-sample
-gather with linear interpolation between two ring positions -- exactly
-the read `oscillator.py`'s `_read_into()` already does for its wavetable,
-but here layered on a ring that also has to keep the read strictly behind
-the write for the block-delay guarantee (see "The guarantee" above) even
-as that offset moves. That is real, well-understood DSP (a chorus *is*
-exactly this: a short delay whose time an LFO sweeps, read with
-interpolation so the pitch it induces sweeps smoothly instead of
-crackling on every integer-sample jump) but it is a rewrite of this
-module's read path and its invariants, not a knob-level change like the
-other three, and it is called out here rather than attempted: this stage
-leaves `time` unmodulated on both `Delay` and `ShortDelay` and names the
-gap instead of shipping a half-interpolated read that crackles. A
-dedicated interpolating-read delay (or a variant of `short_delay.py`,
-which already reads sub-block and is the module actually shaped for a
-chorus/flanger use) is the natural home for it later.
+**Modulated `time`, and the second read path it needed (#228, decision
+73).** `time` was the one destination decision 67 left out, and the reason
+was real: it is not a per-sample *scale* like the other three, it is a
+per-sample *read offset*, and this module computed it once a block
+(`delay = int(values[...] * sample_rate)`) and read one contiguous window
+at that fixed offset. Rounding a moving offset to whole frames crackles on
+every integer jump, so rather than ship that, #208 stage 2 declared
+`modulatable=False` and named the work.
+
+That work is now done, and `time` is genuinely modulatable on both
+modules. There are two read paths, chosen per block:
+
+- **Nothing modulating `time`** -- the original `_copy_out()`, two slice
+  copies at one integer offset, byte-identical to what it always did. A
+  patch with no cable on `time` pays exactly nothing for this feature,
+  which is the same scalar-or-buffer bargain decision 66 struck
+  everywhere else.
+- **A live buffer on `time`** -- `fractional_read.FractionalReader`, a
+  per-sample gather with linear interpolation between the two ring
+  samples either side of the fractional position. That is what makes the
+  pitch a moving delay induces sweep smoothly instead of stepping, and it
+  is what a chorus, a flanger and a vibrato are all built from.
+
+**The guarantee survives the move**, which was the part that needed care.
+The floor is applied per sample, to the modulated frame count, and it is
+one frame *higher* than the scalar path's (`max_block + 1` rather than
+`max_block`): linear interpolation reads the sample above the floored
+position too, so the tap that must stay behind the write head is
+`position + 1`, not `position`. With that, every read this block -- both
+taps, every sample -- still lands strictly behind the write window, so
+`block_delay = 1` remains true at every knob position *and every
+modulation excursion*, and a feedback loop the graph ordered around this
+module stays correctly ordered while an LFO sweeps its time.
+
+One honest seam: a knob edit's own fade also sets `mod_active` for a block
+or two (decision 66's smoothing), so a `time` drag briefly takes the
+fractional path and then returns to the integer one, which can leave a
+sub-sample step at the moment the fade settles. That step is the same size
+as the ones a `time` drag already made on every integer boundary it
+crossed, so it is not a new class of artefact, and making the scalar path
+fractional too would charge every unmodulated delay in every patch for it.
 
 Deliberately **not** taken:
 
@@ -123,6 +143,7 @@ from notecolor.audio.graph import contract
 from notecolor.audio.graph.contract import (
     Module, ModuleDescriptor, ParamSpec, audio_in, audio_out,
 )
+from notecolor.audio.graph.modules.fractional_read import FractionalReader
 
 #: Default longest delay the line can be asked for. Fixes the buffer
 #: `activate()` allocates, so the knob's top end is a memory decision, not a
@@ -152,6 +173,10 @@ class Delay(Module):
         self.max_seconds = max(float(max_seconds), 0.002)
         self._write = 0
         self._damp_prev = 0.0
+        #: The per-sample interpolated read, used only on blocks where a
+        #: live buffer is landing on `time` (#228). Allocated in
+        #: `_allocate()` like everything else; inert until then.
+        self._reader = FractionalReader()
         #: Blocks in which the delay line held a NaN or an infinity. Read off
         #: the audio thread, by a panel that wants to say so. Never acted on
         #: -- see decision 63 §4.
@@ -177,12 +202,13 @@ class Delay(Module):
 
     def parameters(self):
         return (
-            # `modulatable=False`: see the module docstring's "Modulated
-            # feedback/damping/mix, and why `time` is not among them"
-            # section -- a live buffer here would need a per-sample
-            # interpolated ring read this module does not have.
+            # Modulatable since #228, and the buffer really is read: a
+            # live one switches this module onto its per-sample
+            # interpolated read path. See the module docstring's
+            # "Modulated `time`" section for what that costs and what it
+            # keeps true.
             ParamSpec("time", "Time", 0.001, self.max_seconds, min(0.25, self.max_seconds),
-                      unit="s", log=True, modulatable=False),
+                      unit="s", log=True),
             # Capped below 1.0: a delay at unity *internal* feedback never
             # decays. That cap is about this module's own recursion and is
             # not a stability policy for the patch -- the loop a cable makes
@@ -218,6 +244,12 @@ class Delay(Module):
         self._min_frames = activation.max_block
         self._max_frames = max(
             int(round(self.max_seconds * activation.sample_rate)), self._min_frames)
+        # The interpolated path's floor is one frame higher than the
+        # scalar path's, because its upper tap reads one sample nearer the
+        # write head. See "The guarantee survives the move" in the module
+        # docstring.
+        self._min_mod_frames = float(self._min_frames + 1)
+        self._max_mod_frames = float(max(self._max_frames, self._min_frames + 1))
         # One block of slack past the longest delay, so a read window never
         # overlaps the write window even at maximum time.
         self._size = self._max_frames + activation.max_block
@@ -239,6 +271,11 @@ class Delay(Module):
         self._damp_half = np.zeros(activation.max_block, dtype=np.float64)
         self._damp_invhalf = np.zeros(activation.max_block, dtype=np.float64)
         self._mix_inv = np.zeros(activation.max_block, dtype=np.float64)
+        # The interpolated read's scratch (#228). Allocated whether or not
+        # a cable ever lands on `time`, for the same reason the ring is
+        # sized for `max_seconds` rather than for where the knob is:
+        # `activate()` is the only place this module may allocate.
+        self._reader.allocate(activation.max_block)
 
     def reset(self):
         """Silence the line without reallocating.
@@ -267,10 +304,14 @@ class Delay(Module):
         p = self._p
         mod_active = ctx.param_mod_active
 
-        delay = int(values[p["time"]] * ctx.sample_rate)
-        # The guarantee, applied here and not at the knob: however short the
-        # user asks for, the read stays a whole block behind the write.
-        delay = min(max(delay, self._min_frames), self._max_frames)
+        time_live = mod_active is not None and mod_active[p["time"]]
+        time_buf = ctx.param_buffers[p["time"]] if time_live else None
+        if time_buf is None:
+            delay = int(values[p["time"]] * ctx.sample_rate)
+            # The guarantee, applied here and not at the knob: however short
+            # the user asks for, the read stays a whole block behind the
+            # write.
+            delay = min(max(delay, self._min_frames), self._max_frames)
 
         feedback_live = mod_active is not None and mod_active[p["feedback"]]
         damping_live = mod_active is not None and mod_active[p["damping"]]
@@ -282,8 +323,11 @@ class Delay(Module):
         damping = values[p["damping"]]
         mix = values[p["mix"]]
 
-        read = (self._write - delay) % self._size
-        self._copy_out(read, n)
+        if time_buf is None:
+            read = (self._write - delay) % self._size
+            self._copy_out(read, n)
+        else:
+            self._read_modulated(time_buf, n, ctx.sample_rate)
         tail = self._damp(damping, damping_buf, n)
         self._copy_in(source, feedback, feedback_buf, tail, n)
         self._write = (self._write + n) % self._size
@@ -346,6 +390,25 @@ class Delay(Module):
         np.multiply(self._prev[:n], half[:n], out=self._prev[:n])
         np.add(self._damped[:n], self._prev[:n], out=self._damped[:n])
         return self._damped
+
+    def _read_modulated(self, time_buf, n, sample_rate):
+        """`self._wet[:n]` <- the ring read at a delay that moves every
+        sample (#228), interpolated between whole positions.
+
+        The clamp is the whole safety story, and it is applied to the
+        *modulated* frame count rather than to the knob: whatever an LFO
+        asks for, no sample of this block reads nearer the write head than
+        one block plus one frame, which is what keeps `block_delay = 1`
+        true while the time sweeps. Clamping (rather than refusing or
+        wrapping) is also the musically right answer -- a chorus swept past
+        the floor flattens out at the floor instead of folding over.
+        """
+        frames = self._reader.frames
+        np.multiply(time_buf[:n], sample_rate, out=frames[:n])
+        np.clip(frames[:n], self._min_mod_frames, self._max_mod_frames,
+                out=frames[:n])
+        self._reader.read_into(self._buffer, self._size, self._write,
+                               0, n, self._wet)
 
     def _copy_out(self, read, n):
         """`self._wet[:n]` <- `n` frames from the ring at `read`, wrapping."""
