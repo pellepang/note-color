@@ -234,3 +234,105 @@ def test_migrating_a_non_synth_patch_notices_rather_than_crashing():
     assert result.migrated
     assert any("sampler" in n for n in result.notices)
     assert {n.node_id for n in result.graph.nodes()} == {"mix"}
+
+
+# --- #237: the defaults a patch file leaves out -----------------------------
+
+
+def _node_only_patch(tmp_path, type_key):
+    """A hand-written version 2 patch carrying one node and nothing but its
+    identity -- no `side`, `out_kind`, `can_in` or `can_out`. Exactly what a
+    patch written by hand (or by an older build) looks like, and the only
+    case the default tables in `graph_format` are consulted for at all."""
+    path = tmp_path / f"{type_key}.toml"
+    path.write_text(
+        f"version = {gf.CURRENT_VERSION}\n"
+        f'name = "Hand Written"\n\n'
+        f"[[node]]\n"
+        f'id = "{type_key}"\n'
+        f'module = "{type_key}"\n'
+        f'title = "{type_key.upper()}"\n',
+        encoding="utf-8")
+    return path
+
+
+def _only_node(result):
+    return next(n for n in result.graph.nodes() if not n.is_mix)
+
+
+def test_a_mod_wheel_node_with_no_side_loads_on_the_mono_side(tmp_path):
+    """#237: `midi_cc` reached `synth_view.MONO_TYPES` with #235 and not
+    `graph_format`'s mirror of it, so a Mod Wheel with no explicit `side`
+    landed on the per-note side of the Mix stripe -- one copy per held
+    note, for the one physical mod wheel there is."""
+    result = gf.load_graph_patch(str(_node_only_patch(tmp_path, "midi_cc")))
+
+    spec = _only_node(result)
+    assert spec.side == pg.SIDE_MONO
+    assert spec.out_kind == pg.KIND_MOD, "a Mod Wheel sends knob movement, not sound"
+    assert not spec.can_in, "it has no sound input to draw a socket for"
+    assert result.notices == [], "midi_cc is a module this build really has"
+
+
+def test_a_saved_mod_wheel_patch_needs_no_migration(tmp_path):
+    """The bug only ever bit a file missing the field: `save_graph_patch()`
+    writes `side`/`out_kind`/`can_in`/`can_out` on every node, and
+    `graph_patch_from_data()` prefers what the file says. A patch saved
+    while the table was wrong still says `side = "mono"`, because the
+    canvas it was saved from had it right -- so nothing on disk needs
+    fixing up."""
+    graph = pg.PatchGraph()
+    graph.add_node(pg.NodeSpec("mix", "MIX", side=pg.SIDE_BOUNDARY, is_mix=True))
+    graph.add_node(pg.NodeSpec("filter", "FILTER"))
+    graph.add_node(pg.NodeSpec("midi_cc", "MOD WHEEL", side=pg.SIDE_MONO,
+                               can_in=False, out_kind=pg.KIND_MOD))
+    graph.cables.append(pg.Cable(source="midi_cc", knob=("filter", "Cutoff"), depth=0.5))
+    path = tmp_path / "saved.toml"
+    gf.save_graph_patch(str(path), "Saved", graph)
+
+    text = path.read_text()
+    assert 'side = "mono"' in text
+
+    result = gf.load_graph_patch(str(path))
+    spec = next(n for n in result.graph.nodes() if n.node_id == "midi_cc")
+    assert spec.side == pg.SIDE_MONO
+    assert spec.out_kind == pg.KIND_MOD
+    cable = result.graph.cables[0]
+    assert cable.knob == ("filter", "Cutoff") and cable.depth == pytest.approx(0.5)
+
+
+def test_defaults_match_the_canvas_for_every_known_module_type(tmp_path):
+    """The anti-drift test (#237). `graph_format` keeps its own Qt-free
+    copy of what `synth_view`'s type-key tables know, and twice now a new
+    module reached one copy and not the other. Rather than list the types
+    by hand -- a list that goes stale the same way -- run *every* type key
+    this build knows through both paths and demand the same `NodeSpec`.
+
+    The canvas side is `SynthView._node_spec_for()` itself, called
+    unbound with a stub window, so this compares against the real
+    function and not a second transcription of its rules."""
+    pytest.importorskip("PySide6")
+    from notecolor.gui import synth_view as sv
+
+    class _StubWindow:
+        def __init__(self, type_key):
+            self.type_key = type_key
+
+        def title_text(self):
+            return self.type_key.upper()
+
+    type_keys = (gf.known_module_ids()
+                 | sv.MONO_TYPES | sv.MOD_SOURCE_TYPES | sv.DUAL_OUTPUT_TYPES
+                 | sv.NO_AUDIO_IN_TYPES | sv.NO_AUDIO_OUT_TYPES)
+    assert "midi_cc" in type_keys
+
+    for type_key in sorted(type_keys):
+        canvas = sv.SynthView._node_spec_for(None, _StubWindow(type_key))
+        loaded = _only_node(gf.load_graph_patch(str(_node_only_patch(tmp_path, type_key))))
+        assert (loaded.side, loaded.out_kind, loaded.can_in, loaded.can_out,
+                loaded.is_delay) == (
+            canvas.side, canvas.out_kind, canvas.can_in, canvas.can_out,
+            canvas.is_delay), (
+            f"{type_key!r} loads from a patch file differently from how the "
+            f"canvas builds it -- graph_format's tables and synth_view's have "
+            f"drifted apart")

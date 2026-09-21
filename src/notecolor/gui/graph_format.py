@@ -100,26 +100,53 @@ from notecolor.settings import patch_format
 #: key at all -- is decision #106's fixed-topology schema.
 CURRENT_VERSION = 2
 
-#: Mirrors `synth_view.MONO_TYPES` (effect types plus the utility types),
-#: without importing `synth_view` itself -- this module stays Qt-free, the
-#: same discipline `patch_graph.py` and `patch_bridge.py` already keep, so
-#: it can be exercised headless. Both sides read from the same underlying
-#: registries (`effects_audio.EFFECT_TYPES`, `patch_bridge`'s own
-#: `MODULE_FACTORIES`/`NOT_IN_ENGINE`); if a module type's side ever became
-#: a real per-instance choice instead of a fact about its type key, both
-#: copies would need to learn that the same day.
-_MONO_TYPE_KEYS = frozenset(effects_audio.EFFECT_TYPES) | frozenset({"level", "short_delay"})
+# -- what a node *is*, when the file does not say ----------------------------
+#
+# These four tables mirror `synth_view.MONO_TYPES`, `DUAL_OUTPUT_TYPES`,
+# `MOD_SOURCE_TYPES`, `NO_AUDIO_IN_TYPES` and `NO_AUDIO_OUT_TYPES` without
+# importing `synth_view` itself -- this module stays Qt-free, the same
+# discipline `patch_graph.py` and `patch_bridge.py` already keep, so it can
+# be exercised headless. They are consulted only for a field a patch file
+# leaves out: `save_graph_patch()` writes `side`/`out_kind`/`can_in`/
+# `can_out` on every node, so they decide what a hand-written (or
+# hand-trimmed) patch means, not what a saved one does.
+#
+# Two copies of the same knowledge drift -- twice now (#236's
+# `short_delay`, then #237's `midi_cc`, which reached `MONO_TYPES` and not
+# this file and so loaded a Mod Wheel on the poly side). Collapsing them
+# into one list means `synth_view` importing from here, which is a change
+# to that file; until then `tests/test_graph_format.py::
+# test_defaults_match_the_canvas_for_every_known_module_type` runs every
+# type key this build knows through *both* paths and fails the day they
+# disagree, so a new module cannot silently land on the wrong side again.
+
+#: Which side of the Mix stripe a type key runs on (decision 56 §3):
+#: effects, plus the once-only utilities and global controls. `midi_cc` is
+#: here for #235's own reason -- one physical mod wheel, not one per held
+#: note.
+_MONO_TYPE_KEYS = (frozenset(effects_audio.EFFECT_TYPES)
+                   | frozenset({"level", "short_delay", "midi_cc"}))
 
 #: The dual-output softening (decision 66 §5): today only the LFO carries
 #: both a sound and a modulation jack.
 _DUAL_OUTPUT_TYPE_KEYS = frozenset({"lfo"})
 
-#: Type keys with no engine module at all yet, but that still send
-#: modulation (decision 67's `mod_env`).
-_MOD_ONLY_TYPE_KEYS = frozenset({"mod_env"})
+#: Type keys whose only output is modulation -- a cable from one goes onto
+#: a knob, never into a socket. `mod_env` (decision 67) and `midi_cc`
+#: (#235, decision 72) have real engine modules; `filter_env` has none yet
+#: (`patch_bridge.NOT_IN_ENGINE`) but is still drawn as a Mod source.
+_MOD_ONLY_TYPE_KEYS = frozenset({"mod_env", "midi_cc", "filter_env"})
 
-#: Type keys with no sound input -- they generate rather than process.
-_NO_SOUND_IN_TYPE_KEYS = frozenset({"osc1", "osc2", "noise"})
+#: Type keys with nothing to take sound *in*: the noise generator, the
+#: modulation sources, and the jackless `voice` settings window. The
+#: oscillators are not listed because they do not need to be --
+#: `patch_bridge.takes_sound_in()` already answers for anything with a
+#: real engine module, exactly as `synth_view._node_spec_for()` asks both.
+_NO_SOUND_IN_TYPE_KEYS = frozenset(
+    {"noise", "lfo", "filter_env", "mod_env", "midi_cc", "voice"})
+
+#: Type keys with no sound output at all: `voice` carries knobs, not jacks.
+_NO_SOUND_OUT_TYPE_KEYS = frozenset({"voice"})
 
 MIX_NODE_ID = "mix"
 
@@ -151,7 +178,12 @@ def _out_kind_for(module_id):
 
 
 def _can_in_for(module_id):
-    return module_id not in _NO_SOUND_IN_TYPE_KEYS
+    return (module_id not in _NO_SOUND_IN_TYPE_KEYS
+            and patch_bridge.takes_sound_in(module_id))
+
+
+def _can_out_for(module_id):
+    return module_id not in _NO_SOUND_OUT_TYPE_KEYS
 
 
 # -- the in-memory result ----------------------------------------------------
@@ -307,7 +339,7 @@ def graph_patch_from_data(data, default_name="Untitled"):
         if out_kind not in (pg.KIND_AUDIO, pg.KIND_MOD, pg.KIND_BOTH):
             out_kind = _out_kind_for(module_id)
         can_in = _as_bool(raw.get("can_in"), _can_in_for(module_id))
-        can_out = _as_bool(raw.get("can_out"), True)
+        can_out = _as_bool(raw.get("can_out"), _can_out_for(module_id))
         is_delay = _as_bool(raw.get("is_delay"), module_id == "delay")
 
         graph.add_node(pg.NodeSpec(node_id, title, side=side, can_in=can_in,
@@ -410,7 +442,8 @@ def migrate_fixed_patch(patch):
     def add(node_id, title, parameters=None, settings=None):
         graph.add_node(pg.NodeSpec(
             node_id, title, side=_side_for(node_id), can_in=_can_in_for(node_id),
-            can_out=True, out_kind=_out_kind_for(node_id), is_delay=node_id == "delay"))
+            can_out=_can_out_for(node_id), out_kind=_out_kind_for(node_id),
+            is_delay=node_id == "delay"))
         if settings:
             result.settings[node_id] = settings
         if parameters:
