@@ -120,3 +120,19 @@ _Avoid_: calling it storage, or a project file. Deleting it can only cost time.
 
 **Pass**:
 One stage of a conversion that consumes the previous stage's output — separation and global estimates, then transcription conditioned on those estimates, then quantization against a fixed grid. Whether more passes genuinely buy accuracy is a hypothesis this map tests, not an assumption it builds on.
+
+### Color View (wayfinder map [#240](https://github.com/pellepang/note-color/issues/240))
+
+**Color View**:
+A third pane of VisualNote Studio, alongside the DAW arrange window and the Synth View — a canvas of arrangeable **Lenses** showing the same music drawn many different ways at once. Its purpose is seeing music-theory and color-theory concepts, not decoration: the DAW and the synth are tools the project built in order to have something to visualize.
+
+**Lens**:
+One visualizer on the Color View's canvas — a circle of fifths, a scrolling score, a piano, a solid color field. Draws the shared stream of sounding colored notes and nothing else, so it never knows which **Source** it is watching. Individually placed, sized, filtered and configured; the same lens type may appear more than once on a canvas with different settings.
+_Avoid_: Module — already taken twice, by `audio/graph/contract.py`'s patch-graph modules and by `synth_workspace.ModuleWindow`. _Avoid_: View — that word means one of the three panes (DAW, Synth, Color), not a thing inside one. _Avoid_: Visualizer, as a code identifier; it is fine in prose.
+
+**Note filter**:
+A per-**Lens** restriction on which notes reach it — cut the low notes out of one lens, keep only a pitch class in another. It thins what is *drawn* and never touches sound.
+_Avoid_: EQ. The Color View sits next to a synth full of real audio filters; borrowing their word for something purely visual would be read as audio by everyone who sees it.
+
+**Color scheme**:
+The mapping from a note to its color, as an object that can be named, edited live and compared against another one inside the Color View — not a startup flag. Supersedes nothing yet: `--color-scheme` and `config`'s `[colors]` overrides still exist, and how the two relate is open.
