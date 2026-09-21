@@ -18,6 +18,17 @@ Above 1 is deliberately reachable too -- the same reason a mixing desk's
 trim knob does not stop at unity -- because a quiet source patched into a
 loop is a legitimate reason to want gain back, not just attenuation.
 
+**A modulatable gain.** `level` is `modulatable=True`, and as of the
+follow-up on this ticket it is genuinely *read* that way: a live buffer on
+the knob is applied sample by sample rather than being quietly ignored in
+favour of the smoothed scalar. That is the same buffer substitution
+`noise.py` does for its own `level` and `short_delay.py` for
+`feedback`/`mix` (decision 66, #208 stage 2), and it needs no argument of
+its own -- a per-sample scale is what a gain stage's arithmetic already is,
+so an LFO or envelope on this knob is a tremolo, and inside a feedback loop
+it is a decay the player can shape rather than one number. It shipped
+inert: the cable compiled, was accepted, and changed nothing audible.
+
 **`POLY_EITHER`.** A gain stage is equally at home per voice (taming one
 oscillator before it hits a shared filter) or once-only (the feedback-loop
 case this was built for); nothing about the module cares which side of Mix
@@ -25,6 +36,8 @@ it ends up on, so the patch decides (decision 61 §2).
 """
 
 from __future__ import annotations
+
+import numpy as np
 
 from notecolor.audio.graph import contract
 from notecolor.audio.graph.contract import (
@@ -65,10 +78,20 @@ class Level(Module):
         rebind: writing the input array straight out as the output would
         make two nodes share one buffer, which the host's binding does not
         expect (see `passthrough.Passthrough.process()` for the same
-        note)."""
+        note).
+
+        The multiplier is either the smoothed scalar or this block's
+        per-sample buffer, exactly as `noise.py` chooses for its own
+        `level` -- `np.multiply(a, b, out=)` takes an array or a float in
+        `b` without caring which, so the branch costs one lookup and no
+        second copy of the arithmetic."""
         n = ctx.frames
-        level = ctx.params[self._p_level]
+        if n <= 0:
+            return
         out = ctx.outputs[self._out_index]
         source = ctx.inputs[self._in_index]
-        out[:n] = source[:n]
-        out[:n] *= level
+        mod_active = ctx.param_mod_active
+        live = mod_active is not None and mod_active[self._p_level]
+        level = (ctx.param_buffers[self._p_level][:n] if live
+                 else ctx.params[self._p_level])
+        np.multiply(source[:n], level, out=out[:n])
