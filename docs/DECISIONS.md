@@ -78,3 +78,4 @@ This file is now an index — split into one file per decision under `docs/decis
 - [Wiring Synth View's Save/Load to `graph_format` (issue #230)](decisions/71-wiring-synth-view-save-load-to-graph-format-issue-230.md)
 - [MIDI hardware input: note-on/off, velocity, sustain, mod wheel, pitch bend (issue #173)](decisions/72-midi-hardware-input-issue-173.md)
 - [Modulated delay time, and the per-sample interpolated read behind it (issue #228)](decisions/73-modulated-delay-time-and-the-per-sample-interpolated-read-issue-228.md)
+- [The log knob's floor is a lift-off rung, not a shared lower bound (issue #238)](decisions/74-the-log-knobs-floor-is-a-lift-off-rung-not-a-shared-lower-bound-issue-238.md)

@@ -184,3 +184,169 @@ def test_note_name_uses_this_repos_flat_biased_fifths_spelling():
     assert sp.note_name(61) == "Db4"     # flat-biased, not C#
     assert sp.note_name(48) == "C3"
     assert sp.note_name(36) == "C2"
+
+
+# --- the log floor is a lift-off rung, not a shared lower bound (#238) -----
+#
+# Decision 74. `SYNTH_PARAM_LOG_FLOOR` exists because a ratio step cannot
+# lift a value off zero, so a spec whose minimum *is* zero needs somewhere
+# to land on the first press. Reading it as a shared lower bound instead
+# amputated any spec that legitimately goes below a millisecond -- the
+# Short Delay's Time, whose sub-millisecond end is the comb a flanger is
+# made of, was reachable only as a cliff: one press down from 1ms landed on
+# the spec minimum, one press back up returned to 1ms, and the sweep
+# between them could not be found by hand.
+
+#: How many ordinary presses any log knob may take to cross its whole
+#: range. The floor keeps a knob from being so coarse that the value a
+#: user wants falls between two presses; the ceiling is really a statement
+#: about `Shift` -- at ten ordinary presses per coarse one
+#: (`SYNTH_PARAM_COARSE_STEPS`), 130 means no log knob is ever more than
+#: thirteen coarse presses from end to end. The filter cutoff sits near
+#: that ceiling on purpose: its ratio is a semitone, chosen for musical
+#: evenness rather than for press count (decision #107 point 5).
+MIN_PRESSES_ACROSS_RANGE = 20
+MAX_PRESSES_ACROSS_RANGE = 130
+
+
+def _gui_panel_specs():
+    """Every `ParamSpec` the Synth View's knob panels build from. They live
+    in `gui/synth_view.py` rather than here because they describe engine
+    modules with no `Patch` section, but they are stepped by this module's
+    `step_value()`, so this file's invariants have to cover them too."""
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from notecolor.gui import synth_view
+
+    tables = list(synth_view.EFFECT_PARAM_SPECS.values())
+    tables += list(synth_view.UTILITY_PARAM_SPECS.values())
+    return [spec for table in tables for spec in table]
+
+
+def _all_log_specs(patch):
+    specs = list(sp.specs_for(patch)) + _gui_panel_specs()
+    return [s for s in specs if s.scale == sp.SCALE_LOG]
+
+
+def _sweep(spec, direction):
+    """Steps `spec` from one end of its range to the other, returning the
+    values passed through. Stops if a press stops moving the value."""
+    value = float(spec.low) if direction > 0 else float(spec.high)
+    seen = [value]
+    for _ in range(10_000):
+        nxt = sp.step_value(spec, value, direction)
+        if (nxt <= value) if direction > 0 else (nxt >= value):
+            break
+        value = nxt
+        seen.append(value)
+    return seen
+
+
+def test_the_log_floor_is_the_specs_own_minimum_when_that_is_positive(patch):
+    # The constant only speaks for specs that start at zero. A spec whose
+    # minimum is already positive needs no rung to jump to -- multiplying
+    # its own minimum works perfectly well -- so its floor is that minimum,
+    # however far below the constant it sits.
+    zero_low = _spec(patch, "amp_env.attack")
+    assert zero_low.low == 0.0
+    assert sp.log_floor(zero_low) == pytest.approx(config.SYNTH_PARAM_LOG_FLOOR)
+
+    positive_low = _spec(patch, "filter.cutoff")
+    assert sp.log_floor(positive_low) == pytest.approx(positive_low.low)
+
+    below_the_constant = sp.ParamSpec(
+        "params", "time", "Time", sp.KIND_FLOAT, 0.0001, 0.05, 1.3, sp.SCALE_LOG)
+    assert below_the_constant.low < config.SYNTH_PARAM_LOG_FLOOR
+    assert sp.log_floor(below_the_constant) == pytest.approx(0.0001)
+
+
+def test_the_short_delays_comb_range_steps_smoothly_in_both_directions():
+    # #238's actual complaint: 0.1ms to 1ms is where the Short Delay is a
+    # comb rather than a delay, and it has to be turnable by hand.
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from notecolor.gui import synth_view
+
+    spec = next(s for s in synth_view.UTILITY_PARAM_SPECS["short_delay"]
+                if s.attr == "time")
+    assert spec.low == pytest.approx(0.0001)
+
+    # Down from a millisecond: every press a real ratio step, none of them
+    # the old cliff onto the spec minimum.
+    value = 0.001
+    comb = []
+    for _ in range(6):
+        nxt = sp.step_value(spec, value, -1)
+        assert nxt == pytest.approx(value / spec.step), \
+            "a press below 1ms must be a ratio step, not a jump to the minimum"
+        value = nxt
+        comb.append(value)
+    assert all(spec.low < v < 0.001 for v in comb)
+    assert len(set(comb)) == len(comb)
+
+    # And back up again lands where it started, rather than snapping to 1ms.
+    for _ in range(6):
+        value = sp.step_value(spec, value, 1)
+    assert value == pytest.approx(0.001)
+
+    # The whole sub-millisecond end is reachable, not just its endpoints.
+    down = _sweep(spec, -1)
+    assert sum(1 for v in down if v < 0.001) >= 8
+
+
+def test_every_log_spec_crosses_its_range_in_a_hand_turnable_number_of_presses(patch):
+    # The generic invariant, so a spec added later cannot quietly become
+    # either a knob with three usable positions or one that takes four
+    # hundred presses to cross.
+    for spec in _all_log_specs(patch):
+        for direction in (1, -1):
+            seen = _sweep(spec, direction)
+            presses = len(seen) - 1
+            assert MIN_PRESSES_ACROSS_RANGE <= presses <= MAX_PRESSES_ACROSS_RANGE, \
+                f"{spec.path} takes {presses} presses going {direction:+d}"
+            assert seen[-1] == pytest.approx(
+                spec.high if direction > 0 else spec.low), \
+                f"{spec.path} does not reach its end going {direction:+d}"
+
+
+def test_no_log_spec_jumps_more_than_one_ratio_step_inside_its_range(patch):
+    # The floor is allowed exactly one discontinuity -- the lift-off off
+    # zero, and the landing back onto it -- and only for a spec whose
+    # minimum is zero. Anywhere else a press must be a clean multiply, so
+    # the sweep a user turns by hand has no cliff in it.
+    for spec in _all_log_specs(patch):
+        floor = sp.log_floor(spec)
+        for direction in (1, -1):
+            values = _sweep(spec, direction)
+            for before, after in zip(values, values[1:]):
+                if before <= floor or after <= floor:
+                    continue          # the lift-off rung, if this spec has one
+                if after == pytest.approx(spec.high) or after == pytest.approx(spec.low):
+                    continue          # the clamp at the far end
+                assert after == pytest.approx(
+                    before * (spec.step ** direction)), \
+                    f"{spec.path} jumps from {before} to {after}"
+
+
+def test_the_gui_knob_hand_uses_the_same_floor_the_presses_do():
+    # Rotation and stepping read one rule (`log_floor()`), so a knob that
+    # can be stepped into the comb range also paints it, instead of pinning
+    # every sub-millisecond value to the hard left.
+    import os
+
+    pytest.importorskip("PySide6")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from notecolor.gui import synth_view
+
+    spec = next(s for s in synth_view.UTILITY_PARAM_SPECS["short_delay"]
+                if s.attr == "time")
+    angles = [synth_view._rotation_for(spec, v)
+              for v in (0.0001, 0.0002, 0.0004, 0.0008, 0.001)]
+    assert angles == sorted(angles)
+    assert len(set(angles)) == len(angles), \
+        "the sub-millisecond sweep must move the hand, not pin it at -135"
+    assert angles[0] == pytest.approx(-135.0)

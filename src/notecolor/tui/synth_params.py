@@ -204,6 +204,32 @@ def _clamp(value, low, high):
     return max(low, min(high, value))
 
 
+def log_floor(spec):
+    """The smallest value a log-scaled `spec` steps onto above its minimum
+    -- the single rule both `step_value()` and the GUI knob's rotation
+    (`gui/synth_view._rotation_for()`) read, rather than each clamping for
+    itself.
+
+    A ratio step cannot lift a value off zero, so a spec whose minimum
+    *is* zero needs a rung to jump to on the first press: that rung is
+    `config.SYNTH_PARAM_LOG_FLOOR`. A spec whose minimum is already
+    positive needs no such help -- multiplying it works perfectly well --
+    so its floor is its own minimum, however small (decision 74).
+
+    The old rule was `max(spec.low, SYNTH_PARAM_LOG_FLOOR)`, which read
+    the constant as a shared *lower bound* rather than a lift-off rung and
+    so amputated any spec that legitimately went below a millisecond. The
+    Short Delay's Time (#236, #238) is one: it runs from 0.1ms, and the
+    sub-millisecond end is precisely where it stops being a delay and
+    becomes the comb a flanger is made of. Under the old rule that whole
+    end was a cliff -- one press down from 1ms jumped to the spec minimum,
+    one press back up returned to 1ms, and nothing in between was
+    reachable by hand.
+    """
+    low = float(spec.low)
+    return low if low > 0.0 else float(config.SYNTH_PARAM_LOG_FLOOR)
+
+
 def step_value(spec, value, direction, coarse=False):
     """Pure: one Left/Right press on `spec`'s current `value`.
 
@@ -230,7 +256,7 @@ def step_value(spec, value, direction, coarse=False):
         ratio = float(spec.step)
         if coarse:
             ratio = ratio ** config.SYNTH_PARAM_COARSE_STEPS
-        floor = max(float(spec.low), config.SYNTH_PARAM_LOG_FLOOR)
+        floor = log_floor(spec)
         current = float(value)
         if direction > 0:
             current = floor if current < floor else current * ratio

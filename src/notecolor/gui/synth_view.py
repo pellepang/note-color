@@ -636,7 +636,13 @@ class _FooterSplitter(QtWidgets.QSplitter):
 def _rotation_for(spec, value):
     """Knob-hand angle (-135..+135 degrees) for `value` on `spec`'s range
     -- log-scaled specs get a log-fraction, choice specs get their index
-    fraction, everything else a plain linear fraction."""
+    fraction, everything else a plain linear fraction.
+
+    The log fraction's bottom end comes from `synth_params.log_floor()`,
+    the same rule `step_value()` steps by (decision 74), so the hand's
+    travel and the presses that move it agree: a knob that can be stepped
+    down to 0.1ms also *paints* the 0.1ms-to-1ms sweep instead of pinning
+    every value in it to the hard left."""
     if spec.kind == synth_params.KIND_CHOICE:
         options = spec.options
         if not options:
@@ -647,7 +653,7 @@ def _rotation_for(spec, value):
             index = 0
         fraction = index / max(1, len(options) - 1)
     elif spec.scale == synth_params.SCALE_LOG:
-        low = max(float(spec.low), config.SYNTH_PARAM_LOG_FLOOR)
+        low = synth_params.log_floor(spec)
         high = float(spec.high)
         current = max(low, min(high, float(value)))
         fraction = 0.0 if high <= low else (

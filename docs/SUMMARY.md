@@ -1414,3 +1414,38 @@ One-liners; full detail in `docs/DECISIONS.md`.
   drag already made), and the canvas's `chorus` node is still a `Passthrough` —
   this ticket makes a *patched* chorus real (LFO → Short Delay `time`), not that
   node. Nothing was verified by ear; the machine is muted.
+
+## The log knob's floor is a lift-off rung, not a shared lower bound (decision 74, issue #238)
+
+- **`SYNTH_PARAM_LOG_FLOOR` was right; the `max()` around it was not.** The
+  constant answers one narrow question — where does a knob whose minimum *is*
+  zero land on its first press up, given a ratio can't lift a value off zero —
+  and `max(spec.low, FLOOR)` silently promoted that lift-off rung into a shared
+  lower bound. `synth_params.log_floor()` now returns the spec's own minimum
+  when it is positive, and the constant only when it is zero.
+- **One spec was affected, and it was the one that mattered**: `ShortDelay`'s
+  `time`, whose 0.1ms–1ms end is the comb a flanger is made of and was reachable
+  only as a cliff (one press down jumped to the minimum, one press back up
+  returned to 1ms). Confirmed by sweeping every log spec under both rules — every
+  other minimum is either exactly zero or already ≥ 1ms.
+- **Rejected: lowering the constant** (buys one knob's bottom end by putting
+  inaudible sub-millisecond travel at the bottom of a dozen others, and an LFO
+  lift-off of one cycle per 2¾ hours); **a per-spec `log_floor` field** (the
+  spec already answers this in `low`; kept as the escape hatch if one ever wants
+  a rung other than its own minimum); **a per-spec ratio hitting a fixed press
+  count** (would throw away the filter cutoff's semitone-per-press, which is
+  musical by design — press count is a consequence to check, not a target).
+- **One copy of the rule, for both paths.** The TUI's `step_value()` and the
+  GUI's `_rotation_for()` compute different things (next value vs. knob-hand
+  angle) but must share a floor, or a knob's presses reach 0.1ms while its hand
+  pins the whole sweep at the hard left. `log_floor()` lives in `synth_params.py`
+  and the GUI imports it.
+- **The press count is asserted generically, not assumed**: every log spec in
+  both spec tables crosses its range in 20–130 ordinary presses each way, i.e. at
+  most 13 with `Shift` held — cutoff 120 (deliberate), everything else 24–65,
+  Short Delay 24 across its full range. A second test forbids any press inside a
+  range being anything but a clean multiply, so a future spec cannot quietly
+  reintroduce the cliff.
+- **Nothing was verified by ear**; the machine is muted. Whether that sweep
+  sounds like a flange, and whether 24 presses is the right feel for it, is the
+  owner's call.

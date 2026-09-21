@@ -561,8 +561,12 @@ SYNTH_PARAM_COARSE_STEPS = 10    # Shift+Left/Right multiplier: one coarse press
 SYNTH_PARAM_CUTOFF_RATIO = 1.059463094359295  # 2**(1/12): one Left/Right press moves the cutoff a semitone,
                                   # so a filter sweep is the same musical distance per press everywhere in
                                   # the 20Hz-20kHz range instead of crawling low and leaping high.
-SYNTH_PARAM_LOG_FLOOR = 0.001    # smallest value a log-scaled parameter steps *up* to from its minimum -- a
-                                  # ratio step can never leave zero on its own, so the first press has to jump.
+SYNTH_PARAM_LOG_FLOOR = 0.001    # smallest value a log-scaled parameter whose own minimum is *zero* steps up
+                                  # to -- a ratio step can never leave zero, so that first press has to jump, and
+                                  # this is where it lands. It is a lift-off rung, not a shared lower bound
+                                  # (decision 74): a spec whose minimum is already positive steps from its own
+                                  # minimum instead, however small, because a ratio needs no help leaving it.
+                                  # `synth_params.log_floor()` is the one place that choice is made.
 POLYPHONY_SYNTH_DUAL = 28        # voice cap while the synth tool's layout 2 has a kit and a synth patch playable
                                   # at once (#107's implementation note). Lower than POLYPHONY_STANDALONE
                                   # because the same budget is now shared by two engines whose per-voice costs
