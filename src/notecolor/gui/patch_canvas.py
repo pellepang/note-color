@@ -453,6 +453,11 @@ class PatchLayer(QtCore.QObject):
             self._knobs.pop(key)
         if self._focused_node == node_id:
             self._focused_node = None
+        if self._depth_drag is not None and self._depth_drag["node"] == node_id:
+            # Its knob and cable are about to stop existing.
+            self._cancel_depth_drag()
+        if self._drag is not None and self._drag["node"] == node_id:
+            self._cancel_cable_drag()  # so is the socket it is dragging from
         self._node_notices.pop(node_id, None)
         if self._hover_node == node_id:
             self._hover_node = None
@@ -1017,9 +1022,31 @@ class PatchLayer(QtCore.QObject):
     def eventFilter(self, obj, event):
         kind = event.type()
         if kind == QtCore.QEvent.MouseMove:
+            if self._drag is not None and not (event.buttons() & QtCore.Qt.LeftButton):
+                # The connect gesture is driven by `SocketWidget`'s own move
+                # and release events, so if that socket stops sending them
+                # -- destroyed with its module, grab taken away -- nothing
+                # else would ever clear `_drag`.
+                self._cancel_cable_drag()
             if self._depth_drag is not None:
-                self._update_depth_drag(event)
-                return True
+                # A drag exists only while the button is genuinely still
+                # down. Qt does not promise the matching release: a
+                # compositor can take the pointer grab back, a modal can
+                # open over us, the grabbed widget can be destroyed with
+                # the module it lived on. Every one of those used to leave
+                # `_depth_drag` set forever -- and this branch then
+                # swallowed *every* mouse move in the canvas (returning
+                # True), so hovering, cables and any further ring drag went
+                # dead until restart, while the depth kept following a
+                # mouse with nothing held down. Checking the live button
+                # state costs nothing and heals all of those on the next
+                # move, rather than patching them one interruption at a
+                # time.
+                if not (event.buttons() & QtCore.Qt.LeftButton):
+                    self._cancel_depth_drag()
+                else:
+                    self._update_depth_drag(event)
+                    return True
             self._update_hover(self._to_canvas(obj, event))
         elif kind == QtCore.QEvent.MouseButtonPress:
             if self._try_start_depth_drag(obj, event):
@@ -1028,9 +1055,12 @@ class PatchLayer(QtCore.QObject):
                 return True
             self.clear_refusal()
         elif kind == QtCore.QEvent.MouseButtonRelease:
-            if self._depth_drag is not None and event.button() == QtCore.Qt.LeftButton:
+            if self._depth_drag is not None:
+                # Any button coming up ends the gesture. Waiting for the
+                # left one specifically meant a right-click during a drag
+                # left it live with nothing holding it.
                 self._end_depth_drag()
-                return True
+                return event.button() == QtCore.Qt.LeftButton
         elif kind == QtCore.QEvent.Leave and obj is self.canvas:
             self._update_hover(None)
         return False
@@ -1069,12 +1099,19 @@ class PatchLayer(QtCore.QObject):
         if hit is None:
             return False
         node_id, label, cable = hit
+        # The grab goes on the canvas, never on `obj`: `obj` is whichever
+        # filtered widget happened to be under the press, often a knob on a
+        # module window, and closing that module mid-drag left an
+        # application-wide mouse grab held by a destroyed widget. The canvas
+        # outlives every module and is filtered too, so the moves still
+        # arrive here; `_update_depth_drag` reads only global coordinates,
+        # so which widget they came through does not matter.
         self._depth_drag = {
             "node": node_id, "label": label, "cable": cable,
             "start_y": event.globalPosition().y(), "start_depth": cable.depth,
-            "grabbed": obj,
+            "grabbed": self.canvas,
         }
-        obj.grabMouse()
+        self.canvas.grabMouse()
         self.clear_refusal()
         self._turning = (node_id, label)
         self._focused_node = node_id
@@ -1093,11 +1130,28 @@ class PatchLayer(QtCore.QObject):
             self.depth_changed(cable.source, drag["node"], drag["label"], cable.depth)
         self.wake()
 
-    def _end_depth_drag(self):
-        drag = self._depth_drag
-        drag["grabbed"].releaseMouse()
-        self._depth_drag = None
+    def _cancel_depth_drag(self):
+        """Drop the gesture and its grab, from any state, without raising.
+
+        The single way `_depth_drag` is ever cleared. It has to survive
+        being called twice, and being called when the grabbed widget is
+        already a deleted C++ object -- a teardown that can throw is how
+        the state got stuck in the first place."""
+        drag, self._depth_drag = self._depth_drag, None
         self._turning = None
+        if drag is None:
+            return None
+        try:
+            drag["grabbed"].releaseMouse()
+        except RuntimeError:
+            pass  # the widget went away with its module; the grab died with it
+        self.wake()
+        return drag
+
+    def _end_depth_drag(self):
+        drag = self._cancel_depth_drag()
+        if drag is None:
+            return
         cable = drag["cable"]
         self._announce(f"depth · {self.cable_label(cable)} · {cable.depth:+.2f}")
         self.wake()
@@ -1193,14 +1247,32 @@ class PatchLayer(QtCore.QObject):
         self._set_target(self._target_at(global_pos))
         self.wake()
 
+    def _cancel_cable_drag(self):
+        """Drop the connect gesture from any state, without raising -- the
+        counterpart of `_cancel_depth_drag`, and the single way `_drag` is
+        cleared. A live `_drag` suppresses cable hover (`_update_hover`) and
+        blocks both unplugging and ring drags, so one left set is the same
+        dead-mouse bug in a different gesture."""
+        drag, self._drag = self._drag, None
+        if drag is None:
+            return None
+        # Clear the highlights directly rather than via `_set_target(None)`:
+        # that returns early once `_drag` is None, which would leave an
+        # "ok"/"bad" jack lit with no drag to explain it.
+        for socket in list(self._sockets.values()) + [drag["socket"]]:
+            try:
+                if socket.state:
+                    socket.set_state("")
+            except RuntimeError:
+                pass  # went away with its module
+        self.wake()
+        return drag
+
     def drag_release(self, global_pos):
         if self._drag is None:
             return
-        drag = self._drag
         target = self._target_at(global_pos)
-        drag["socket"].set_state("")
-        self._set_target(None)
-        self._drag = None
+        drag = self._cancel_cable_drag()
         if target is not None:
             verdict = self.graph.judge(drag["node"], target)
             if verdict.ok:

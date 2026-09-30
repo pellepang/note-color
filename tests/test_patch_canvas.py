@@ -372,6 +372,222 @@ def test_a_second_press_on_the_ring_does_not_start_two_drags(fixture):
         fixture.canvas, _mouse_event(QtCore.QEvent.MouseButtonPress, top)) is False
 
 
+# -- a ring drag that is never released (the wedged-mouse bug) ------------
+#
+# `_depth_drag` being left set is not a cosmetic leak: `eventFilter`'s
+# MouseMove branch returns True while it is live, so a stuck drag swallows
+# every mouse move on the canvas -- hover, cables and further ring drags all
+# stop responding, and the depth keeps tracking a mouse with nothing held.
+# Qt does not guarantee the matching release (a Wayland compositor can take
+# the pointer grab back, a modal can open, the grabbed widget can be
+# destroyed), so each of these asserts the recovery, not the release.
+
+def _ring_press(fixture, obj=None):
+    cx, cy, radius = fixture.layer._knob_ring("filter", "Cutoff")
+    top = (cx, cy - radius)
+    obj = fixture.canvas if obj is None else obj
+    started = fixture.layer._try_start_depth_drag(
+        obj, _mouse_event(QtCore.QEvent.MouseButtonPress, top))
+    assert started is True
+    return top
+
+
+def _modulated_filter(fixture):
+    fixture.open(_poly("lfo", "LFO", can_in=False, out_kind=pg.KIND_MOD))
+    filt = fixture.open(_poly("filter", "FILTER"), at=(300, 40))
+    cable = fixture.layer.graph.connect("lfo", pg.Target("knob", "filter", "Cutoff"))
+    fixture.layer.relayout()
+    fixture.layer._tick()
+    return filt, cable
+
+
+def test_a_move_with_no_button_held_ends_the_drag_instead_of_eating_it(fixture):
+    """The self-heal: if the release went missing, the next plain mouse move
+    ends the gesture and is passed on as an ordinary hover, rather than being
+    swallowed forever."""
+    _modulated_filter(fixture)
+    _ring_press(fixture)
+
+    swallowed = fixture.layer.eventFilter(
+        fixture.canvas,
+        _mouse_event(QtCore.QEvent.MouseMove, (500, 500),
+                     buttons=QtCore.Qt.NoButton))
+    assert swallowed is False
+    assert fixture.layer._depth_drag is None
+    assert fixture.layer._turning is None
+
+
+def test_a_lost_release_does_not_keep_writing_depth(fixture):
+    """Depth followed the cursor with nothing held down -- a value the user
+    never dialled in, landing on the cable as they moved away."""
+    _modulated_filter(fixture)[1].depth = 0.0
+    _ring_press(fixture)
+
+    for x in range(400, 460, 20):
+        fixture.layer.eventFilter(
+            fixture.canvas,
+            _mouse_event(QtCore.QEvent.MouseMove, (x, 120),
+                         buttons=QtCore.Qt.NoButton))
+    assert fixture.layer.graph.cables[0].depth == 0.0
+
+
+def test_a_wedged_drag_does_not_block_the_next_one(fixture):
+    _modulated_filter(fixture)
+    top = _ring_press(fixture)
+    fixture.layer.eventFilter(
+        fixture.canvas,
+        _mouse_event(QtCore.QEvent.MouseMove, (500, 500),
+                     buttons=QtCore.Qt.NoButton))
+    assert fixture.layer._try_start_depth_drag(
+        fixture.canvas, _mouse_event(QtCore.QEvent.MouseButtonPress, top)) is True
+
+
+def test_closing_the_module_mid_drag_cancels_it(fixture):
+    """The knob and cable being dragged are about to stop existing."""
+    filt, _cable = _modulated_filter(fixture)
+    _ring_press(fixture)
+
+    fixture.canvas.windowRemoved.emit(filt)
+
+    assert fixture.layer._depth_drag is None
+    assert fixture.layer._turning is None
+    assert QtWidgets.QWidget.mouseGrabber() is None
+    assert fixture.layer.eventFilter(
+        fixture.canvas,
+        _mouse_event(QtCore.QEvent.MouseMove, (500, 500),
+                     buttons=QtCore.Qt.NoButton)) is False
+
+
+def test_the_grab_sits_on_the_canvas_not_on_the_pressed_widget(fixture):
+    """An application-wide grab must be held by something that outlives the
+    gesture: `obj` is often a knob on a module window, and that module can
+    close mid-drag."""
+    filt, _cable = _modulated_filter(fixture)
+    knob = [k for k in filt.knobs() if k.label() == "Cutoff"][0]
+    cx, cy, radius = fixture.layer._knob_ring("filter", "Cutoff")
+    in_knob = knob.mapFrom(fixture.canvas, QtCore.QPoint(int(cx), int(cy - radius)))
+
+    assert fixture.layer._try_start_depth_drag(
+        knob, _mouse_event(QtCore.QEvent.MouseButtonPress,
+                           (in_knob.x(), in_knob.y()))) is True
+    assert fixture.layer._depth_drag["grabbed"] is fixture.canvas
+    assert QtWidgets.QWidget.mouseGrabber() is fixture.canvas
+    fixture.layer._end_depth_drag()
+    assert QtWidgets.QWidget.mouseGrabber() is None
+
+
+def test_a_right_button_release_during_a_drag_ends_it(fixture):
+    _modulated_filter(fixture)
+    _ring_press(fixture)
+    fixture.layer.eventFilter(
+        fixture.canvas,
+        _mouse_event(QtCore.QEvent.MouseButtonRelease, (420, 120),
+                     button=QtCore.Qt.RightButton))
+    assert fixture.layer._depth_drag is None
+
+
+def test_cancelling_twice_is_harmless(fixture):
+    """Teardown runs from several paths at once -- a release arriving just
+    after the module closed, say. One that throws is how the state stuck."""
+    _modulated_filter(fixture)
+    _ring_press(fixture)
+    assert fixture.layer._cancel_depth_drag() is not None
+    assert fixture.layer._cancel_depth_drag() is None
+    fixture.layer._end_depth_drag()  # must not raise
+    assert fixture.layer._depth_drag is None
+
+
+def test_teardown_survives_a_grabbed_widget_that_is_already_gone(fixture):
+    _modulated_filter(fixture)
+    _ring_press(fixture)
+
+    class _Dead:
+        def releaseMouse(self):
+            raise RuntimeError("Internal C++ object already deleted.")
+
+    fixture.layer._depth_drag["grabbed"] = _Dead()
+    fixture.layer._end_depth_drag()
+    assert fixture.layer._depth_drag is None
+    assert fixture.layer._turning is None
+
+
+# -- the same wedge in the connect gesture --------------------------------
+#
+# A live `_drag` suppresses cable hover and blocks both unplugging and ring
+# drags, so one left set is the dead-mouse bug again. It is driven by
+# `SocketWidget`'s own move/release events, which stop arriving the moment
+# that socket is destroyed with its module.
+
+def _armed(fixture):
+    osc = fixture.open(_poly("osc1", "OSC 1"))
+    fixture.open(_poly("filter", "FILTER"), at=(400, 40))
+    fixture.layer.relayout()
+    socket = fixture.sockets("osc1", "out")[0]
+    fixture.layer._on_socket_pressed(socket)
+    assert fixture.layer._drag is not None
+    return osc, socket
+
+
+def test_closing_the_module_being_dragged_from_cancels_the_connect(fixture):
+    osc, _socket = _armed(fixture)
+    fixture.canvas.windowRemoved.emit(osc)
+    assert fixture.layer._drag is None
+
+
+def test_a_move_with_no_button_held_cancels_a_stranded_connect(fixture):
+    _armed(fixture)
+    fixture.layer.eventFilter(
+        fixture.canvas,
+        _mouse_event(QtCore.QEvent.MouseMove, (500, 500),
+                     buttons=QtCore.Qt.NoButton))
+    assert fixture.layer._drag is None
+
+
+def test_a_stranded_connect_does_not_block_unplugging(fixture):
+    _armed(fixture)
+    cable = fixture.layer.graph.connect("osc1", pg.Target("socket", "filter"))
+    fixture.layer.relayout()
+    fixture.layer._tick()
+    fixture.layer.eventFilter(
+        fixture.canvas,
+        _mouse_event(QtCore.QEvent.MouseMove, (500, 500),
+                     buttons=QtCore.Qt.NoButton))
+    point = fixture.layer._curve(cable)[0]
+    assert fixture.layer._try_unplug(
+        fixture.canvas,
+        _mouse_event(QtCore.QEvent.MouseButtonPress, point)) is True
+
+
+def test_cancelling_a_connect_leaves_no_jack_lit(fixture):
+    """`_set_target(None)` returns early once `_drag` is None, so clearing
+    has to happen without it or a jack stays lit with nothing to explain
+    it."""
+    _armed(fixture)
+    fixture.layer._set_target(pg.Target("socket", "filter"))
+    assert any(s.state for s in fixture.layer._sockets.values())
+    fixture.layer._cancel_cable_drag()
+    assert not any(s.state for s in fixture.layer._sockets.values())
+
+
+def test_cancelling_a_connect_twice_is_harmless(fixture):
+    _armed(fixture)
+    assert fixture.layer._cancel_cable_drag() is not None
+    assert fixture.layer._cancel_cable_drag() is None
+    fixture.layer.drag_release(QtCore.QPoint(10, 10))  # must not raise
+    assert fixture.layer._drag is None
+
+
+def test_a_normal_connect_still_completes(fixture):
+    """The guard rails must not cost the gesture they protect."""
+    fixture.open(_poly("osc1", "OSC 1"))
+    fixture.open(_poly("filter", "FILTER"), at=(400, 40))
+    _drag(fixture, "osc1", pg.Target("socket", "filter"))
+
+    assert fixture.layer._drag is None
+    assert [(c.source, c.dest) for c in fixture.layer.graph.cables] == [("osc1", "filter")]
+    assert not any(s.state for s in fixture.layer._sockets.values())
+
+
 # -- unplugging ---------------------------------------------------------
 
 def test_clicking_a_cable_pulls_it_out(fixture):
